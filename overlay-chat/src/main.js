@@ -2,6 +2,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── Tauri v2 API 初始化 ──
   const { getCurrentWindow } = window.__TAURI__.window;
   const { register, unregisterAll } = window.__TAURI__.globalShortcut;
+  const { Command } = window.__TAURI__.shell;
 
   const closeBtn = document.getElementById("closeBtn");
   const sendBtn = document.getElementById("sendBtn");

@@ -33,6 +33,17 @@ from transformers import AutoProcessor, TextIteratorStreamer, AutoConfig, Genera
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.gemma.configuration_gemma import GemmaConfig
 
+# --- 路徑處理 (支援打包環境) ---
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        # 打包環境：.exe 所在的目錄
+        return os.path.dirname(sys.executable)
+    # 開發環境
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = get_base_path()
+MODELS_ROOT = os.path.join(BASE_DIR, "models")
+
 # --- 命令列參數解析 ---
 parser = argparse.ArgumentParser(description="iGPU VLM Backend")
 parser.add_argument("--model", type=str, default="gemma4", choices=["gemma4", "qwen3"], help="Select model: gemma4 or qwen3")
@@ -146,17 +157,12 @@ def apply_transformers_video_patch():
         print(f"Warning: Failed to apply Transformers patch: {e}")
 
 def get_model_paths(target_model):
-    if getattr(sys, 'frozen', False):
-        base_path = os.path.dirname(sys.executable)
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    
     if target_model == "gemma4":
-        vlm_path = os.path.join(base_path, "models", "gemma-4-E4B-ov")
+        vlm_path = os.path.join(MODELS_ROOT, "gemma-4-E4B-ov")
     else:
-        vlm_path = os.path.join(base_path, "models", "Qwen3-VL-8B-openvino-int4")
+        vlm_path = os.path.join(MODELS_ROOT, "Qwen3-VL-8B-openvino-int4")
         
-    whisper_path = os.path.join(base_path, "models", "whisper-base-ov")
+    whisper_path = os.path.join(MODELS_ROOT, "whisper-base-ov")
     return vlm_path, whisper_path
 
 # --- 初始化執行 ---
