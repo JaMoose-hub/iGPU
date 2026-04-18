@@ -1,4 +1,5 @@
-// tauri-plugin-global-shortcut 透過 JS API 操作，Rust 端只需初始化即可
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri::Emitter;
 
 // WDA_EXCLUDEFROMCAPTURE = 0x11，告訴 Windows 截圖時忽略這個視窗
 #[cfg(windows)]
@@ -8,8 +9,22 @@ const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let _ = app.emit("voice-hotkey-start", ());
+                    } else if event.state() == ShortcutState::Released {
+                        let _ = app.emit("voice-hotkey-stop", ());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
+            // 註冊 F8 快捷鍵
+            let f8 = Shortcut::new(None, Code::F8);
+            let _ = app.global_shortcut().register(f8);
+
             // 在 Windows 上設定視窗截圖排除
             #[cfg(windows)]
             {

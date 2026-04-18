@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+mss
+Pillow
+numpy
+openvino>=2024.5.0
+openvino-genai
+librosa
+soundfile
+python-multipart

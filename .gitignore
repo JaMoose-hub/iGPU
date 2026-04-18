@@ -1,14 +1,30 @@
-# --- AI Models (大型模型檔案，絕對不要進 Git) ---
+# --- AI Models & Heavy Data (絕對不要進 Git) ---
+models/
+model_cache/
 *-openvino-int4/
-TinyLlama-1.1B-int4/
+*-ov/
+*.bin
+*.xml
+*.xml.bin
+*.onnx
+
+# --- Scratch & Temp ---
+scratch/
+*.log
+tmp/
+temp/
 
 # --- Python / Environments ---
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+env/
+venv/
+ENV/
 .env
 .pytest_cache/
+.mypy_cache/
 
 # --- PyInstaller / Packaging ---
 dist/
@@ -20,10 +36,13 @@ rustup-init.exe
 node_modules/
 overlay-chat/node_modules/
 overlay-chat/dist/
+package-lock.json
 
 # --- Rust / Tauri (編譯產物非常巨大) ---
 overlay-chat/src-tauri/target/
 overlay-chat/src-tauri/bin/
+overlay-chat/src-tauri/gen/
+target/
 
 # --- OS / IDE ---
 .DS_Store
@@ -31,3 +50,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+*.bak
+.directory
