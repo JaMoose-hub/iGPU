@@ -1,0 +1,33 @@
+# --- AI Models (大型模型檔案，絕對不要進 Git) ---
+*-openvino-int4/
+TinyLlama-1.1B-int4/
+
+# --- Python / Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+.pytest_cache/
+
+# --- PyInstaller / Packaging ---
+dist/
+build/
+*.spec
+rustup-init.exe
+
+# --- Node.js / Frontend ---
+node_modules/
+overlay-chat/node_modules/
+overlay-chat/dist/
+
+# --- Rust / Tauri (編譯產物非常巨大) ---
+overlay-chat/src-tauri/target/
+overlay-chat/src-tauri/bin/
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

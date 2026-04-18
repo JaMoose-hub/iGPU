@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Qwen Overlay Chat</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <main class="container">
+    <h1>Welcome to Tauri</h1>
+
+    <div class="row">
+      <a href="https://tauri.app" target="_blank">
+        <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
+      </a>
+      <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript" target="_blank">
+        <img src="/assets/javascript.svg" class="logo vanilla" alt="JavaScript logo" />
+      </a>
+    </div>
+    <span class="shortcut-hint" data-tauri-drag-region>F9 截圖</span>
+    <button id="closeBtn" class="close-btn">✕</button>
+    </div>
+    </div>
+
+    <!-- 聊天對話框 -->
+    <div id="chatWindow" class="chat-window">
+      <div class="message bot-message">
+        您好！我是 Qwen 大語言模型助理，有什麼我可以幫忙的嗎？<br>
+        <small style="opacity:0.6">💡 按 F9 或點 📷 按鈕可截圖並詢問 AI</small>
+      </div>
+    </div>
+
+    <!-- 影像預覽區域 (截圖後暫存在此) -->
+    <div id="imagePreviewArea" class="image-preview-area" style="display: none;">
+      <div class="preview-container">
+        <img id="previewImg" src="" />
+        <button id="removeImgBtn" class="remove-img-btn">✕</button>
+      </div>
+    </div>
+
+    <!-- 輸入區域 -->
+    <div class="input-area">
+      <button id="screenshotBtn" class="screenshot-btn" title="截圖全螢幕 (F9)">📷</button>
+      <input type="text" id="messageInput" placeholder="輸入訊息，或按 F9 截圖..." />
+      <button id="stopBtn" class="stop-btn" style="display: none;">停止</button>
+      <button id="sendBtn">發送</button>
+    </div>
+
+    <script type="module" src="/main.js"></script>
+</body>
+
+</html>

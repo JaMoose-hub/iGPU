@@ -1,0 +1,307 @@
+/* 背景透明化與 Glassmorphism 設計 */
+:root {
+  --glass-opacity: 0.75;
+  --glass-bg: rgba(30, 30, 35, var(--glass-opacity));
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --text-main: #f0f0f0;
+  --accent: #646cff;
+  --font-family: 'Segoe UI', Inter, Roboto, sans-serif;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  /* 為了達到透明效果，背景必須設定為完全透明 */
+  background-color: transparent !important;
+  font-family: var(--font-family);
+  overflow: hidden; /* 防止整個視窗滾動 */
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  /* 毛玻璃主體 */
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-sizing: border-box;
+}
+
+/* 頂端可拖曳區域 */
+.drag-bar {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--glass-border);
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  user-select: none;
+  /* 設定這層為 Tauri 專用的拖曳區 */
+}
+
+.drag-bar .title {
+  color: var(--text-main);
+  font-weight: 600;
+  font-size: 15px;
+  pointer-events: none; /* 讓點擊事件穿透到背後拖曳區 */
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: #a0a0a0;
+  font-size: 16px;
+  cursor: pointer;
+  transition: color 0.2s;
+  padding: 4px;
+}
+.close-btn:hover {
+  color: #ff5f56;
+}
+
+/* 聊天框 */
+.chat-window {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 自訂捲軸 */
+.chat-window::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-window::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+/* 對話泡泡 */
+.message {
+  padding: 10px 14px;
+  border-radius: 12px;
+  max-width: 85%;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-main);
+  word-wrap: break-word;
+  animation: slideIn 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.user-message {
+  align-self: flex-end;
+  background: var(--accent);
+  border-bottom-right-radius: 4px;
+}
+
+.bot-message {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.1);
+  border-bottom-left-radius: 4px;
+}
+
+/* 頂端 actions 區 */
+.drag-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 透明度控制器 */
+.opacity-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.05);
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.opacity-slider {
+  -webkit-appearance: none;
+  width: 60px;
+  height: 4px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
+  outline: none;
+}
+
+.opacity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 5px rgba(0,0,0,0.3);
+}
+
+.opacity-slider::-webkit-slider-thumb:hover {
+  background: var(--accent);
+}
+
+.shortcut-hint {
+  font-size: 11px;
+  color: rgba(255,255,255,0.35);
+  pointer-events: none;
+}
+
+/* 截圖按鈕 */
+.screenshot-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: white;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 10px;
+  height: 100%;
+  transition: background 0.2s, transform 0.1s;
+  flex-shrink: 0;
+}
+.screenshot-btn:hover { background: rgba(255, 255, 255, 0.2); }
+.screenshot-btn:active { transform: scale(0.9); }
+
+/* 截圖預覽圖泡泡 */
+.screenshot-preview {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-top: 6px;
+  opacity: 0.9;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+/* 輸入區域 */
+
+.input-area {
+  display: flex;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.15);
+  border-top: 1px solid var(--glass-border);
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 16px;
+  gap: 8px;
+}
+
+input[type="text"] {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s, background 0.2s;
+  font-family: var(--font-family);
+}
+input[type="text"]:focus {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+button#sendBtn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+}
+button#sendBtn:hover { opacity: 0.9; }
+button#sendBtn:active { transform: scale(0.95); }
+/* --- 截圖預覽區域 --- */
+.image-preview-area {
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+}
+
+.preview-container {
+  position: relative;
+  width: 100px;
+  height: 60px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+.preview-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.2s;
+}
+
+.preview-container img:hover {
+  transform: scale(1.1);
+}
+
+.remove-img-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  color: white;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: background 0.2s;
+}
+.remove-img-btn:hover {
+  background: #ff4742;
+}
+
+/* --- 停止按鈕 --- */
+.stop-btn {
+  background: #ff4742 !important;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+.stop-btn:hover {
+  background: #e03e3a !important;
+}
+.stop-btn:active {
+  transform: scale(0.95);
+}
+
+/* 訊息圖片微調 */
+.bot-message img, .user-message img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-top: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
