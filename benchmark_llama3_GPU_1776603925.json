@@ -1,0 +1,38 @@
+{
+  "device": "GPU",
+  "model": "Llama-3.1-8B-Instruct-ov-int4",
+  "load_time_s": 29.71613079999952,
+  "peak_rss_mb": 5297.1328125,
+  "results": [
+    {
+      "scenario": "text",
+      "prompt_desc": "Short Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 6,
+      "ttft_ms": 0.0,
+      "e2e_ms": 1787.212549999822,
+      "tps": 3.966758559170044,
+      "success": true
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Medium Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 99,
+      "ttft_ms": 0.0,
+      "e2e_ms": 10161.977099996875,
+      "tps": 9.80297593115813,
+      "success": true
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Long Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 93,
+      "ttft_ms": 0.0,
+      "e2e_ms": 10568.643949998659,
+      "tps": 8.841280204284914,
+      "success": true
+    }
+  ]
+}
