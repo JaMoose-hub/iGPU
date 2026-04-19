@@ -46,10 +46,12 @@ MODELS_ROOT = os.path.join(BASE_DIR, "models")
 
 # --- 命令列參數解析 ---
 parser = argparse.ArgumentParser(description="iGPU VLM Backend")
-parser.add_argument("--model", type=str, default="gemma4", choices=["gemma4", "qwen3"], help="Select model: gemma4 or qwen3")
+parser.add_argument("model_pos", type=str, nargs="?", help="Select model: gemma4 or qwen3 (positional)")
+parser.add_argument("--model", type=str, help="Select model: gemma4 or qwen3 (flag)")
 args, unknown = parser.parse_known_args()
 
-SELECTED_MODEL = args.model
+# 優先順序：--model 標籤 > 位置參數 > 預設 gemma4
+SELECTED_MODEL = args.model or args.model_pos or "gemma4"
 DEVICE = "GPU" # 如果 GPU 跑不動，會自動回退到 CPU
 
 # --- 修復與註冊專區 ---
@@ -136,6 +138,14 @@ def apply_gemma4_hacks():
     GenerationConfig.from_model_config = patched_from_model_config
     print("Applied ROBUST GenerationConfig monkey patch for Gemma-4.")
 
+def apply_qwen3_hacks():
+    """僅在選用 Qwen3 時執行的架構註冊"""
+    from optimum.intel.openvino.modeling_visual_language import MODEL_TYPE_TO_CLS_MAPPING, _OVQwen2_5_VLForCausalLM
+    if "qwen3_vl" not in MODEL_TYPE_TO_CLS_MAPPING:
+        # 使用 Qwen2.5-VL 的具體實作類別來處理 Qwen3-VL
+        MODEL_TYPE_TO_CLS_MAPPING["qwen3_vl"] = _OVQwen2_5_VLForCausalLM
+        print("Registered 'qwen3_vl' architecture as Qwen2.5-VL compatible in Optimum-Intel.")
+
 def apply_transformers_video_patch():
     """修復 Transformers 庫在處理 Qwen3-VL 影像處理器時的 NoneType 迭代錯誤"""
     try:
@@ -170,6 +180,8 @@ apply_transformers_video_patch()
 
 if SELECTED_MODEL == "gemma4":
     apply_gemma4_hacks()
+elif SELECTED_MODEL == "qwen3":
+    apply_qwen3_hacks()
 
 VLM_MODEL_PATH, WHISPER_MODEL_PATH = get_model_paths(SELECTED_MODEL)
 if not os.path.exists(VLM_MODEL_PATH):
