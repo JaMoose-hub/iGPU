@@ -1,0 +1,38 @@
+{
+  "device": "GPU",
+  "model": "Qwen2.5-7B-Instruct-openvino-int4",
+  "load_time_s": 5.384400899994944,
+  "peak_rss_mb": 4698.1953125,
+  "results": [
+    {
+      "scenario": "text",
+      "prompt_desc": "Short Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 6,
+      "ttft_ms": 0.0,
+      "e2e_ms": 1538.8263999993796,
+      "tps": 4.627462746152201,
+      "success": true
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Medium Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 99,
+      "ttft_ms": 0.0,
+      "e2e_ms": 11253.144399997836,
+      "tps": 8.848240103438071,
+      "success": true
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Long Prompt",
+      "prompt_tokens": 0,
+      "gen_tokens": 81,
+      "ttft_ms": 0.0,
+      "e2e_ms": 11052.62004999895,
+      "tps": 7.38198462433056,
+      "success": true
+    }
+  ]
+}

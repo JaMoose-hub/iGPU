@@ -61,7 +61,8 @@ def run_benchmark(model_path: str, device: str, max_tokens: int, rounds: int):
         p(f"[ERROR] Model path not found: {model_path}", C.RED)
         return
 
-    header("Loading Llama 3.1 8B OpenVINO Model")
+    model_name = model_path.name
+    header(f"Loading {model_name} OpenVINO Model")
     p(f"[Path]   {model_path}", C.GRAY)
     p(f"[Device] {device}", C.GRAY)
 
@@ -166,7 +167,7 @@ def run_benchmark(model_path: str, device: str, max_tokens: int, rounds: int):
         ))
 
     # Save report
-    report_path = f"benchmark_llama3_{device}_{int(time.time())}.json"
+    report_path = f"benchmark_{model_name}_{device}_{int(time.time())}.json"
     with open(report_path, "w") as f:
         json.dump(asdict(report), f, indent=2)
     p(f"\n[SAVED] {report_path}", C.GREEN)
