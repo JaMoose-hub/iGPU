@@ -1,0 +1,63 @@
+{
+  "device": "GPU",
+  "model": "Qwen3-VL-8B-INT4",
+  "load_time_s": 19.883986299999833,
+  "peak_rss_mb": 11355.22265625,
+  "results": [
+    {
+      "scenario": "text",
+      "prompt_desc": "Short Text (1 sentence)",
+      "prompt_tokens": 15,
+      "gen_tokens": 27,
+      "ttft_ms": 457.57546666663984,
+      "e2e_ms": 3161.01476666654,
+      "tps": 8.544528390619744,
+      "success": true,
+      "error": ""
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Medium Text (paragraph)",
+      "prompt_tokens": 36,
+      "gen_tokens": 201,
+      "ttft_ms": 1022.3575333334338,
+      "e2e_ms": 22324.837866666712,
+      "tps": 9.003940707890342,
+      "success": true,
+      "error": ""
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Long Text (detailed analysis)",
+      "prompt_tokens": 89,
+      "gen_tokens": 201,
+      "ttft_ms": 2313.1470333334314,
+      "e2e_ms": 23534.559433333317,
+      "tps": 8.541110537032415,
+      "success": true,
+      "error": ""
+    },
+    {
+      "scenario": "text",
+      "prompt_desc": "Chinese QA",
+      "prompt_tokens": 50,
+      "gen_tokens": 201,
+      "ttft_ms": 1395.3918666669172,
+      "e2e_ms": 22300.04740000034,
+      "tps": 9.01409186524908,
+      "success": true,
+      "error": ""
+    },
+    {
+      "scenario": "stress",
+      "prompt_desc": "Throughput Stress (10 rounds)",
+      "prompt_tokens": 0,
+      "gen_tokens": 1010,
+      "ttft_ms": 0.0,
+      "e2e_ms": 129704.78029999958,
+      "tps": 8.233806615458876,
+      "success": true,
+      "error": ""
+    }
+  ]
+}
