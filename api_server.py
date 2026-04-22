@@ -27,8 +27,8 @@ import openvino as ov
 import openvino_genai as ov_genai
 from openvino import opset12 as opset
 
-# Gemma-4 專用庫 (via Optimum Intel)
-from optimum.intel.openvino import OVModelForVisualCausalLM
+# Gemma-4 / Qwen3-VL 視覺庫 (via Optimum Intel)
+from optimum.intel.openvino import OVModelForVisualCausalLM, OVModelForCausalLM
 from transformers import AutoProcessor, TextIteratorStreamer, AutoConfig, GenerationConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.gemma.configuration_gemma import GemmaConfig
@@ -52,6 +52,7 @@ args, unknown = parser.parse_known_args()
 
 # 優先順序：--model 標籤 > 位置參數 > 預設 gemma4
 SELECTED_MODEL = args.model or args.model_pos or "gemma4"
+IS_VISION_MODEL = "vl" in SELECTED_MODEL.lower() or "gemma" in SELECTED_MODEL.lower()
 DEVICE = "GPU" # 如果 GPU 跑不動，會自動回退到 CPU
 
 # --- 修復與註冊專區 ---
@@ -169,6 +170,8 @@ def apply_transformers_video_patch():
 def get_model_paths(target_model):
     if target_model == "gemma4":
         vlm_path = os.path.join(MODELS_ROOT, "gemma-4-E4B-ov")
+    elif target_model == "qwen2.5":
+        vlm_path = os.path.join(MODELS_ROOT, "Qwen2.5-7B-Instruct-openvino-int4")
     else:
         vlm_path = os.path.join(MODELS_ROOT, "Qwen3-VL-8B-openvino-int4")
         
@@ -209,9 +212,30 @@ app.add_middleware(
 )
 
 # --- 模型與狀態初始化 ---
-model = None
+# 全域狀態
+model = None          # 用於儲存 Optimum 模型 (Gemma-4) 或 GenAI Pipeline (Qwen3)
 processor = None
 tokenizer = None
+
+# --- OpenVINO GenAI 專用串流器 ---
+class GenAIStreamer(ov_genai.StreamerBase):
+    """將 ov_genai 的串流 Token 轉導至非同步隊列"""
+    def __init__(self, queue, event_loop):
+        super().__init__()
+        self.queue = queue
+        self.loop = event_loop
+
+    def write(self, token: str) -> bool:
+        # ov_genai 會從背景 thread 呼叫此方法
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, token)
+        return False # False 表示繼續生成
+
+def pil_to_ov_tensor(pil_image):
+    """將 PIL 圖片轉換為 OpenVINO GenAI 接受的 Tensor 格式"""
+    import numpy as np
+    # GenAI 預期的是 RGB 格式的 numpy array [H, W, C]
+    img_array = np.array(pil_image)
+    return ov_genai.Tensor(img_array)
 
 def load_vlm_components(path, model_type):
     """
@@ -227,86 +251,86 @@ def load_vlm_components(path, model_type):
     except Exception as e:
         print(f"Warning: Failed to load tokenizer: {e}")
         
-    # 2. 嘗試載入 Processor
-    try:
-        # 嘗試標準方式
-        local_processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
-    except Exception as e:
-        print(f"AutoProcessor failed: {e}. Attempting manual construction...")
-        # 針對 Qwen 家族的手動修復
+    # 2. 嘗試載入 Processor (僅視覺模型需要)
+    if IS_VISION_MODEL:
         try:
-            from transformers import Qwen2VLImageProcessorFast, Qwen2VLProcessor, Qwen2VLImageProcessor
-            print("Attempting to load Qwen2VLImageProcessorFast (requires torchvision)...")
+            # 嘗試標準方式
+            local_processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+        except Exception as e:
+            print(f"AutoProcessor failed: {e}. Attempting manual construction...")
+            # 針對 Qwen 家族的手動修復
             try:
-                img_proc = Qwen2VLImageProcessorFast.from_pretrained(path)
-            except Exception as e:
-                print(f"Fast processor failed ({e}). Falling back to standard Qwen2VLImageProcessor...")
-                img_proc = Qwen2VLImageProcessor.from_pretrained(path)
-            
-            local_processor = Qwen2VLProcessor(img_proc, local_tokenizer)
-            print("Successfully manually constructed Qwen-family processor.")
-        except Exception as inner_e:
-            print(f"Manual processor construction failed: {inner_e}")
+                from transformers import Qwen2VLImageProcessorFast, Qwen2VLProcessor, Qwen2VLImageProcessor
+                print("Attempting to load Qwen2VLImageProcessorFast...")
+                try:
+                    img_proc = Qwen2VLImageProcessorFast.from_pretrained(path)
+                except Exception:
+                    img_proc = Qwen2VLImageProcessor.from_pretrained(path)
+                
+                local_processor = Qwen2VLProcessor(img_proc, local_tokenizer)
+            except Exception as inner_e:
+                print(f"Manual processor construction failed: {inner_e}")
+    else:
+        # 純文字模型，Processor 其實就是 Tokenizer 的包裝
+        local_processor = local_tokenizer
         
     if not local_processor:
-        raise RuntimeError("Could not load a valid VLM processor. Please check your environment.")
+        raise RuntimeError("Could not load a valid VLM/LLM processor. Please check your environment.")
         
     return local_processor, local_tokenizer
 
 print(f"Loading VLM components for {SELECTED_MODEL}...")
 try:
-    processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
-    
-    # 手動建立 Config
-    if SELECTED_MODEL == "gemma4":
-        config = GemmaConfig.from_pretrained(VLM_MODEL_PATH)
+    if SELECTED_MODEL == "qwen3":
+        # --- Qwen3-VL: 使用專屬的 GenAI VLMPipeline (最穩定) ---
+        print(f"Initializing OpenVINO GenAI VLMPipeline on {DEVICE}...")
+        model = ov_genai.VLMPipeline(VLM_MODEL_PATH, DEVICE)
+        # GenAI Pipeline 內建了 Tokenizer 與 Processor 功能
+        processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
     else:
-        config = AutoConfig.from_pretrained(VLM_MODEL_PATH)
-    
-    # 執行補丁 (僅在 Gemma-4 + GPU 下執行)
-    target_path = VLM_MODEL_PATH
-    if SELECTED_MODEL == "gemma4" and DEVICE == "GPU":
-        patched_path = patch_model_for_gpu_precision(VLM_MODEL_PATH, "openvino_language_model.xml")
-        if patched_path: target_path = patched_path
-
-    ov_config = {
-        "INFERENCE_PRECISION_HINT": "f16", 
-        "CACHE_DIR": "model_cache",
-    }
-    
-    # 載入 Model (嘗試在 GPU 執行)
-    model = OVModelForVisualCausalLM.from_pretrained(
-        target_path, 
-        device=DEVICE,
-        config=config,
-        ov_config=ov_config,
-        trust_remote_code=True
-    )
-    print(f"VLM model {SELECTED_MODEL} loaded successfully on {DEVICE}!")
-except Exception as e:
-    print(f"Failed to load VLM on {DEVICE}: {e}. Retrying on CPU...")
-    
-    # --- 記憶體優化：清理失敗的 GPU 物件 ---
-    if 'model' in locals() and model is not None:
-        del model
-    gc.collect() 
-    
-    # CPU 模式下確保組件完整
-    if not processor or not tokenizer:
+        # --- 其他模型 (如 Gemma-4): 使用 Optimum-Intel 載入 ---
         processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
         
-    if SELECTED_MODEL == "gemma4":
-        config = GemmaConfig.from_pretrained(VLM_MODEL_PATH)
-    else:
-        config = AutoConfig.from_pretrained(VLM_MODEL_PATH)
+        # 建立 Config 與 載入
+        config = (GemmaConfig.from_pretrained(VLM_MODEL_PATH) 
+                 if SELECTED_MODEL == "gemma4" else AutoConfig.from_pretrained(VLM_MODEL_PATH))
         
-    model = OVModelForVisualCausalLM.from_pretrained(
-        VLM_MODEL_PATH, 
-        device="CPU",
-        config=config,
-        trust_remote_code=True
-    )
-    print(f"VLM model {SELECTED_MODEL} loaded on CPU!")
+        target_path = VLM_MODEL_PATH
+        if SELECTED_MODEL == "gemma4" and DEVICE == "GPU":
+            patched_path = patch_model_for_gpu_precision(VLM_MODEL_PATH, "openvino_language_model.xml")
+            if patched_path: target_path = patched_path
+
+        ov_config = {"INFERENCE_PRECISION_HINT": "f16", "CACHE_DIR": "model_cache"}
+        ModelClass = OVModelForVisualCausalLM if IS_VISION_MODEL else OVModelForCausalLM
+        
+        model = ModelClass.from_pretrained(
+            target_path, 
+            device=DEVICE,
+            config=config,
+            ov_config=ov_config,
+            trust_remote_code=True,
+            file_name="openvino_language_model.xml" if IS_VISION_MODEL else None
+        )
+    print(f"Model {SELECTED_MODEL} loaded successfully on {DEVICE}!")
+except Exception as e:
+    print(f"Failed to load VLM on {DEVICE}: {e}. Retrying on CPU...")
+    # 清理資源
+    if 'model' in locals() and model is not None: del model
+    gc.collect() 
+    
+    if SELECTED_MODEL == "qwen3":
+        model = ov_genai.VLMPipeline(VLM_MODEL_PATH, "CPU")
+        if not processor: processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+    else:
+        if not processor: processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+        config = (GemmaConfig.from_pretrained(VLM_MODEL_PATH) 
+                 if SELECTED_MODEL == "gemma4" else AutoConfig.from_pretrained(VLM_MODEL_PATH))
+        ModelClass = OVModelForVisualCausalLM if IS_VISION_MODEL else OVModelForCausalLM
+        model = ModelClass.from_pretrained(
+            VLM_MODEL_PATH, device="CPU", config=config, trust_remote_code=True,
+            file_name="openvino_language_model.xml" if IS_VISION_MODEL else None
+        )
+    print(f"Model {SELECTED_MODEL} loaded on CPU!")
 
 # --- Whisper 初始化 (用於語音輸入) ---
 whisper_pipe = None
@@ -345,7 +369,7 @@ class OpenAICompletionRequest(BaseModel):
     model: str
     messages: list[OpenAIMessage]
     stream: Optional[bool] = False
-    max_tokens: Optional[int] = 1024
+    max_tokens: Optional[int] = 8192
     temperature: Optional[float] = 0.7
 
 # --- API 端點 ---
@@ -396,7 +420,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
     
     prompt_text = chat_request.message or "請分析這張截圖。"
     image = None
-    if chat_request.image_base64:
+    if chat_request.image_base64 and IS_VISION_MODEL:
         try:
             if "," in chat_request.image_base64:
                 chat_request.image_base64 = chat_request.image_base64.split(",")[1]
@@ -405,6 +429,8 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             image.thumbnail((768, 768), Image.Resampling.LANCZOS)
         except Exception as e:
             print(f"Image decode error: {e}")
+    elif chat_request.image_base64 and not IS_VISION_MODEL:
+        print("💡 Current model is text-only. Ignoring image.")
 
     # 加入使用者訊息
     if SELECTED_MODEL == "qwen3":
@@ -444,70 +470,95 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         history = [history[0]] + history[-20:]
 
     async def event_generator():
-        # 1. 收集歷史紀錄中所有的影像
-        all_images = []
-        for msg in history:
-            if "images" in msg and msg["images"]:
-                all_images.extend(msg["images"])
-        
-        # 2. 套用 Chat Template
-        full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
-        
-        # 3. 準備輸入（文字 + 所有的影像清單）
-        # 確保 images 參數：如果沒圖就傳 None，有一張傳物件，多張傳列表
-        target_images = None
-        if all_images:
-            target_images = all_images if len(all_images) > 1 else all_images[0]
+        if SELECTED_MODEL == "qwen3":
+            # --- 使用 OpenVINO GenAI VLMPipeline 生成 ---
+            queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+            streamer = GenAIStreamer(queue, loop)
             
-        try:
-            inputs = processor(text=full_prompt, images=target_images, return_tensors="pt")
-        except Exception as e:
-            print(f"Processor Error (Tag mismatch?): {e}")
-            yield f"data: {json.dumps({'content': f'❌ 影像處理錯誤: {e}. 請嘗試清除對話紀錄。'})}\n\n"
-            return
+            # 1. 準備輸入影像
+            ov_images = []
+            for msg in history:
+                if "images" in msg and msg["images"]:
+                    ov_images.extend([pil_to_ov_tensor(img) for img in msg["images"]])
 
-        # 串流器
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        
-        # 背景生成
-        generation_kwargs = dict(
-            **inputs,
-            streamer=streamer,
-            max_new_tokens=1024,
-            do_sample=False
-        )
+            # 2. 準備輸入文字
+            full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
 
-        def generate_in_thread():
-            try:
-                model.generate(**generation_kwargs)
-            except Exception as e:
-                print(f"Generation Thread Error: {e}")
-                # 這裡不噴 yield，因為是在不同 Thread
+            def generate_in_thread():
+                try:
+                    # 修正：GenAI 不接受 images=None。如果沒圖就完全不傳該參數。
+                    if ov_images:
+                        model.generate(full_prompt, images=ov_images, streamer=streamer, max_new_tokens=8192)
+                    else:
+                        model.generate(full_prompt, streamer=streamer, max_new_tokens=8192)
+                except Exception as e:
+                    print(f"GenAI Thread Error: {e}")
+                finally:
+                    # 無論成功失敗都必須發送 None 終止隊列
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        async with generate_lock:
-            thread = Thread(target=generate_in_thread)
-            thread.start()
-            
-            collected_response = ""
-            try:
-                while True:
-                    if await fastapi_request.is_disconnected():
-                        break
-                    
-                    token = await asyncio.to_thread(lambda: next(streamer, None))
-                    if token is None:
-                        break
-                    
-                    collected_response += token
-                    yield f"data: {json.dumps({'content': token})}\n\n"
-                    # 移除人為延遲，實現最高速串流
+            async with generate_lock:
+                thread = Thread(target=generate_in_thread)
+                thread.start()
                 
-                if collected_response:
-                    history.append({"role": "assistant", "content": collected_response})
-            finally:
-                thread.join()
-                # 每一輪對話後進行強制記憶體回收
-                gc.collect()
+                collected_response = ""
+                try:
+                    while True:
+                        if await fastapi_request.is_disconnected(): break
+                        token = await queue.get()
+                        if token is None: break
+                        collected_response += token
+                        yield f"data: {json.dumps({'content': token})}\n\n"
+                    
+                    if collected_response:
+                        history.append({"role": "assistant", "content": collected_response})
+                finally:
+                    thread.join()
+                    gc.collect()
+        else:
+            # --- 使用原本的 Optimum-Intel 邏輯 (Gemma-4 等) ---
+            all_images = []
+            for msg in history:
+                if "images" in msg and msg["images"]:
+                    all_images.extend(msg["images"])
+            
+            full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
+            target_images = all_images if all_images else None
+            if target_images and len(target_images) == 1: target_images = target_images[0]
+                
+            try:
+                if IS_VISION_MODEL:
+                    inputs = processor(text=full_prompt, images=target_images, return_tensors="pt")
+                else:
+                    inputs = tokenizer(full_prompt, return_tensors="pt")
+            except Exception as e:
+                print(f"Processor/Tokenizer Error: {e}")
+                yield f"data: {json.dumps({'content': f'❌ 處理錯誤: {e}.'})}\n\n"
+                return
+
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            generation_kwargs = dict(**inputs, streamer=streamer, max_new_tokens=8192, do_sample=False)
+
+            def generate_in_thread():
+                try: model.generate(**generation_kwargs)
+                except Exception as e: print(f"Generation Thread Error: {e}")
+
+            async with generate_lock:
+                thread = Thread(target=generate_in_thread)
+                thread.start()
+                collected_response = ""
+                try:
+                    while True:
+                        if await fastapi_request.is_disconnected(): break
+                        token = await asyncio.to_thread(lambda: next(streamer, None))
+                        if token is None: break
+                        collected_response += token
+                        yield f"data: {json.dumps({'content': token})}\n\n"
+                    if collected_response: history.append({"role": "assistant", "content": collected_response})
+                finally:
+                    thread.join()
+                    gc.collect()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -568,9 +619,9 @@ async def openai_chat_endpoint(fastapi_request: Request, request: OpenAICompleti
                 new_msg = {"role": "user", "content": int_content, "images": [latest_image] if latest_image else []}
             else:
                 final_text = full_text
-                if latest_image and "<image>" not in final_text:
+                if IS_VISION_MODEL and latest_image and "<image>" not in final_text:
                     final_text = "<image>\n" + final_text
-                new_msg = {"role": "user", "content": final_text, "images": [latest_image] if latest_image else []}
+                new_msg = {"role": "user", "content": final_text, "images": [latest_image] if (latest_image and IS_VISION_MODEL) else []}
             new_history.append(new_msg)
         else:
             new_history.append({"role": role, "content": full_text})
@@ -590,7 +641,10 @@ async def openai_chat_endpoint(fastapi_request: Request, request: OpenAICompleti
         if target_images and len(target_images) == 1: target_images = target_images[0]
         
         try:
-            inputs = processor(text=full_prompt, images=target_images, return_tensors="pt")
+            if IS_VISION_MODEL:
+                inputs = processor(text=full_prompt, images=target_images, return_tensors="pt")
+            else:
+                inputs = tokenizer(full_prompt, return_tensors="pt")
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
