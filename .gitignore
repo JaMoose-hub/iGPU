@@ -10,6 +10,11 @@ model_cache/
 
 # --- Scratch & Temp ---
 scratch/
+generated_files/
+logs/
+guide_cache/
+memory_cache/
+game_guides/
 *.log
 tmp/
 temp/

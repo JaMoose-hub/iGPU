@@ -8,14 +8,23 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 
-<body>
+<body style="background: rgba(30, 30, 35, 0.92); color: #f0f0f0;">
   <!-- 頂部拖曳攔 -->
   <div class="drag-bar" data-tauri-drag-region>
     <div class="title" data-tauri-drag-region>遊戲陪伴Beta</div>
     <div class="drag-bar-actions">
-      <button id="perfBtn" class="perf-btn" title="切換效能模式 (開啟/關閉模糊)">⚡</button>
-      <button id="closeBtn" class="close-btn" title="關閉">✕</button>
+      <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize"></button>
+      <button id="maxBtn" class="window-btn max-btn" title="Maximize" aria-label="Maximize"></button>
+      <button id="closeBtn" class="window-btn close-btn" title="Close" aria-label="Close"></button>
     </div>
+  </div>
+
+  <div class="tool-strip">
+    <select id="gameSelect" class="game-select" title="目前遊戲">
+      <option value="">遊戲</option>
+    </select>
+    <button id="hudBtn" class="hud-btn active" title="HUD 指引開關">HUD</button>
+    <button id="perfBtn" class="perf-btn" title="切換效能模式 (開啟/關閉模糊)">⚡</button>
   </div>
 
   <!-- 聊天對話框 -->
@@ -46,6 +55,8 @@
     <button id="stopBtn" class="stop-btn" style="display: none;">停止</button>
     <button id="sendBtn">發送</button>
   </div>
+
+  <button id="resizeGrip" class="resize-grip" title="Resize" aria-label="Resize"></button>
 
   <script type="module" src="/main.js"></script>
 </body>

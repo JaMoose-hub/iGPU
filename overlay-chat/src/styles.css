@@ -40,11 +40,11 @@ body {
 
 /* 頂端可拖曳區域 */
 .drag-bar {
-  height: 48px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 10px 0 14px;
   background: rgba(255, 255, 255, 0.05);
   border-bottom: 1px solid var(--glass-border);
   border-top-left-radius: 16px;
@@ -60,17 +60,72 @@ body {
   pointer-events: none; /* 讓點擊事件穿透到背後拖曳區 */
 }
 
-.close-btn {
-  background: none;
-  border: none;
-  color: #a0a0a0;
-  font-size: 16px;
-  cursor: pointer;
-  transition: color 0.2s;
-  padding: 4px;
+.tool-strip {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: rgba(0, 0, 0, 0.12);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
 }
+
 .close-btn:hover {
   color: #ff5f56;
+  background: rgba(255, 95, 86, 0.1);
+}
+
+.window-btn {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #a0a0a0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, background 0.2s;
+}
+
+.window-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.max-btn::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  box-sizing: border-box;
+}
+
+.min-btn::before {
+  content: "";
+  width: 11px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.close-btn::before,
+.close-btn::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.close-btn::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.close-btn::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .perf-btn {
@@ -163,7 +218,7 @@ body.perf-mode {
 .drag-bar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
 }
 
 /* 透明度控制器 */
@@ -224,20 +279,50 @@ body.perf-mode {
 }
 
 /* 截圖按鈕 */
-.screenshot-btn, .voice-btn {
+.screenshot-btn, .voice-btn, .hud-btn {
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 8px;
   color: white;
-  font-size: 18px;
+  font-size: 14px;
   cursor: pointer;
   padding: 0 10px;
   height: 100%;
   transition: background 0.2s, transform 0.1s;
   flex-shrink: 0;
 }
-.screenshot-btn:hover, .voice-btn:hover { background: rgba(255, 255, 255, 0.2); }
-.screenshot-btn:active, .voice-btn:active { transform: scale(0.9); }
+.screenshot-btn, .voice-btn { font-size: 18px; }
+.screenshot-btn:hover, .voice-btn:hover, .hud-btn:hover { background: rgba(255, 255, 255, 0.2); }
+.screenshot-btn:active, .voice-btn:active, .hud-btn:active { transform: scale(0.9); }
+
+.hud-btn.active {
+  border-color: rgba(0, 229, 255, 0.65);
+  color: #9ff6ff;
+}
+
+.game-select {
+  width: 74px;
+  height: 100%;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 0 6px;
+  outline: none;
+}
+
+.game-select option {
+  background: #202024;
+  color: white;
+}
+
+.tool-strip .game-select,
+.tool-strip .hud-btn,
+.tool-strip .perf-btn {
+  height: 30px;
+}
 
 /* 錄音中狀態 */
 .voice-btn.recording {
@@ -378,4 +463,43 @@ button#sendBtn:active { transform: scale(0.95); }
   border-radius: 8px;
   margin-top: 8px;
   border: 1px solid rgba(255,255,255,0.1);
+}
+
+.resize-grip {
+  position: fixed;
+  right: 4px;
+  bottom: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: nwse-resize;
+  z-index: 30;
+  opacity: 0.65;
+}
+
+.resize-grip::before,
+.resize-grip::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  border-right: 1px solid rgba(255, 255, 255, 0.65);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.65);
+  pointer-events: none;
+}
+
+.resize-grip::before {
+  width: 12px;
+  height: 12px;
+}
+
+.resize-grip::after {
+  width: 7px;
+  height: 7px;
+}
+
+.resize-grip:hover {
+  opacity: 1;
 }

@@ -1,10 +1,14 @@
 document.addEventListener("DOMContentLoaded", async () => {
   // ── Tauri v2 API 初始化 ──
   const { getCurrentWindow } = window.__TAURI__.window;
+  const { WebviewWindow } = window.__TAURI__.webviewWindow;
   const { register, unregisterAll } = window.__TAURI__.globalShortcut;
-  const { Command } = window.__TAURI__.shell;
+  const { invoke } = window.__TAURI__.core;
+  const { listen, emitTo } = window.__TAURI__.event;
 
   const closeBtn = document.getElementById("closeBtn");
+  const minBtn = document.getElementById("minBtn");
+  const maxBtn = document.getElementById("maxBtn");
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
   const messageInput = document.getElementById("messageInput");
@@ -14,12 +18,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const opacitySlider = document.getElementById("opacitySlider");
   const perfBtn = document.getElementById("perfBtn");
   const voiceBtn = document.getElementById("voiceBtn");
+  const gameSelect = document.getElementById("gameSelect");
+  const hudBtn = document.getElementById("hudBtn");
+  const resizeGrip = document.getElementById("resizeGrip");
   
   const imagePreviewArea = document.getElementById("imagePreviewArea");
   const previewImg = document.getElementById("previewImg");
   const removeImgBtn = document.getElementById("removeImgBtn");
 
   const appWindow = getCurrentWindow();
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let hudWindowPromise = null;
+  let hudReady = false;
+  let hudReadyPromise = null;
   
   // ── 透明度初始化與監聽 ──
   const savedOpacity = localStorage.getItem("ui-opacity") || "0.85";
@@ -46,7 +57,154 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // ── 語音輸入 (OpenVINO Whisper) ──
-  const { listen } = window.__TAURI__.event;
+  const guideIntentRe = /(攻略|怎麼打|怎麼走|在哪|哪裡|弱點|任務|素材|材料|路線|指路|地圖|boss|npc|quest|guide|route|map|weakness)/i;
+  let hudEnabled = localStorage.getItem("hud-enabled") !== "false";
+  if (hudBtn) hudBtn.classList.toggle("active", hudEnabled);
+
+  const waitForHudReady = async () => {
+    if (hudReady) return;
+    if (hudReadyPromise) return hudReadyPromise;
+
+    hudReadyPromise = new Promise(async (resolve) => {
+      let settled = false;
+      let unlisten = null;
+      const finish = async () => {
+        if (settled) return;
+        settled = true;
+        hudReady = true;
+        if (unlisten) await unlisten().catch(() => {});
+        resolve();
+      };
+
+      const timeout = setTimeout(finish, 4000);
+      unlisten = await listen("hud:ready", async (event) => {
+        if (event?.payload?.label === "hud") {
+          clearTimeout(timeout);
+          await finish();
+        }
+      }).catch(() => null);
+    });
+
+    return hudReadyPromise;
+  };
+
+  waitForHudReady();
+
+  const ensureHudWindow = async () => {
+    if (hudWindowPromise) return hudWindowPromise;
+
+    hudWindowPromise = (async () => {
+      const existing = await WebviewWindow.getByLabel("hud").catch(() => null);
+      if (existing) {
+        await waitForHudReady();
+        await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
+        return existing;
+      }
+
+      const readyPromise = waitForHudReady();
+      const hudWidth = Math.max(Number(window.screen?.width) || 1280, 1);
+      const hudHeight = Math.max(Number(window.screen?.height) || 720, 1);
+      const hudWindow = new WebviewWindow("hud", {
+        url: "/hud.html",
+        title: "game-guidance-hud",
+        x: 0,
+        y: 0,
+        width: hudWidth,
+        height: hudHeight,
+        transparent: true,
+        decorations: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        focusable: false,
+        resizable: false,
+        visible: false,
+        shadow: false
+      });
+
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(resolve, 2000);
+        hudWindow.once("tauri://created", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        hudWindow.once("tauri://error", (event) => {
+          clearTimeout(timeout);
+          hudWindowPromise = null;
+          reject(event.payload || event);
+        });
+      });
+
+      await readyPromise;
+      await hudWindow.hide().catch(() => {});
+      await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
+      return hudWindow;
+    })();
+
+    return hudWindowPromise;
+  };
+
+  const showHudOverlay = async (overlay) => {
+    if (!hudEnabled || !overlay || !overlay.items || !overlay.items.length) return;
+    try {
+      await ensureHudWindow();
+      await invoke("show_hud_window", {
+        width: Math.max(Number(window.screen?.width) || 1280, 1),
+        height: Math.max(Number(window.screen?.height) || 720, 1)
+      });
+      await emitTo("hud", "hud:show", overlay);
+    } catch (err) {
+      console.warn("HUD show failed:", err);
+    }
+  };
+
+  const clearHudOverlay = async () => {
+    try {
+      if (!hudWindowPromise) return;
+      await ensureHudWindow();
+      await emitTo("hud", "hud:clear");
+      await invoke("hide_hud_window").catch(() => {});
+    } catch (err) {
+      console.warn("HUD clear failed:", err);
+    }
+  };
+
+  if (hudBtn) {
+    hudBtn.addEventListener("click", async () => {
+      hudEnabled = !hudEnabled;
+      localStorage.setItem("hud-enabled", hudEnabled ? "true" : "false");
+      hudBtn.classList.toggle("active", hudEnabled);
+      if (!hudEnabled) await clearHudOverlay();
+    });
+  }
+
+  const loadGuideGames = async () => {
+    if (!gameSelect) return;
+    const savedGameId = localStorage.getItem("currentGameId") || "";
+    try {
+      const resp = await fetch("http://127.0.0.1:8000/guides/games");
+      const data = await resp.json();
+      const games = Array.isArray(data.games) ? data.games : [];
+      gameSelect.innerHTML = '<option value="">遊戲</option>';
+      for (const game of games) {
+        const option = document.createElement("option");
+        option.value = game;
+        option.textContent = game;
+        gameSelect.appendChild(option);
+      }
+      gameSelect.value = savedGameId;
+    } catch (err) {
+      console.warn("Guide game list unavailable:", err);
+    }
+  };
+
+  if (gameSelect) {
+    gameSelect.value = localStorage.getItem("currentGameId") || "";
+    gameSelect.addEventListener("change", () => {
+      localStorage.setItem("currentGameId", gameSelect.value);
+    });
+    loadGuideGames();
+  }
+
   let mediaRecorder = null;
   let audioChunks = [];
 
@@ -169,12 +327,53 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── 頂部可拖曳區域 ──
   if (dragBar) {
     dragBar.addEventListener("mousedown", async (e) => {
-      if (e.target.id === "closeBtn" || e.target.closest(".drag-bar-actions button")) return;
+      if (e.target.closest(".drag-bar-actions")) return;
       await appWindow.startDragging();
     });
   }
 
   // ── 關閉按鈕 ──
+  const toggleMaximize = async () => {
+    try {
+      await appWindow.toggleMaximize();
+    } catch (err) {
+      console.warn("Toggle maximize failed:", err);
+    }
+  };
+
+  if (dragBar) {
+    dragBar.addEventListener("dblclick", async (e) => {
+      if (e.target.closest(".drag-bar-actions")) return;
+      await toggleMaximize();
+    });
+  }
+
+  if (minBtn) {
+    minBtn.addEventListener("click", async () => {
+      try {
+        await appWindow.minimize();
+      } catch (err) {
+        console.warn("Minimize failed:", err);
+      }
+    });
+  }
+
+  if (maxBtn) {
+    maxBtn.addEventListener("click", toggleMaximize);
+  }
+
+  if (resizeGrip) {
+    resizeGrip.addEventListener("mousedown", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        await appWindow.startResizeDragging("SouthEast");
+      } catch (err) {
+        console.warn("Resize drag failed:", err);
+      }
+    });
+  }
+
   if (closeBtn) {
     closeBtn.addEventListener("click", async () => {
       try { await unregisterAll(); } catch (_) {}
@@ -217,7 +416,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     abortController = new AbortController();
 
     try {
-      const body = { message: text };
+      const currentGameId = gameSelect ? gameSelect.value : (localStorage.getItem("currentGameId") || "");
+      const body = {
+        message: text,
+        game_id: currentGameId || null,
+        use_guides: guideIntentRe.test(text || ""),
+        use_memory: true
+      };
       if (imageBase64) body.image_base64 = imageBase64;
 
       const response = await fetch("http://127.0.0.1:8000/chat", {
@@ -227,17 +432,21 @@ document.addEventListener("DOMContentLoaded", async () => {
         signal: abortController.signal
       });
 
-      botMsgDiv.innerText = "";
-
       if (!response.body) throw new Error("No response body");
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
 
       let buffer = "";
+      let sseBuffer = "";
       let rafId = null;
+      let hasStreamContent = false;
 
       const updateUI = () => {
         if (buffer) {
+          if (!hasStreamContent) {
+            botMsgDiv.innerText = "";
+            hasStreamContent = true;
+          }
           botMsgDiv.innerText += buffer;
           buffer = "";
           chatWindow.scrollTop = chatWindow.scrollHeight;
@@ -245,29 +454,40 @@ document.addEventListener("DOMContentLoaded", async () => {
         rafId = null;
       };
 
+      const handleSseLine = (line) => {
+        if (!line.startsWith("data: ")) return;
+        const dataStr = line.replace("data: ", "").trim();
+        if (!dataStr) return;
+        try {
+          const dataObj = JSON.parse(dataStr);
+          const content = dataObj.content || "";
+          if (dataObj.overlay) {
+            showHudOverlay(dataObj.overlay);
+          }
+          if (content) {
+            buffer += content;
+            if (!rafId) {
+              rafId = requestAnimationFrame(updateUI);
+            }
+          }
+        } catch (err) {
+          console.warn("SSE parse failed:", err);
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
-        for (let line of lines) {
-          if (line.startsWith("data: ")) {
-            const dataStr = line.replace("data: ", "").trim();
-            if (!dataStr) continue;
-            try {
-              const dataObj = JSON.parse(dataStr);
-              const content = dataObj.content || "";
-              if (content) {
-                buffer += content;
-                // 使用 requestAnimationFrame 進行節流更新
-                if (!rafId) {
-                  rafId = requestAnimationFrame(updateUI);
-                }
-              }
-            } catch (_) {}
-          }
+        sseBuffer += decoder.decode(value, { stream: true });
+        let lineEnd = sseBuffer.indexOf("\n");
+        while (lineEnd >= 0) {
+          const line = sseBuffer.slice(0, lineEnd).trimEnd();
+          sseBuffer = sseBuffer.slice(lineEnd + 1);
+          handleSseLine(line);
+          lineEnd = sseBuffer.indexOf("\n");
         }
       }
+      if (sseBuffer.trim()) handleSseLine(sseBuffer.trimEnd());
       // 確保最後剩餘的內容也被渲染
       if (rafId) cancelAnimationFrame(rafId);
       updateUI();
@@ -294,27 +514,39 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── 截圖核心函式 ──
   const takeScreenshot = async () => {
+    if (screenshotBtn.disabled) return;
+
     try {
       screenshotBtn.textContent = "⏳";
       screenshotBtn.disabled = true;
 
-      const res = await fetch("http://127.0.0.1:8000/screenshot");
-      const data = await res.json();
+      await clearHudOverlay();
+      await appWindow.hide();
+      await sleep(280);
 
-      screenshotBtn.textContent = "📷";
-      screenshotBtn.disabled = false;
+      const res = await fetch("http://127.0.0.1:8000/screenshot");
+      if (!res.ok) throw new Error(`Screenshot API failed: ${res.status}`);
+      const data = await res.json();
 
       if (data.image_base64) {
         showImagePreview(data.image_base64);
       }
     } catch (err) {
+      console.error("截圖失敗", err);
+    } finally {
+      await appWindow.show().catch(() => {});
       screenshotBtn.textContent = "📷";
       screenshotBtn.disabled = false;
-      console.error("截圖失敗", err);
     }
   };
 
   screenshotBtn.addEventListener("click", takeScreenshot);
+  await listen("capture-hotkey", () => {
+    takeScreenshot();
+  });
+  await listen("clear-hud-hotkey", () => {
+    clearHudOverlay();
+  });
 
   // ── 全局快捷鍵 F9 ──
   try {
@@ -324,6 +556,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     console.log("✅ 全局快捷鍵 F9 已啟用");
   } catch (e) {
     console.warn("⚠️ 全局快捷鍵 F9 註冊失敗:", e);
+  }
+
+  try {
+    await register("F10", () => {
+      clearHudOverlay();
+    });
+    console.log("✅ 全局快捷鍵 F10 已啟用");
+  } catch (e) {
+    console.warn("⚠️ 全局快捷鍵 F10 註冊失敗:", e);
   }
 
   // ── 發送文字訊息 ──
