@@ -1,8 +1,8 @@
 /* 背景透明化與 Glassmorphism 設計 */
 :root {
-  --glass-opacity: 0.85;
+  --glass-opacity: 1;
   --glass-bg-base: 30, 30, 35;
-  --glass-bg: rgba(var(--glass-bg-base), var(--glass-opacity));
+  --glass-bg: #1e1e23;
   --blur-radius: 4px;
   --glass-border: rgba(255, 255, 255, 0.1);
   --text-main: #f0f0f0;
@@ -15,7 +15,7 @@ html {
   padding: 0;
   width: 100vw;
   height: 100vh;
-  background-color: transparent !important;
+  background-color: #1e1e23 !important;
   overflow: hidden;
 }
 
@@ -29,9 +29,9 @@ body {
   display: flex;
   flex-direction: column;
   /* 毛玻璃主體 */
-  background: rgba(var(--glass-bg-base), var(--glass-opacity));
-  backdrop-filter: blur(var(--blur-radius));
-  -webkit-backdrop-filter: blur(var(--blur-radius));
+  background: #1e1e23;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   border: 1px solid var(--glass-border);
   border-radius: 16px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
@@ -69,6 +69,12 @@ body {
   background: rgba(0, 0, 0, 0.12);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+body::before {
+  content: none;
 }
 
 .close-btn:hover {
@@ -154,16 +160,12 @@ body.perf-mode {
   -webkit-backdrop-filter: none !important;
   box-shadow: none !important;
   border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(var(--glass-bg-base), 0.95);
+  background: #1e1e23;
 }
 
 .perf-mode .message {
   animation: none !important;
   box-shadow: none !important;
-}
-
-.perf-mode .opacity-control {
-  background: rgba(0,0,0,0.3);
 }
 
 /* 聊天框 */
@@ -222,56 +224,6 @@ body.perf-mode {
 }
 
 /* 透明度控制器 */
-.opacity-control {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255,255,255,0.05);
-  padding: 2px 8px;
-  border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.1);
-}
-
-.opacity-control.mini {
-  background: none;
-  border: none;
-  padding: 0;
-  width: 40px;
-  overflow: hidden;
-  transition: width 0.3s;
-}
-
-.opacity-control.mini:hover {
-  width: 80px;
-}
-
-.opacity-control.mini .opacity-slider {
-  width: 100%;
-}
-
-.opacity-slider {
-  -webkit-appearance: none;
-  width: 60px;
-  height: 4px;
-  background: rgba(255,255,255,0.2);
-  border-radius: 2px;
-  outline: none;
-}
-
-.opacity-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
-  background: white;
-  border-radius: 50%;
-  cursor: pointer;
-  box-shadow: 0 0 5px rgba(0,0,0,0.3);
-}
-
-.opacity-slider::-webkit-slider-thumb:hover {
-  background: var(--accent);
-}
-
 .shortcut-hint {
   font-size: 11px;
   color: rgba(255,255,255,0.35);
@@ -350,16 +302,22 @@ body.perf-mode {
 
 .input-area {
   display: flex;
+  align-items: center;
   padding: 12px;
   background: rgba(0, 0, 0, 0.15);
   border-top: 1px solid var(--glass-border);
   border-bottom-left-radius: 16px;
   border-bottom-right-radius: 16px;
   gap: 8px;
+  min-height: 66px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 input[type="text"] {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 42px;
   padding: 10px 14px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -380,9 +338,11 @@ button#sendBtn {
   color: white;
   border: none;
   border-radius: 8px;
-  padding: 0 16px;
+  height: 42px;
+  padding: 0 14px;
   font-weight: 500;
   cursor: pointer;
+  flex-shrink: 0;
   transition: opacity 0.2s, transform 0.1s;
 }
 button#sendBtn:hover { opacity: 0.9; }
@@ -445,9 +405,11 @@ button#sendBtn:active { transform: scale(0.95); }
   color: white;
   border: none;
   border-radius: 8px;
-  padding: 0 16px;
+  height: 42px;
+  padding: 0 14px;
   font-weight: 600;
   cursor: pointer;
+  flex-shrink: 0;
   transition: background 0.2s, transform 0.1s;
 }
 .stop-btn:hover {
@@ -473,10 +435,10 @@ button#sendBtn:active { transform: scale(0.95); }
   height: 22px;
   padding: 0;
   border: 0;
-  background: transparent;
+  background: rgba(255, 255, 255, 0.08);
   cursor: nwse-resize;
   z-index: 30;
-  opacity: 0.65;
+  opacity: 1;
 }
 
 .resize-grip::before,

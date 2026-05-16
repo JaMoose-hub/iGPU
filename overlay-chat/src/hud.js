@@ -8,6 +8,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ctx = canvas.getContext("2d");
   let hideTimer = null;
   let currentOverlay = null;
+  let currentTarget = null;
+  let lastStoredOverlayId = null;
 
   const clamp = (value, fallback = 0) => {
     const number = Number(value);
@@ -23,10 +25,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     draw();
   };
 
-  const xy = (point) => ({
-    x: clamp(point?.x, 0.5) * window.innerWidth,
-    y: clamp(point?.y, 0.5) * window.innerHeight
-  });
+  const imageSpace = () => {
+    const space = currentOverlay?.coordinate_space || {};
+    const imageWidth = Number(space.image_width || currentTarget?.imageWidth || currentTarget?.width);
+    const imageHeight = Number(space.image_height || currentTarget?.imageHeight || currentTarget?.height);
+    if (!Number.isFinite(imageWidth) || !Number.isFinite(imageHeight) || imageWidth <= 0 || imageHeight <= 0) {
+      return null;
+    }
+    return { width: imageWidth, height: imageHeight };
+  };
+
+  const xy = (point) => {
+    const space = imageSpace();
+    const pixelX = Number(point?.pixel_x);
+    const pixelY = Number(point?.pixel_y);
+    if (space && Number.isFinite(pixelX) && Number.isFinite(pixelY)) {
+      return {
+        x: (pixelX / space.width) * window.innerWidth,
+        y: (pixelY / space.height) * window.innerHeight
+      };
+    }
+    return {
+      x: clamp(point?.x, 0.5) * window.innerWidth,
+      y: clamp(point?.y, 0.5) * window.innerHeight
+    };
+  };
+
+  const radiusPx = (item) => {
+    const space = imageSpace();
+    const pixelRadius = Number(item?.radius_px);
+    if (space && Number.isFinite(pixelRadius) && pixelRadius > 0) {
+      return (pixelRadius / Math.min(space.width, space.height)) * Math.min(window.innerWidth, window.innerHeight);
+    }
+    return clamp(item.radius, 0.06) * Math.min(window.innerWidth, window.innerHeight);
+  };
 
   const drawLabel = (label, x, y, color = "#00E5FF") => {
     if (!label) return;
@@ -81,7 +113,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!currentOverlay?.items?.length) return;
 
     for (const item of currentOverlay.items) {
-      const color = item.color || "#00E5FF";
       const itemType = {
         target: "pin",
         objective: "pin",
@@ -93,10 +124,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         guide: "arrow",
         direction: "arrow"
       }[item.type] || item.type;
+      const color = itemType === "circle" ? "#ff2d2d" : (item.color || "#ff2d2d");
       ctx.save();
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
-      ctx.lineWidth = 4;
+      ctx.lineWidth = itemType === "circle" ? 6 : 4;
       ctx.shadowColor = "rgba(0, 0, 0, 0.75)";
       ctx.shadowBlur = 10;
       ctx.lineJoin = "round";
@@ -104,7 +136,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       if (itemType === "circle") {
         const point = xy(item);
-        const radius = Math.max(18, clamp(item.radius, 0.06) * Math.min(window.innerWidth, window.innerHeight));
+        const radius = Math.max(18, radiusPx(item));
         ctx.beginPath();
         ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
         ctx.stroke();
@@ -154,6 +186,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       hideTimer = null;
     }
     currentOverlay = null;
+    currentTarget = null;
+    localStorage.removeItem("hud-overlay");
     document.body.classList.remove("visible");
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     setTimeout(async () => {
@@ -161,13 +195,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, 180);
   };
 
-  const showHud = async (overlay) => {
+  const hudTargetArgs = (target = null) => {
+    const args = {
+      width: Number(target?.width) || window.screen?.width || window.innerWidth || 1920,
+      height: Number(target?.height) || window.screen?.height || window.innerHeight || 1080
+    };
+    const x = Number(target?.x);
+    const y = Number(target?.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      args.x = x;
+      args.y = y;
+    }
+    return args;
+  };
+
+  const showHud = async (overlay, target = null) => {
     if (!overlay?.items?.length) return;
     if (hideTimer) clearTimeout(hideTimer);
+    currentTarget = target || overlay.render_target || null;
+    await invoke("show_hud_window", hudTargetArgs(currentTarget)).catch((err) => console.warn("HUD show failed:", err));
     currentOverlay = overlay;
     document.body.classList.add("visible");
     resize();
     hideTimer = setTimeout(clearHud, Math.max(3000, Math.min(Number(overlay.duration_ms) || 6000, 8000)));
+  };
+
+  const readStoredOverlay = () => {
+    const raw = localStorage.getItem("hud-overlay");
+    if (!raw) return;
+    try {
+      const payload = JSON.parse(raw);
+      if (!payload?.id || payload.id === lastStoredOverlayId) return;
+      if (!payload.overlay?.items?.length) return;
+      lastStoredOverlayId = payload.id;
+      showHud(payload.overlay, payload.target);
+    } catch (err) {
+      console.warn("Could not read stored HUD overlay:", err);
+    }
   };
 
   await listen("hud:show", (event) => showHud(event.payload));
@@ -175,5 +239,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
   window.addEventListener("resize", resize);
   resize();
+  setInterval(readStoredOverlay, 250);
+  readStoredOverlay();
   await emit("hud:ready", { label: "hud" });
 });

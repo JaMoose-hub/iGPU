@@ -12,8 +12,10 @@
       {
         "label": "main",
         "title": "overlay-chat",
-        "width": 380,
-        "height": 600,
+        "width": 520,
+        "height": 620,
+        "minWidth": 460,
+        "minHeight": 560,
         "transparent": false,
         "decorations": false,
         "alwaysOnTop": true,
@@ -43,9 +45,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": [
-      "bin/api_server"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

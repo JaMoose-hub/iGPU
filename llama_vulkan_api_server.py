@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import ctypes
 import html
 import io
 import json
@@ -12,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,7 +21,7 @@ import mss
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageGrab, ImageStat
 from pydantic import BaseModel
 
 
@@ -27,12 +29,16 @@ LLAMA_HOST = os.environ.get("LLAMA_HOST", "127.0.0.1")
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "18080"))
 API_HOST = os.environ.get("IGPU_API_HOST", "127.0.0.1")
 API_PORT = int(os.environ.get("IGPU_API_PORT", "8000"))
-MODEL_ALIAS = os.environ.get("LLAMA_MODEL_ALIAS", "gemma-4-E4B-it-Q4_K_M")
+MODEL_ALIAS = os.environ.get("LLAMA_MODEL_ALIAS", "qwen2.5-vl-3b-instruct-q8_0")
 VULKAN_DEVICE = os.environ.get("GGML_VK_VISIBLE_DEVICES", "0")
-LLAMA_CTX_SIZE = os.environ.get("LLAMA_CTX_SIZE", "32768")
+LLAMA_CTX_SIZE = os.environ.get("LLAMA_CTX_SIZE", "8192")
+LLAMA_GPU_LAYERS = os.environ.get("LLAMA_GPU_LAYERS", "1")
 LLAMA_PARALLEL = os.environ.get("LLAMA_PARALLEL", "").strip()
 LLAMA_CACHE_RAM = os.environ.get("LLAMA_CACHE_RAM", "").strip()
-CHAT_BACKEND = os.environ.get("IGPU_CHAT_BACKEND", "hermes").strip().lower()
+CHAT_BACKEND = os.environ.get("IGPU_CHAT_BACKEND", "llama").strip().lower()
+HISTORY_CONTEXT_MESSAGES = int(os.environ.get("IGPU_HISTORY_CONTEXT_MESSAGES", "30"))
+IMAGE_HISTORY_CONTEXT_MESSAGES = int(os.environ.get("IGPU_IMAGE_HISTORY_CONTEXT_MESSAGES", "12"))
+HISTORY_STORE_MESSAGES = int(os.environ.get("IGPU_HISTORY_STORE_MESSAGES", "80"))
 HERMES_WSL_DISTRO = os.environ.get("HERMES_WSL_DISTRO", "Ubuntu-24.04")
 HERMES_TIMEOUT_SECONDS = int(os.environ.get("HERMES_TIMEOUT_SECONDS", "180"))
 ENABLE_LOCAL_TOOLS = os.environ.get(
@@ -50,8 +56,35 @@ LLAMA_DIR = ASSET_ROOT / "tools" / "llama.cpp-vulkan"
 LLAMA_SERVER = LLAMA_DIR / "llama-server.exe"
 MODEL_PATH = ASSET_ROOT / "models" / "gemma-4-E4B-it-Q4_K_M.gguf"
 MMPROJ_PATH = ASSET_ROOT / "models" / "mmproj-BF16.gguf"
+LLAMA_HF_REPO = os.environ.get(
+    "LLAMA_HF_REPO",
+    "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q8_0",
+).strip()
+LLAMA_HF_FILE = os.environ.get("LLAMA_HF_FILE", "").strip()
+LLAMA_CHAT_TEMPLATE_KWARGS = os.environ.get("LLAMA_CHAT_TEMPLATE_KWARGS", "").strip()
+LLAMA_IMAGE_MIN_TOKENS = os.environ.get("LLAMA_ARG_IMAGE_MIN_TOKENS", "1024").strip()
+LLAMA_IMAGE_MAX_TOKENS_SERVER = os.environ.get("LLAMA_ARG_IMAGE_MAX_TOKENS", "2048").strip()
+LLAMA_SKIP_CHAT_PARSING = os.environ.get("LLAMA_SKIP_CHAT_PARSING", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LLAMA_LOG = LOG_DIR / "llama-server.log"
+LATEST_SCREENSHOT = LOG_DIR / "latest-screenshot.png"
+LATEST_VISION_INPUT = LOG_DIR / "latest-vision-input.png"
+LATEST_OCR_INPUT = LOG_DIR / "latest-ocr-input.png"
+LATEST_OVERLAY_GRID_INPUT = LOG_DIR / "latest-overlay-grid-input.png"
+OVERLAY_GRID_COLUMNS = 4
+OVERLAY_GRID_ROWS = 3
+ENABLE_OCR_CONTEXT = os.environ.get("IGPU_ENABLE_OCR_CONTEXT", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+IGNORED_CAPTURE_TITLES = ("Game Companion", "overlay-chat", "game-guidance-hud")
 GENERATED_DIR = Path(__file__).resolve().parent / "generated_files"
 PROJECT_ROOT = Path(__file__).resolve().parent
 HERMES_CHAT_SCRIPT = PROJECT_ROOT / "scripts" / "hermes_no_tools_chat.py"
@@ -64,6 +97,25 @@ MEMORY_DB = MEMORY_CACHE_DIR / "memory.sqlite"
 llama_process: Optional[subprocess.Popen] = None
 history: list[dict[str, Any]] = []
 generate_lock = asyncio.Lock()
+ocr_engine: Any = None
+stt_model: Any = None
+
+
+def enable_windows_dpi_awareness() -> None:
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+enable_windows_dpi_awareness()
 
 
 app = FastAPI(title="iGPU Overlay llama.cpp Vulkan Backend")
@@ -105,6 +157,12 @@ class MemorySearchRequest(BaseModel):
 
 
 def get_system_prompt() -> str:
+    return (
+        "你是即時遊戲陪玩助理。用繁體中文回答，語氣自然、簡短、直接。"
+        "一般聊天最多 2 句；遊戲建議用 1 到 3 個可執行重點。"
+        "不要重複同一個字詞，不要自稱系統分析師，不要輸出亂碼。"
+        "如果使用者貼截圖，先說你看到的重點，再給下一步建議。"
+    )
     return (
         "你是遊戲陪伴 AI，也是電腦系統效能分析師。"
         "你用繁體中文回答，語氣親切、簡潔、像會陪玩家一起看局勢的隊友。"
@@ -222,11 +280,8 @@ def llama_ready() -> bool:
 
 
 def validate_assets() -> None:
-    missing = [
-        str(path)
-        for path in (LLAMA_SERVER, MODEL_PATH, MMPROJ_PATH)
-        if not path.exists()
-    ]
+    required = [LLAMA_SERVER] if LLAMA_HF_REPO else [LLAMA_SERVER, MODEL_PATH, MMPROJ_PATH]
+    missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise RuntimeError("Missing llama.cpp Vulkan assets:\n" + "\n".join(missing))
 
@@ -244,14 +299,32 @@ def start_llama_server() -> None:
     env = os.environ.copy()
     env["GGML_VK_VISIBLE_DEVICES"] = VULKAN_DEVICE
     env["LLAMA_ARG_FLASH_ATTN"] = env.get("LLAMA_ARG_FLASH_ATTN", "1")
-    env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"enable_thinking":false}'
+    if LLAMA_IMAGE_MIN_TOKENS:
+        env["LLAMA_ARG_IMAGE_MIN_TOKENS"] = LLAMA_IMAGE_MIN_TOKENS
+    if LLAMA_IMAGE_MAX_TOKENS_SERVER:
+        env["LLAMA_ARG_IMAGE_MAX_TOKENS"] = LLAMA_IMAGE_MAX_TOKENS_SERVER
+    if LLAMA_CHAT_TEMPLATE_KWARGS:
+        env["LLAMA_CHAT_TEMPLATE_KWARGS"] = LLAMA_CHAT_TEMPLATE_KWARGS
+    else:
+        env.pop("LLAMA_CHAT_TEMPLATE_KWARGS", None)
 
-    args = [
-        str(LLAMA_SERVER),
-        "--model",
-        str(MODEL_PATH),
-        "--mmproj",
-        str(MMPROJ_PATH),
+    args = [str(LLAMA_SERVER)]
+    if LLAMA_HF_REPO:
+        args.extend(["--hf-repo", LLAMA_HF_REPO])
+        if LLAMA_HF_FILE:
+            args.extend(["--hf-file", LLAMA_HF_FILE])
+    else:
+        args.extend(
+            [
+                "--model",
+                str(MODEL_PATH),
+                "--mmproj",
+                str(MMPROJ_PATH),
+            ]
+        )
+
+    args.extend(
+        [
         "--host",
         LLAMA_HOST,
         "--port",
@@ -259,7 +332,7 @@ def start_llama_server() -> None:
         "--ctx-size",
         LLAMA_CTX_SIZE,
         "--n-gpu-layers",
-        os.environ.get("LLAMA_GPU_LAYERS", "999"),
+        LLAMA_GPU_LAYERS,
         "--temp",
         "1.0",
         "--top-p",
@@ -271,11 +344,18 @@ def start_llama_server() -> None:
         "--jinja",
         "--reasoning",
         "off",
-        "--chat-template-kwargs",
-        '{"enable_thinking":false}',
         "--flash-attn",
         "on",
-    ]
+        ]
+    )
+    if LLAMA_IMAGE_MIN_TOKENS:
+        args.extend(["--image-min-tokens", LLAMA_IMAGE_MIN_TOKENS])
+    if LLAMA_IMAGE_MAX_TOKENS_SERVER:
+        args.extend(["--image-max-tokens", LLAMA_IMAGE_MAX_TOKENS_SERVER])
+    if LLAMA_CHAT_TEMPLATE_KWARGS:
+        args.extend(["--chat-template-kwargs", LLAMA_CHAT_TEMPLATE_KWARGS])
+    if LLAMA_SKIP_CHAT_PARSING:
+        args.append("--skip-chat-parsing")
     if LLAMA_PARALLEL:
         args.extend(["--parallel", LLAMA_PARALLEL])
     if LLAMA_CACHE_RAM:
@@ -310,43 +390,239 @@ def start_llama_server() -> None:
     raise RuntimeError(f"llama-server did not become ready in time. See {LLAMA_LOG}")
 
 
+def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def normalize_vision_image(img: Image.Image) -> Image.Image:
+    img = img.convert("RGB")
+    long_edge = bounded_int_env("LLAMA_VISION_LONG_EDGE", 1920, 768, 2560)
+    if max(img.size) > long_edge:
+        img = img.copy()
+        img.thumbnail((long_edge, long_edge), Image.Resampling.LANCZOS)
+    return img
+
+
+def encode_png_base64(img: Image.Image, *, save_path: Optional[Path] = None) -> str:
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG", optimize=True)
+    data = buffered.getvalue()
+    if save_path:
+        save_path.parent.mkdir(exist_ok=True)
+        save_path.write_bytes(data)
+    return base64.b64encode(data).decode("ascii")
+
+
+def decode_image_size(image_base64: str) -> tuple[int, int]:
+    raw = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+    image_bytes = base64.b64decode(raw)
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        return int(img.width), int(img.height)
+
+
+def overlay_grid_font(width: int, height: int) -> ImageFont.ImageFont:
+    cell_edge = min(width / OVERLAY_GRID_COLUMNS, height / OVERLAY_GRID_ROWS)
+    size = max(18, min(42, int(cell_edge * 0.18)))
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    for candidate in (
+        windir / "Fonts" / "arialbd.ttf",
+        windir / "Fonts" / "segoeuib.ttf",
+        windir / "Fonts" / "arial.ttf",
+    ):
+        try:
+            if candidate.exists():
+                return ImageFont.truetype(str(candidate), size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def make_overlay_grid_image(img: Image.Image) -> Image.Image:
+    base = normalize_vision_image(img).convert("RGBA")
+    width, height = base.size
+    draw = ImageDraw.Draw(base, "RGBA")
+    line_width = max(2, min(6, int(min(width, height) / 420)))
+    line_fill = (255, 45, 45, 210)
+    label_font = overlay_grid_font(width, height)
+    label_pad = max(5, line_width * 2)
+
+    for index in range(OVERLAY_GRID_COLUMNS + 1):
+        x = round(index * width / OVERLAY_GRID_COLUMNS)
+        draw.line((x, 0, x, height), fill=line_fill, width=line_width)
+    for index in range(OVERLAY_GRID_ROWS + 1):
+        y = round(index * height / OVERLAY_GRID_ROWS)
+        draw.line((0, y, width, y), fill=line_fill, width=line_width)
+
+    for row in range(OVERLAY_GRID_ROWS):
+        for col in range(OVERLAY_GRID_COLUMNS):
+            label = f"{chr(ord('A') + col)}{row + 1}"
+            left = round(col * width / OVERLAY_GRID_COLUMNS)
+            top = round(row * height / OVERLAY_GRID_ROWS)
+            bbox = draw.textbbox((0, 0), label, font=label_font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            text_left = left + label_pad
+            text_top = top + label_pad
+            draw.rectangle(
+                (
+                    text_left - label_pad // 2,
+                    text_top - label_pad // 2,
+                    text_left + text_width + label_pad // 2,
+                    text_top + text_height + label_pad // 2,
+                ),
+                fill=(0, 0, 0, 170),
+            )
+            draw.text((text_left, text_top), label, fill=(255, 255, 255, 255), font=label_font)
+
+    return base.convert("RGB")
+
+
 def image_to_data_url(image_base64: str) -> str:
     raw = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
     image_bytes = base64.b64decode(raw)
     with Image.open(io.BytesIO(image_bytes)) as img:
-        img = img.convert("RGB")
-        img.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG", optimize=True)
-    normalized = base64.b64encode(buffered.getvalue()).decode("ascii")
+        img = normalize_vision_image(img)
+        normalized = encode_png_base64(img, save_path=LATEST_VISION_INPUT)
     return f"data:image/png;base64,{normalized}"
 
 
-def build_messages(prompt: str, image_base64: Optional[str]) -> list[dict[str, Any]]:
+def image_to_overlay_grid_data_url(image_base64: str) -> str:
+    raw = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+    image_bytes = base64.b64decode(raw)
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        gridded = make_overlay_grid_image(img)
+        normalized = encode_png_base64(gridded, save_path=LATEST_OVERLAY_GRID_INPUT)
+    return f"data:image/png;base64,{normalized}"
+
+
+def get_ocr_engine() -> Optional[Any]:
+    global ocr_engine
+    if os.environ.get("IGPU_ENABLE_OCR", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return None
+    if ocr_engine is not None:
+        return ocr_engine
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except Exception as exc:
+        print(f"OCR unavailable: {exc}")
+        return None
+    ocr_engine = RapidOCR()
+    return ocr_engine
+
+
+def extract_ocr_text(image_base64: str) -> str:
+    engine = get_ocr_engine()
+    if engine is None:
+        return ""
+
+    raw = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+    image_bytes = base64.b64decode(raw)
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = normalize_vision_image(img)
+        encode_png_base64(img, save_path=LATEST_OCR_INPUT)
+
+    try:
+        result, _ = engine(str(LATEST_OCR_INPUT))
+    except Exception as exc:
+        print(f"OCR failed: {exc}")
+        return ""
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in result or []:
+        if len(item) < 3:
+            continue
+        text = str(item[1]).strip()
+        try:
+            score = float(item[2])
+        except (TypeError, ValueError):
+            score = 0.0
+        if score < 0.55 or len(text) < 2:
+            continue
+        compact = re.sub(r"\s+", " ", text)
+        if compact in seen:
+            continue
+        seen.add(compact)
+        lines.append(compact)
+        max_lines = bounded_int_env("IGPU_OCR_CONTEXT_LINES", 10, 1, 30)
+        if len(lines) >= max_lines:
+            break
+
+    max_chars = bounded_int_env("IGPU_OCR_CONTEXT_CHARS", 500, 0, 1600)
+    return "\n".join(lines)[:max_chars]
+
+
+def format_recent_history(limit: int) -> str:
+    recent = history[-limit:]
+    lines: list[str] = []
+    for item in recent:
+        role = "玩家" if item.get("role") == "user" else "助理"
+        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content[:800]}")
+    return "\n".join(lines)
+
+
+def add_context_to_prompt(prompt: str, limit: int) -> str:
+    recent_context = format_recent_history(limit)
+    if not recent_context:
+        return prompt
+    return (
+        "以下是最近對話上下文，回答目前問題時必須參考；"
+        "如果玩家問「剛剛、前面、上一句、我的代號」之類問題，就從這裡找答案。\n"
+        f"{recent_context}\n\n"
+        f"目前玩家問題: {prompt}"
+    )
+
+
+def build_messages(
+    prompt: str,
+    image_base64: Optional[str],
+    ocr_text: str = "",
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [{"role": "system", "content": get_system_prompt()}]
     if not image_base64:
-        messages.extend(history[-10:])
+        messages.append({"role": "user", "content": add_context_to_prompt(prompt, HISTORY_CONTEXT_MESSAGES)})
+        return messages
 
-    if image_base64:
-        prompt = (
-            f"{prompt}\n\n"
-            "請根據圖片內容回答，最多三句；如果能看到文字、UI、角色、地圖或錯誤訊息，請直接指出。"
+    prompt = add_context_to_prompt(prompt, IMAGE_HISTORY_CONTEXT_MESSAGES)
+    vision_prompt = (
+        f"{prompt}\n\n"
+        "Analyze the screenshot pixels first, then answer in Traditional Chinese in at most two sentences. "
+        "Describe only visible objects, UI, scene layout, and immediate risks. "
+        "Do not invent movement, vehicles, enemies, objectives, or actions that are not clearly visible. "
+        "For first-person shooter screenshots with ammo, crosshair, minimap, or alive counters, treat the large foreground object as the player's held weapon unless wheels or a full vehicle body are clearly visible. "
+        "Do not call an object a motorcycle or vehicle unless wheels, seat, and vehicle body are visible. "
+        "If the foreground object is ambiguous, describe its visible shape instead of guessing. "
+        "Then give one immediate next-step suggestion."
+    )
+    if ocr_text:
+        vision_prompt += (
+            "\n\n畫面中可能可讀到的字串如下，只能當作理解圖片的內部參考。"
+            "不要提到這段參考的存在；除非玩家明確詢問畫面文字，否則不要逐字列出。"
+            "回答仍然必須以圖片內容和玩家問題為主：\n"
+            f"{ocr_text}"
         )
-        content = [
-            {"type": "image_url", "image_url": {"url": image_to_data_url(image_base64)}},
-            {"type": "text", "text": prompt},
-        ]
-        messages.append({"role": "user", "content": content})
-    else:
-        messages.append({"role": "user", "content": prompt})
-
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_to_data_url(image_base64)}},
+                {"type": "text", "text": vision_prompt},
+            ],
+        }
+    )
     return messages
-
 
 def append_history(role: str, content: str) -> None:
     history.append({"role": role, "content": content})
-    if len(history) > 20:
-        del history[:-20]
+    if len(history) > HISTORY_STORE_MESSAGES:
+        del history[:-HISTORY_STORE_MESSAGES]
 
 
 def is_text_file_task(prompt: str) -> bool:
@@ -405,13 +681,103 @@ def call_llama_once(messages: list[dict[str, Any]], max_tokens: int = 1536) -> s
         "messages": messages,
         "stream": False,
         "max_tokens": max_tokens,
-        "temperature": 0.4,
-        "top_p": 0.9,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "top_k": 20,
+        "repeat_penalty": 1.0,
     }
     with post_json(f"{llama_base_url()}/v1/chat/completions", payload, 600) as response:
         data = json.loads(response.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"].get("content") or ""
+    if content.strip():
+        return content
+
+    retry_payload = dict(payload)
+    retry_payload.update(
+        {
+            "cache_prompt": True,
+            "temperature": max(float(payload.get("temperature") or 0.2), 0.8),
+            "min_p": 0.05,
+        }
+    )
+    with post_json(f"{llama_base_url()}/v1/chat/completions", retry_payload, 600) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data["choices"][0]["message"].get("content") or ""
+
+
+def clean_short_answer(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    for _ in range(2):
+        text = re.sub(r"([\u4e00-\u9fff]{2,6})\1+", r"\1", text)
+        text = re.sub(r"\b([A-Za-z]{2,})\1+\b", r"\1", text)
+    text = re.sub(r"([\u4e00-\u9fff])\1+", r"\1", text)
+    text = re.sub(r"([。！？!?，,、])\1+", r"\1", text)
+    text = text.replace("，、", "，")
+    text = re.sub(r"([！？!?])。", r"\1", text)
+    text = re.sub(r"(`)\1+", r"\1", text)
+    return text
+
+
+def clean_vision_answer(text: str) -> str:
+    text = clean_short_answer(text)
+    text = re.sub(r"\bOCR\b", "畫面文字", text, flags=re.IGNORECASE)
+    for source, target in {
+        "文字辨識": "畫面文字",
+        "可讀文字摘錄": "畫面文字",
+        "隱藏輔助上下文": "畫面內容",
+        "輔助上下文": "畫面內容",
+        "內部參考": "畫面內容",
+    }.items():
+        text = text.replace(source, target)
+    return text
+
+
+def get_stt_model() -> Any:
+    global stt_model
+    if stt_model is not None:
+        return stt_model
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise RuntimeError(
+            "Voice transcription dependency is missing. Install it with: "
+            ".venv\\Scripts\\python.exe -m pip install faster-whisper"
+        ) from exc
+
+    model_name = os.environ.get("IGPU_STT_MODEL", "base").strip() or "base"
+    device = os.environ.get("IGPU_STT_DEVICE", "cpu").strip() or "cpu"
+    compute_type = os.environ.get("IGPU_STT_COMPUTE_TYPE", "int8").strip() or "int8"
+    cache_dir = ASSET_ROOT / "models" / "faster-whisper"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stt_model = WhisperModel(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+        download_root=str(cache_dir),
+    )
+    return stt_model
+
+
+def transcribe_audio_path(audio_path: Path) -> dict[str, Any]:
+    model = get_stt_model()
+    language = os.environ.get("IGPU_STT_LANGUAGE", "zh").strip()
+    transcribe_kwargs: dict[str, Any] = {
+        "beam_size": 1,
+        "temperature": 0.0,
+        "condition_on_previous_text": False,
+    }
+    if language and language.lower() not in {"auto", "none"}:
+        transcribe_kwargs["language"] = language
+
+    segments, info = model.transcribe(str(audio_path), **transcribe_kwargs)
+    text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+    return {
+        "text": clean_short_answer(text),
+        "language": getattr(info, "language", language or None),
+        "duration": getattr(info, "duration", None),
+        "model": os.environ.get("IGPU_STT_MODEL", "base").strip() or "base",
+    }
 
 
 def create_text_file_from_prompt(prompt: str) -> Path:
@@ -459,8 +825,24 @@ OVERLAY_INTENT_RE = re.compile(
     r"(圈|圈出|圈選|框出|標記|標出|指引|導引|導航|指路|往哪|往哪走|哪邊|路線|路標|目標|目的地|箭頭|提醒|危險|門在哪|在哪裡|where|mark|circle|arrow|route|path|guide|navigate|target|objective|destination)",
     re.IGNORECASE,
 )
+VISUAL_SCENE_INTENT_RE = re.compile(
+    r"(物件|東西|看到什麼|看到了什麼|畫面.*有什麼|截圖.*有什麼|有什麼|"
+    r"角色|人物|敵人|怪物|道具|裝備|武器|車|門|箱子|地圖|場景|環境|畫面內容|"
+    r"object|objects|thing|things|what.*see|what.*image|what.*screen|describe.*image)",
+    re.IGNORECASE,
+)
 MEMORY_ADD_RE = re.compile(
-    r"(記住|幫我記|幫我記住|記一下|remember|note this|save this)",
+    r"(記住|幫我記|幫我記住|記一下|記在|remember|note this|save this)",
+    re.IGNORECASE,
+)
+FACT_KEY_PATTERN = r"(測試代號|代號|名字|暱稱|id|ID|帳號|角色|伺服器|職業|偏好|目標|進度|任務)"
+IMPLICIT_MEMORY_FACT_RE = re.compile(
+    rf"(?:我的|我目前的|我現在的|目前的|現在的)?\s*"
+    rf"(?P<key>{FACT_KEY_PATTERN})\s*(?:是|叫|=|:|：)\s*"
+    r"(?P<value>[A-Za-z0-9_.#\-_\u4e00-\u9fff ]{1,80})"
+)
+FACT_LOOKUP_RE = re.compile(
+    rf"(?P<key>{FACT_KEY_PATTERN}).{{0,12}}(?:是什麼|多少|哪個|叫什麼|\?)",
     re.IGNORECASE,
 )
 
@@ -739,6 +1121,10 @@ def should_use_overlay(prompt: str, image_base64: Optional[str]) -> bool:
     return bool(image_base64 and OVERLAY_INTENT_RE.search(prompt or ""))
 
 
+def should_use_visual_scene(prompt: str) -> bool:
+    return bool(VISUAL_SCENE_INTENT_RE.search(prompt or ""))
+
+
 def detect_memory_add(prompt: str) -> Optional[dict[str, str]]:
     text = re.sub(r"\s+", " ", (prompt or "").strip())
     if not text or not MEMORY_ADD_RE.search(text):
@@ -754,6 +1140,62 @@ def detect_memory_add(prompt: str) -> Optional[dict[str, str]]:
     else:
         kind = "note"
     return {"content": content[:1000], "kind": kind}
+
+
+def detect_implicit_memory_fact(prompt: str) -> Optional[dict[str, str]]:
+    text = re.sub(r"\s+", " ", (prompt or "").strip())
+    if detect_fact_lookup_key(text):
+        return None
+    match = IMPLICIT_MEMORY_FACT_RE.search(text)
+    if not match:
+        return None
+    key = match.group("key").strip()
+    value = match.group("value").strip(" ：:，,。.!?？；;「」'\"")
+    if any(marker in value for marker in ("什麼", "多少", "哪個", "嗎", "?")):
+        return None
+    if not key or not value:
+        return None
+    kind = "preference" if key == "偏好" else "state"
+    return {
+        "content": f"玩家{key}是 {value}",
+        "kind": kind,
+        "key": key,
+        "value": value,
+    }
+
+
+def detect_fact_lookup_key(prompt: str) -> Optional[str]:
+    text = re.sub(r"\s+", " ", (prompt or "").strip())
+    match = FACT_LOOKUP_RE.search(text)
+    if match:
+        return match.group("key").strip()
+    if any(marker in text for marker in ("剛剛", "前面", "上一句", "我說的")):
+        fact = IMPLICIT_MEMORY_FACT_RE.search(text)
+        if fact:
+            return fact.group("key").strip()
+    return None
+
+
+def answer_fact_lookup(prompt: str, memory_results: list[dict[str, Any]]) -> Optional[str]:
+    key = detect_fact_lookup_key(prompt)
+    if not key:
+        return None
+    key_options = [key]
+    if key == "代號":
+        key_options.append("測試代號")
+    for item in memory_results:
+        content = str(item.get("content") or "")
+        for option in key_options:
+            if option not in content:
+                continue
+            match = re.search(rf"{re.escape(option)}是\s*([^。；;，,\n]+)", content)
+            if match:
+                value = match.group(1).strip()
+                if any(marker in value for marker in ("什麼", "多少", "哪個", "嗎", "?")):
+                    continue
+                if value:
+                    return f"你的{option}是 {value}。"
+    return None
 
 
 def format_rag_context(
@@ -791,12 +1233,45 @@ def build_augmented_prompt(original_prompt: str, rag_context: str) -> str:
 
 
 def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> list[dict[str, Any]]:
+    if wants_circle_marker(prompt):
+        user_text = prompt
+        if rag_context:
+            user_text += "\n\nLocal context:\n" + rag_context
+        user_text += (
+            "\n\nThe screenshot has a red planning grid with cells A1 through D3. "
+            "Valid cells are A1, B1, C1, D1, A2, B2, C2, D2, A3, B3, C3, D3. "
+            "Pick the single cell that contains the requested visible object or the best visible target. "
+            "If the object spans multiple cells, choose the cell containing its center. "
+            "If the object is not visible or you are unsure, reply NONE. "
+            "Reply with exactly one cell name like B2, or NONE. No Markdown, no JSON, no explanation."
+        )
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a visual grid selector. Output only one token: a valid grid cell or NONE."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_to_overlay_grid_data_url(image_base64)}},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+        ]
+
     system = (
-        "You are a game companion HUD planner. Return only valid JSON, no Markdown. "
+        "You are a game companion HUD planner. Return one compact ASCII JSON object only, no Markdown. "
         "Use Traditional Chinese for answer and labels. "
-        "If you are not visually confident about coordinates, return an empty overlay items array. "
-        "All coordinates must be normalized numbers from 0 to 1. "
+        "The screenshot has a red planning grid with cells A1 through D3. The grid is not part of the game. "
+        "For every visual HUD item, prefer the cell key instead of numeric x/y. "
+        "If you are not visually confident about the requested object or cell, return an empty overlay items array. "
+        "Use exact JSON keys only: answer, overlay, duration_ms, items, type, cell, x, y, radius, label, color, from, to, points. "
+        "Do not duplicate or merge key names. Do not output coordinates in answer. "
         "JSON shape: {\"answer\":\"...\",\"overlay\":{\"duration_ms\":6000,\"items\":[...]}}. "
+        "The answer field must never mention coordinates, grid cells, x/y values, normalized positions, or JSON. "
+        "Location data belongs only inside overlay.items for the HUD renderer. "
         "Allowed item types: circle, arrow, path, pin, label. "
         "For target/objective requests, use pin or circle with a short label. "
         "For route/navigation requests, use path with 2-6 points and optionally one arrow. "
@@ -808,16 +1283,18 @@ def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> 
         user_text += "\n\nLocal context:\n" + rag_context
     user_text += (
         "\n\nIf the user asks for visual guidance, identify visible targets and provide at most 3 HUD items. "
-        "For circle use x, y, radius. For arrow use from {x,y} and to {x,y}. "
-        "For path use points [{x,y}]. For label/pin use x, y, label. "
-        "Use circle for objects to circle, arrow for where to go next, path for route lines, and pin for targets/objectives."
+        "Choose the grid cell containing the requested visible object; if it spans cells, choose its center cell. "
+        "For circle use type, cell, radius, color. For label/pin use type, cell, label. "
+        "For arrow use from {cell} and to {cell}. For path use points [{cell}]. "
+        "Use circle for objects to circle, arrow for where to go next, path for route lines, and pin for targets/objectives. "
+        "Example: {\"answer\":\"我已標記。\",\"overlay\":{\"duration_ms\":6000,\"items\":[{\"type\":\"circle\",\"cell\":\"C2\",\"radius\":0.14,\"color\":\"#ff2d2d\"}]}}"
     )
     return [
         {"role": "system", "content": system},
         {
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": image_to_data_url(image_base64)}},
+                {"type": "image_url", "image_url": {"url": image_to_overlay_grid_data_url(image_base64)}},
                 {"type": "text", "text": user_text},
             ],
         },
@@ -830,6 +1307,44 @@ def clamp_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
     return max(0.0, min(1.0, number))
+
+
+def grid_cell_to_xy(cell: Any) -> Optional[tuple[float, float]]:
+    if cell is None:
+        return None
+    match = re.search(r"\b([A-Ha-h])\s*[-_ ]?\s*([1-6])\b", str(cell))
+    if not match:
+        return None
+    col = ord(match.group(1).upper()) - ord("A")
+    row = int(match.group(2)) - 1
+    if col < 0 or col >= OVERLAY_GRID_COLUMNS or row < 0 or row >= OVERLAY_GRID_ROWS:
+        return None
+    return ((col + 0.5) / OVERLAY_GRID_COLUMNS, (row + 0.5) / OVERLAY_GRID_ROWS)
+
+
+def point_from_value(value: Any) -> Optional[dict[str, float]]:
+    if isinstance(value, str):
+        cell_xy = grid_cell_to_xy(value)
+        if cell_xy:
+            return {"x": cell_xy[0], "y": cell_xy[1]}
+        return None
+    if not isinstance(value, dict):
+        return None
+    cell_xy = grid_cell_to_xy(value.get("cell"))
+    if cell_xy:
+        return {"x": cell_xy[0], "y": cell_xy[1]}
+    if "x" not in value or "y" not in value:
+        return None
+    return {"x": clamp_float(value.get("x")), "y": clamp_float(value.get("y"))}
+
+
+def point_from_item(item: dict[str, Any]) -> Optional[dict[str, float]]:
+    cell_xy = grid_cell_to_xy(item.get("cell"))
+    if cell_xy:
+        return {"x": cell_xy[0], "y": cell_xy[1]}
+    if "x" not in item or "y" not in item:
+        return None
+    return {"x": clamp_float(item.get("x")), "y": clamp_float(item.get("y"))}
 
 
 def sanitize_overlay_item(item: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -848,35 +1363,44 @@ def sanitize_overlay_item(item: dict[str, Any]) -> Optional[dict[str, Any]]:
     allowed = {"circle", "arrow", "path", "pin", "label"}
     if item_type not in allowed:
         return None
-    color = str(item.get("color") or "#00E5FF")
+    color = "#ff2d2d" if item_type == "circle" else str(item.get("color") or "#ff2d2d")
     label = str(item.get("label") or "")[:80]
     cleaned: dict[str, Any] = {"type": item_type, "color": color}
     if label:
         cleaned["label"] = label
     if item_type == "circle":
+        point = point_from_item(item)
+        if point is None:
+            return None
         cleaned.update(
             {
-                "x": clamp_float(item.get("x")),
-                "y": clamp_float(item.get("y")),
-                "radius": max(0.01, min(float(item.get("radius") or 0.06), 0.35)),
+                "x": point["x"],
+                "y": point["y"],
+                "radius": max(0.01, min(parse_loose_float(str(item.get("radius") or "0.06"), 0.06), 0.35)),
             }
         )
     elif item_type == "arrow":
-        src = item.get("from") or {}
-        dst = item.get("to") or {}
-        cleaned["from"] = {"x": clamp_float(src.get("x"), 0.45), "y": clamp_float(src.get("y"), 0.7)}
-        cleaned["to"] = {"x": clamp_float(dst.get("x"), 0.55), "y": clamp_float(dst.get("y"), 0.45)}
+        src = point_from_value(item.get("from"))
+        dst = point_from_value(item.get("to"))
+        if src is None or dst is None:
+            return None
+        cleaned["from"] = src
+        cleaned["to"] = dst
     elif item_type == "path":
         points = item.get("points") or []
         cleaned["points"] = [
-            {"x": clamp_float(point.get("x")), "y": clamp_float(point.get("y"))}
+            parsed
             for point in points
-            if isinstance(point, dict)
+            for parsed in [point_from_value(point)]
+            if parsed
         ][:8]
         if len(cleaned["points"]) < 2:
             return None
     else:
-        cleaned.update({"x": clamp_float(item.get("x")), "y": clamp_float(item.get("y"))})
+        point = point_from_item(item)
+        if point is None:
+            return None
+        cleaned.update(point)
     return cleaned
 
 
@@ -893,20 +1417,246 @@ def sanitize_overlay(raw_overlay: Any) -> Optional[dict[str, Any]]:
     ][:5]
     if not cleaned_items:
         return None
-    duration = int(raw_overlay.get("duration_ms") or 6000)
+    try:
+        duration = int(raw_overlay.get("duration_ms") or 6000)
+    except Exception:
+        duration = 6000
     return {"duration_ms": max(3000, min(duration, 8000)), "items": cleaned_items}
 
 
+def add_pixel_point(point: dict[str, Any], image_width: int, image_height: int) -> None:
+    if "x" in point and "y" in point:
+        point["pixel_x"] = int(round(clamp_float(point.get("x")) * image_width))
+        point["pixel_y"] = int(round(clamp_float(point.get("y")) * image_height))
+
+
+def attach_overlay_image_space(overlay: Optional[dict[str, Any]], image_base64: str) -> Optional[dict[str, Any]]:
+    if not overlay or not overlay.get("items"):
+        return overlay
+    try:
+        image_width, image_height = decode_image_size(image_base64)
+    except Exception:
+        return overlay
+
+    overlay["coordinate_space"] = {
+        "type": "source_image_pixels",
+        "image_width": image_width,
+        "image_height": image_height,
+    }
+    min_edge = max(1, min(image_width, image_height))
+    for item in overlay.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").lower()
+        if item_type in {"circle", "pin", "label"}:
+            add_pixel_point(item, image_width, image_height)
+            if item_type == "circle":
+                item["radius_px"] = int(round(clamp_float(item.get("radius"), 0.06) * min_edge))
+        elif item_type == "arrow":
+            if isinstance(item.get("from"), dict):
+                add_pixel_point(item["from"], image_width, image_height)
+            if isinstance(item.get("to"), dict):
+                add_pixel_point(item["to"], image_width, image_height)
+        elif item_type == "path":
+            for point in item.get("points") or []:
+                if isinstance(point, dict):
+                    add_pixel_point(point, image_width, image_height)
+    return overlay
+
+
+def parse_loose_float(value: str, default: float = 0.5) -> float:
+    cleaned = re.sub(r"[^0-9.+-]", "", value or "")
+    cleaned = cleaned.replace("..", ".")
+    if cleaned.startswith("."):
+        cleaned = "0" + cleaned
+    if cleaned.count(".") > 1:
+        first, rest = cleaned.split(".", 1)
+        cleaned = first + "." + rest.replace(".", "")
+    try:
+        if re.fullmatch(r"[+-]?\d+", cleaned):
+            whole = int(cleaned)
+            if abs(whole) > 1:
+                digits = len(str(abs(whole)))
+                denominator = 1000 if digits >= 3 else 10**digits
+                return clamp_float(whole / denominator, default)
+        return clamp_float(float(cleaned), default)
+    except Exception:
+        return default
+
+
+def find_loose_number_after(text: str, label: str) -> Optional[float]:
+    if label in {"x", "y"}:
+        key_pattern = rf"(?<![A-Za-z0-9_])['\"]?(?:\d*{label}+|{label}\w*)['\"]?"
+    elif label == "radius":
+        key_pattern = r"(?<![A-Za-z0-9_])['\"]?(?:radius|r)\w*['\"]?"
+    else:
+        key_pattern = rf"['\"]?{re.escape(label)}\w*['\"]?"
+
+    pattern = rf"{key_pattern}\s*[:=]\s*['\"]?[^0-9.+-]{{0,8}}([0-9.+-]{{1,16}})"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    return parse_loose_float(match.group(1))
+
+
+def find_cell_candidate(fragment: str) -> Optional[str]:
+    for match in re.finditer(r"([A-Ha-h])\s*[-_ ]?([1-6])", fragment or ""):
+        cell = f"{match.group(1).upper()}{match.group(2)}"
+        if grid_cell_to_xy(cell):
+            return cell
+    return None
+
+
+def find_loose_cell(text: str) -> Optional[str]:
+    text = text or ""
+    for marker in re.finditer(r"(?:circle|pin|target|objective|標記|圈)", text, re.IGNORECASE):
+        cell = find_cell_candidate(text[marker.start() : marker.start() + 180])
+        if cell:
+            return cell
+    for marker in re.finditer(r"(?:cell|grid|格子|方格|區塊)", text, re.IGNORECASE):
+        cell = find_cell_candidate(text[marker.end() : marker.end() + 80])
+        if cell:
+            return cell
+    cell = find_cell_candidate(text)
+    if cell:
+        return cell
+    return None
+
+
+def extract_loose_overlay(text: str) -> Optional[dict[str, Any]]:
+    lower = (text or "").lower()
+    loose_cell = find_loose_cell(text)
+    if not loose_cell and not any(token in lower for token in ("circle", "pin", "label", "cell", "overlay", "items")):
+        return None
+    cell_xy = grid_cell_to_xy(loose_cell)
+    radius = find_loose_number_after(text, "radius")
+    if cell_xy:
+        return {
+            "duration_ms": 6000,
+            "items": [
+                {
+                    "type": "circle",
+                    "x": cell_xy[0],
+                    "y": cell_xy[1],
+                    "radius": max(0.04, min(radius if radius is not None else 0.1, 0.35)),
+                    "color": "#ff2d2d",
+                }
+            ],
+        }
+    x = find_loose_number_after(text, "x")
+    y = find_loose_number_after(text, "y")
+    if x is None or y is None:
+        return None
+    if (x <= 0.02 or x >= 0.98 or y <= 0.02 or y >= 0.98) and (
+        radius is None or radius >= 0.3
+    ):
+        return None
+    return {
+        "duration_ms": 6000,
+        "items": [
+            {
+                "type": "circle",
+                "x": x,
+                "y": y,
+                "radius": max(0.04, min(radius if radius is not None else 0.1, 0.35)),
+                "color": "#ff2d2d",
+            }
+        ],
+    }
+
+
+def wants_circle_marker(prompt: str) -> bool:
+    return bool(re.search(r"(圈|圈出|圈選|框出|標記|標出|circle|mark|highlight)", prompt or "", re.IGNORECASE))
+
+
+def has_position_hint(prompt: str) -> bool:
+    return bool(
+        re.search(
+            r"(左上|右上|左下|右下|左邊|右邊|上方|下方|上面|下面|中間|中央|left|right|top|bottom|center)",
+            prompt or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def wants_main_area_marker(prompt: str) -> bool:
+    return bool(re.search(r"(主要區域|主要畫面|中間|中央|main visible area|main area|center)", prompt or "", re.IGNORECASE))
+
+
+def fallback_circle_overlay() -> dict[str, Any]:
+    return {
+        "duration_ms": 6000,
+        "items": [
+            {
+                "type": "circle",
+                "x": 0.5,
+                "y": 0.5,
+                "radius": 0.16,
+                "color": "#ff2d2d",
+            }
+        ],
+    }
+
+
+def prompt_position_fallback_overlay(prompt: str) -> dict[str, Any]:
+    text = (prompt or "").lower()
+    x = 0.5
+    y = 0.5
+    if any(token in text for token in ("左", "left")):
+        x = 0.24
+    if any(token in text for token in ("右", "right")):
+        x = 0.76
+    if any(token in text for token in ("上", "top")):
+        y = 0.24
+    if any(token in text for token in ("下", "bottom")):
+        y = 0.76
+    overlay = fallback_circle_overlay()
+    overlay["items"][0]["x"] = x
+    overlay["items"][0]["y"] = y
+    return overlay
+
+
+def fallback_overlay_for_prompt(prompt: str) -> Optional[dict[str, Any]]:
+    if has_position_hint(prompt) or wants_main_area_marker(prompt):
+        return prompt_position_fallback_overlay(prompt)
+    return None
+
+
 def create_overlay_response(prompt: str, image_base64: str, rag_context: str) -> dict[str, Any]:
-    output = call_llama_once(build_overlay_messages(prompt, image_base64, rag_context), max_tokens=900)
+    if wants_circle_marker(prompt) and has_position_hint(prompt):
+        overlay = attach_overlay_image_space(prompt_position_fallback_overlay(prompt), image_base64)
+        return {"answer": "我已依照你指定的位置畫上紅圈。", "overlay": overlay}
+
+    output = call_llama_once(build_overlay_messages(prompt, image_base64, rag_context), max_tokens=320)
+    try:
+        (LOG_DIR / "latest-overlay-raw.txt").write_text(output, encoding="utf-8")
+    except Exception:
+        pass
     try:
         parsed = extract_json_object(output)
     except Exception:
-        return {"answer": output.strip(), "overlay": None}
-    answer = str(parsed.get("answer") or "").strip()
+        overlay = extract_loose_overlay(output)
+        if overlay:
+            overlay = attach_overlay_image_space(overlay, image_base64)
+            return {"answer": "我已把紅色標記畫在 HUD 上。", "overlay": overlay}
+        fallback = fallback_overlay_for_prompt(prompt)
+        if fallback:
+            fallback = attach_overlay_image_space(fallback, image_base64)
+            return {"answer": "我先用紅圈標出可能區域。", "overlay": fallback}
+        return {"answer": "我沒有抓到可靠座標，所以先不畫錯位置。請指定要標記的物件或方位。", "overlay": None}
+    answer = clean_vision_answer(str(parsed.get("answer") or "").strip())
+    answer = re.sub(r"\(?\s*x\s*[:=]\s*0?\.\d+\s*,?\s*y\s*[:=]\s*0?\.\d+\s*\)?", "", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"座標\s*[:：]?\s*[0-9.,，\s]+", "", answer)
+    answer = re.sub(r"(?:格子|方格|cell)\s*[:：]?\s*[A-Ha-h]\s*[-_ ]?\s*[1-6]", "", answer, flags=re.IGNORECASE)
+    answer = clean_short_answer(answer)
     overlay = sanitize_overlay(parsed.get("overlay"))
+    if not overlay:
+        overlay = fallback_overlay_for_prompt(prompt)
+        if overlay and (not answer or "無法" in answer):
+            answer = "我先用紅圈標出可能區域。"
+    overlay = attach_overlay_image_space(overlay, image_base64)
     if not answer:
-        answer = "我已根據畫面整理提示。"
+        answer = "我沒有抓到可靠座標，所以先不畫錯位置。請指定要標記的物件或方位。"
     return {"answer": answer, "overlay": overlay}
 
 
@@ -930,6 +1680,9 @@ async def health():
         "vulkan_device": VULKAN_DEVICE,
         "resource_policy": "game",
         "llama_ctx_size": LLAMA_CTX_SIZE,
+        "llama_gpu_layers": LLAMA_GPU_LAYERS,
+        "llama_image_min_tokens": LLAMA_IMAGE_MIN_TOKENS or "default",
+        "llama_image_max_tokens": LLAMA_IMAGE_MAX_TOKENS_SERVER or "default",
         "llama_parallel": LLAMA_PARALLEL or "auto",
         "llama_cache_ram_mib": LLAMA_CACHE_RAM or "default",
         "chat_backend": CHAT_BACKEND,
@@ -1015,7 +1768,6 @@ async def openai_chat_completions(request: Request):
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
 
     body.setdefault("model", MODEL_ALIAS)
-    body.setdefault("chat_template_kwargs", {"enable_thinking": False})
     body.setdefault("max_tokens", int(os.environ.get("LLAMA_MAX_TOKENS", "512")))
     proxied_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
     target_url = f"{llama_base_url()}/v1/chat/completions"
@@ -1058,19 +1810,577 @@ async def clear_history():
 
 @app.post("/transcribe")
 async def transcribe_endpoint(file: UploadFile = File(...)):
-    raise HTTPException(status_code=503, detail="Voice transcription is not wired in this llama.cpp Vulkan bridge yet.")
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio upload.")
+    if len(audio_bytes) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio upload is too large.")
+
+    suffix = Path(file.filename or "voice.webm").suffix.lower()
+    if suffix not in {".webm", ".wav", ".mp3", ".m4a", ".ogg"}:
+        suffix = ".webm"
+
+    voice_dir = LOG_DIR / "voice"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = voice_dir / f"voice-{int(time.time() * 1000)}{suffix}"
+    audio_path.write_bytes(audio_bytes)
+
+    try:
+        return await asyncio.to_thread(transcribe_audio_path, audio_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Voice transcription failed: {exc}")
+
+
+class WinRect(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+
+def rect_to_dict(rect: Any) -> dict[str, int]:
+    left = int(rect.left)
+    top = int(rect.top)
+    right = int(rect.right)
+    bottom = int(rect.bottom)
+    return {
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "width": max(0, right - left),
+        "height": max(0, bottom - top),
+    }
+
+
+def get_dwm_extended_frame_bounds(hwnd: int) -> Optional[dict[str, int]]:
+    if os.name != "nt" or not hwnd:
+        return None
+    try:
+        dwmapi = ctypes.windll.dwmapi
+        rect = WinRect()
+        result = dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(int(hwnd)),
+            ctypes.c_uint(DWMWA_EXTENDED_FRAME_BOUNDS),
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+        if result != 0:
+            return None
+        bounds = rect_to_dict(rect)
+        if bounds["width"] <= 0 or bounds["height"] <= 0:
+            return None
+        return bounds
+    except Exception:
+        return None
+
+
+def get_foreground_window_info() -> Optional[dict[str, Any]]:
+    if os.name != "nt":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+
+        info = get_window_info(user32, hwnd)
+        if info:
+            return info
+
+        time.sleep(0.12)
+        return get_top_window_info(user32)
+    except Exception:
+        return None
+
+
+def get_window_info(
+    user32: Any,
+    hwnd: int,
+    *,
+    allow_ignored: bool = False,
+) -> Optional[dict[str, Any]]:
+    if not hwnd or not user32.IsWindowVisible(hwnd):
+        return None
+
+    title_buffer = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, title_buffer, 512)
+    title = title_buffer.value.strip()
+    ignored_window = any(ignored in title for ignored in IGNORED_CAPTURE_TITLES)
+    if ignored_window and not allow_ignored:
+        return None
+
+    rect = WinRect()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+
+    window_rect = rect_to_dict(rect)
+    width = window_rect["width"]
+    height = window_rect["height"]
+    if width < 320 or height < 240:
+        return None
+
+    return {
+        "hwnd": int(hwnd),
+        "title": title,
+        "left": window_rect["left"],
+        "top": window_rect["top"],
+        "right": window_rect["right"],
+        "bottom": window_rect["bottom"],
+        "width": width,
+        "height": height,
+        "window_rect": window_rect,
+        "dwm_extended_frame_bounds": get_dwm_extended_frame_bounds(int(hwnd)),
+        "ignored": ignored_window,
+    }
+
+
+def get_top_window_info(user32: Any) -> Optional[dict[str, Any]]:
+    hwnd = user32.GetTopWindow(0)
+    checked = 0
+    while hwnd and checked < 80:
+        info = get_window_info(user32, hwnd)
+        if info:
+            return info
+        hwnd = user32.GetWindow(hwnd, 2)
+        checked += 1
+    return None
+
+
+def get_ignored_window_infos() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetTopWindow(0)
+        checked = 0
+        ignored: list[dict[str, Any]] = []
+        while hwnd and checked < 120:
+            info = get_window_info(user32, hwnd, allow_ignored=True)
+            if info and info.get("ignored"):
+                ignored.append(info)
+            hwnd = user32.GetWindow(hwnd, 2)
+            checked += 1
+        return ignored
+    except Exception:
+        return []
+
+
+def crop_to_foreground_window(
+    img: Image.Image,
+    monitor: dict[str, int],
+    window: dict[str, Any],
+) -> Optional[Image.Image]:
+    monitor_left = int(monitor.get("left", 0))
+    monitor_top = int(monitor.get("top", 0))
+    monitor_right = monitor_left + int(monitor["width"])
+    monitor_bottom = monitor_top + int(monitor["height"])
+
+    left = max(int(window["left"]), monitor_left)
+    top = max(int(window["top"]), monitor_top)
+    right = min(int(window["right"]), monitor_right)
+    bottom = min(int(window["bottom"]), monitor_bottom)
+
+    if right - left < 320 or bottom - top < 240:
+        return None
+
+    return img.crop(
+        (
+            left - monitor_left,
+            top - monitor_top,
+            right - monitor_left,
+            bottom - monitor_top,
+        )
+    )
+
+
+def get_capture_bounds(
+    monitor: dict[str, int],
+    window: Optional[dict[str, Any]] = None,
+) -> tuple[int, int, int, int]:
+    monitor_left = int(monitor.get("left", 0))
+    monitor_top = int(monitor.get("top", 0))
+    monitor_right = monitor_left + int(monitor["width"])
+    monitor_bottom = monitor_top + int(monitor["height"])
+
+    if not window:
+        return monitor_left, monitor_top, monitor_right, monitor_bottom
+
+    return (
+        max(int(window["left"]), monitor_left),
+        max(int(window["top"]), monitor_top),
+        min(int(window["right"]), monitor_right),
+        min(int(window["bottom"]), monitor_bottom),
+    )
+
+
+def intersection_area(
+    a_left: int,
+    a_top: int,
+    a_right: int,
+    a_bottom: int,
+    b_left: int,
+    b_top: int,
+    b_right: int,
+    b_bottom: int,
+) -> int:
+    width = max(0, min(a_right, b_right) - max(a_left, b_left))
+    height = max(0, min(a_bottom, b_bottom) - max(a_top, b_top))
+    return width * height
+
+
+def select_capture_monitor(
+    monitors: list[dict[str, int]],
+    window: Optional[dict[str, Any]] = None,
+) -> tuple[dict[str, int], int]:
+    if not monitors:
+        raise RuntimeError("No monitor found for screenshot capture.")
+
+    if not window:
+        index = 1 if len(monitors) > 1 else 0
+        return monitors[index], index
+
+    best_index = 1 if len(monitors) > 1 else 0
+    best_area = -1
+    win_left = int(window["left"])
+    win_top = int(window["top"])
+    win_right = int(window["right"])
+    win_bottom = int(window["bottom"])
+
+    for index, monitor in enumerate(monitors[1:] or monitors):
+        actual_index = index + 1 if len(monitors) > 1 else index
+        mon_left = int(monitor.get("left", 0))
+        mon_top = int(monitor.get("top", 0))
+        mon_right = mon_left + int(monitor["width"])
+        mon_bottom = mon_top + int(monitor["height"])
+        area = intersection_area(
+            win_left,
+            win_top,
+            win_right,
+            win_bottom,
+            mon_left,
+            mon_top,
+            mon_right,
+            mon_bottom,
+        )
+        if area > best_area:
+            best_area = area
+            best_index = actual_index
+
+    return monitors[best_index], best_index
+
+
+def redact_ignored_windows(
+    img: Image.Image,
+    capture_bounds: tuple[int, int, int, int],
+    *,
+    enabled: Optional[bool] = None,
+) -> tuple[Image.Image, int]:
+    if enabled is None:
+        enabled = os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if not enabled:
+        return img, 0
+
+    ignored_windows = get_ignored_window_infos()
+    if not ignored_windows:
+        return img, 0
+
+    capture_left, capture_top, capture_right, capture_bottom = capture_bounds
+    redacted = img.copy()
+    draw = ImageDraw.Draw(redacted)
+    count = 0
+
+    for window in ignored_windows:
+        left = max(int(window["left"]), capture_left)
+        top = max(int(window["top"]), capture_top)
+        right = min(int(window["right"]), capture_right)
+        bottom = min(int(window["bottom"]), capture_bottom)
+        if right - left < 8 or bottom - top < 8:
+            continue
+
+        draw.rectangle(
+            (
+                left - capture_left,
+                top - capture_top,
+                right - capture_left,
+                bottom - capture_top,
+            ),
+            fill=(8, 8, 10),
+        )
+        count += 1
+
+    return redacted, count
+
+
+def is_blank_capture(img: Image.Image) -> bool:
+    gray = img.convert("L")
+    stat = ImageStat.Stat(gray)
+    low, high = stat.extrema[0]
+    return stat.mean[0] < 8 and high - low < 4
+
+
+def capture_window_with_print_window(window: dict[str, Any]) -> Optional[Image.Image]:
+    if os.name != "nt":
+        return None
+
+    hwnd_value = int(window.get("hwnd") or 0)
+    width = int(window.get("width") or 0)
+    height = int(window.get("height") or 0)
+    if not hwnd_value or width < 320 or height < 240:
+        return None
+
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    hwnd = wintypes.HWND(hwnd_value)
+
+    user32.GetWindowDC.argtypes = [wintypes.HWND]
+    user32.GetWindowDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.ReleaseDC.restype = ctypes.c_int
+    user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    user32.PrintWindow.restype = wintypes.BOOL
+
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.GetBitmapBits.argtypes = [wintypes.HBITMAP, ctypes.c_long, ctypes.c_void_p]
+    gdi32.GetBitmapBits.restype = ctypes.c_long
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.DeleteDC.restype = wintypes.BOOL
+
+    hdc_window = user32.GetWindowDC(hwnd)
+    if not hdc_window:
+        return None
+
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_window)
+    if not hdc_mem:
+        user32.ReleaseDC(hwnd, hdc_window)
+        return None
+
+    bitmap = gdi32.CreateCompatibleBitmap(hdc_window, width, height)
+    if not bitmap:
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(hwnd, hdc_window)
+        return None
+
+    old_bitmap = gdi32.SelectObject(hdc_mem, bitmap)
+    try:
+        ok = user32.PrintWindow(hwnd, hdc_mem, 0x00000002)
+        if not ok:
+            ok = user32.PrintWindow(hwnd, hdc_mem, 0)
+        if not ok:
+            return None
+
+        buffer_size = width * height * 4
+        buffer = ctypes.create_string_buffer(buffer_size)
+        copied = gdi32.GetBitmapBits(bitmap, buffer_size, buffer)
+        if copied <= 0:
+            return None
+
+        img = Image.frombuffer("RGB", (width, height), buffer, "raw", "BGRX", 0, 1).copy()
+        if is_blank_capture(img):
+            print(f"PrintWindow returned a blank image for hwnd={hwnd_value}")
+            return None
+        return img
+    except Exception as exc:
+        print(f"PrintWindow capture failed for hwnd={hwnd_value}: {exc}")
+        return None
+    finally:
+        if old_bitmap:
+            gdi32.SelectObject(hdc_mem, old_bitmap)
+        gdi32.DeleteObject(bitmap)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(hwnd, hdc_window)
+
+
+def capture_window_image(window: dict[str, Any]) -> Optional[tuple[Image.Image, str]]:
+    if os.name != "nt":
+        return None
+
+    hwnd = int(window.get("hwnd") or 0)
+    if not hwnd:
+        return None
+
+    img = capture_window_with_print_window(window)
+    if img is not None:
+        return img, "print_window"
+
+    try:
+        img = ImageGrab.grab(window=hwnd)
+    except Exception as exc:
+        print(f"Window capture failed for hwnd={hwnd}: {exc}")
+        return None
+
+    if img.width < 320 or img.height < 240:
+        return None
+    img = img.convert("RGB")
+    if is_blank_capture(img):
+        print(f"Window capture returned a blank image for hwnd={hwnd}")
+        return None
+    return img, "image_grab_window"
+
+
+def make_capture_source(
+    *,
+    mode: str,
+    capture_method: str,
+    img: Image.Image,
+    capture_left: int,
+    capture_top: int,
+    window: Optional[dict[str, Any]] = None,
+    monitor: Optional[dict[str, int]] = None,
+) -> dict[str, Any]:
+    capture_width = int(img.width)
+    capture_height = int(img.height)
+    source: dict[str, Any] = {
+        "mode": mode,
+        "capture_method": capture_method,
+        "window_title": str(window.get("title") or "") if window else "",
+        "bitmap_width": capture_width,
+        "bitmap_height": capture_height,
+        "capture_left": int(capture_left),
+        "capture_top": int(capture_top),
+        "capture_width": capture_width,
+        "capture_height": capture_height,
+        "capture_right": int(capture_left) + capture_width,
+        "capture_bottom": int(capture_top) + capture_height,
+        # Legacy aliases kept for older frontend builds.
+        "left": int(capture_left),
+        "top": int(capture_top),
+        "width": capture_width,
+        "height": capture_height,
+    }
+    if window:
+        source["hwnd"] = int(window.get("hwnd") or 0)
+        source["window_rect"] = window.get("window_rect") or {
+            "left": int(window["left"]),
+            "top": int(window["top"]),
+            "right": int(window["right"]),
+            "bottom": int(window["bottom"]),
+            "width": int(window["width"]),
+            "height": int(window["height"]),
+        }
+        source["dwm_extended_frame_bounds"] = window.get("dwm_extended_frame_bounds")
+    if monitor:
+        source["monitor"] = int(monitor.get("index") or 1)
+        source["monitor_rect"] = {
+            "left": int(monitor.get("left", 0)),
+            "top": int(monitor.get("top", 0)),
+            "width": int(monitor["width"]),
+            "height": int(monitor["height"]),
+        }
+    return source
 
 
 @app.get("/screenshot")
-async def screenshot_endpoint():
+async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] = None):
     try:
+        mode_name = mode.lower()
+        window = None
+        if mode_name in {"foreground", "window"}:
+            window = get_foreground_window_info()
+            if not window:
+                window = get_foreground_window_info()
+
+        if mode_name == "window":
+            if window:
+                captured = capture_window_image(window)
+                if captured is not None:
+                    img, capture_method = captured
+                    encoded = encode_png_base64(img, save_path=LATEST_SCREENSHOT)
+                    return {
+                        "image_base64": encoded,
+                        "width": img.width,
+                        "height": img.height,
+                        "source": make_capture_source(
+                            mode="window",
+                            capture_method=capture_method,
+                            img=img,
+                            capture_left=int(window["left"]),
+                            capture_top=int(window["top"]),
+                            window=window,
+                        ),
+                        "debug_path": str(LATEST_SCREENSHOT),
+                    }
+                print("Direct window capture failed; falling back to screen crop.")
+            else:
+                print("No target window found; falling back to monitor capture.")
+
         with mss.mss() as sct:
-            monitor = sct.monitors[1]
+            monitor, monitor_index = select_capture_monitor(sct.monitors, window)
             sct_img = sct.grab(monitor)
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            buffered = io.BytesIO()
-            img.save(buffered, format="PNG")
-            return {"image_base64": base64.b64encode(buffered.getvalue()).decode("ascii")}
+            capture_bounds = get_capture_bounds(monitor)
+            source: dict[str, Any] = make_capture_source(
+                mode="screen",
+                capture_method="mss_monitor",
+                img=img,
+                capture_left=int(capture_bounds[0]),
+                capture_top=int(capture_bounds[1]),
+                monitor={**monitor, "index": monitor_index},
+            )
+
+            if mode_name in {"foreground", "window"}:
+                if window:
+                    cropped = crop_to_foreground_window(img, monitor, window)
+                    if cropped:
+                        img = cropped
+                        capture_bounds = get_capture_bounds(monitor, window)
+                        source = make_capture_source(
+                            mode=mode_name,
+                            capture_method=(
+                                "screen_crop_fallback" if mode_name == "window" else "screen_crop"
+                            ),
+                            img=img,
+                            capture_left=int(capture_bounds[0]),
+                            capture_top=int(capture_bounds[1]),
+                            window=window,
+                            monitor={**monitor, "index": monitor_index},
+                        )
+                        if mode_name == "window":
+                            source["direct_capture_failed"] = True
+
+            redaction_enabled = (
+                redact
+                if redact is not None
+                else os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            img, redacted_count = redact_ignored_windows(
+                img,
+                capture_bounds,
+                enabled=redaction_enabled,
+            )
+            source["redacted_overlay_windows"] = redacted_count
+            source["capture_protection"] = "redaction" if redaction_enabled else "off"
+            encoded = encode_png_base64(img, save_path=LATEST_SCREENSHOT)
+            return {
+                "image_base64": encoded,
+                "width": img.width,
+                "height": img.height,
+                "source": source,
+                "debug_path": str(LATEST_SCREENSHOT),
+            }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1102,6 +2412,20 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(memory_add_event_generator(), media_type="text/event-stream")
 
+    implicit_memory = detect_implicit_memory_fact(prompt)
+    if implicit_memory and not chat_request.image_base64:
+        try:
+            await asyncio.to_thread(
+                add_memory_sync,
+                implicit_memory["content"],
+                game_id,
+                implicit_memory["kind"],
+                "auto",
+                4,
+            )
+        except Exception as exc:
+            print(f"Implicit memory write failed: {exc}")
+
     guide_was_requested = should_use_guides(prompt, chat_request.use_guides)
     memory_results: list[dict[str, Any]] = []
     guide_results: list[dict[str, Any]] = []
@@ -1109,6 +2433,15 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         memory_results = await asyncio.to_thread(search_memory_sync, prompt, game_id, None, 8)
     if guide_was_requested:
         guide_results = await asyncio.to_thread(search_guides_sync, prompt, game_id, 5)
+
+    fact_answer = answer_fact_lookup(prompt, memory_results)
+    if fact_answer and not chat_request.image_base64:
+        async def fact_answer_event_generator():
+            append_history("user", prompt)
+            append_history("assistant", fact_answer)
+            yield f"data: {json.dumps({'content': fact_answer}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(fact_answer_event_generator(), media_type="text/event-stream")
 
     if guide_was_requested and not guide_results and not chat_request.image_base64:
         async def no_guide_event_generator():
@@ -1167,7 +2500,6 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
     if should_use_overlay(prompt, chat_request.image_base64):
         async def overlay_event_generator():
-            yield f"data: {json.dumps({'content': '我正在讀取截圖，等一下我會嘗試標記位置。\\n'}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0)
             async with generate_lock:
                 try:
@@ -1197,7 +2529,44 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(overlay_event_generator(), media_type="text/event-stream")
 
-    messages = build_messages(augmented_prompt, chat_request.image_base64)
+    if chat_request.image_base64:
+        async def image_event_generator():
+            await asyncio.sleep(0)
+            ocr_text = ""
+            if ENABLE_OCR_CONTEXT:
+                ocr_text = await asyncio.to_thread(extract_ocr_text, chat_request.image_base64)
+            visual_scene_request = should_use_visual_scene(prompt)
+            if visual_scene_request:
+                visual_prompt = (
+                    f"{augmented_prompt}\n\n"
+                    "這次請優先看圖片像素本身，不要只讀畫面文字。"
+                    "請列出畫面中可見的主要物件、人物、UI 元素、場景或區域；"
+                    "如果不確定，就說你能辨識到的形狀、位置或大概類型。"
+                )
+                messages = build_messages(visual_prompt, chat_request.image_base64, ocr_text)
+            else:
+                messages = build_messages(augmented_prompt, chat_request.image_base64, ocr_text)
+            async with generate_lock:
+                try:
+                    answer = await asyncio.to_thread(
+                        call_llama_once,
+                        messages,
+                        int(os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "160")),
+                    )
+                except Exception as exc:
+                    yield f"data: {json.dumps({'content': f'截圖分析失敗：{exc}'}, ensure_ascii=False)}\n\n"
+                    return
+
+            answer = clean_vision_answer(answer)
+            if not answer:
+                answer = "這張截圖我看不出可靠重點；你可以直接指定要我看哪個位置或 UI。"
+            append_history("user", prompt)
+            append_history("assistant", answer)
+            yield f"data: {json.dumps({'content': answer}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(image_event_generator(), media_type="text/event-stream")
+
+    messages = build_messages(augmented_prompt, None)
 
     payload = {
         "model": MODEL_ALIAS,
@@ -1206,18 +2575,18 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         "max_tokens": int(
             os.environ.get(
                 "LLAMA_IMAGE_MAX_TOKENS" if chat_request.image_base64 else "LLAMA_MAX_TOKENS",
-                "256" if chat_request.image_base64 else "512",
+                "160" if chat_request.image_base64 else "128",
             )
         ),
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0.55,
+        "top_p": 0.85,
+        "top_k": 20,
+        "repeat_penalty": 1.0,
     }
 
     async def event_generator():
         collected = ""
         if chat_request.image_base64:
-            yield f"data: {json.dumps({'content': '我正在讀取截圖，先辨識畫面內容。\\n'}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0)
         async with generate_lock:
             try:
@@ -1259,6 +2628,11 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             if collected:
                 append_history("user", prompt)
                 append_history("assistant", collected)
+            elif not await fastapi_request.is_disconnected():
+                fallback = "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
+                append_history("user", prompt)
+                append_history("assistant", fallback)
+                yield f"data: {json.dumps({'content': fallback}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

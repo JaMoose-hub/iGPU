@@ -9,3 +9,4 @@ openvino-genai
 librosa
 soundfile
 python-multipart
+faster-whisper

@@ -1,10 +1,11 @@
 document.addEventListener("DOMContentLoaded", async () => {
-  // ── Tauri v2 API 初始化 ──
-  const { getCurrentWindow } = window.__TAURI__.window;
-  const { WebviewWindow } = window.__TAURI__.webviewWindow;
-  const { register, unregisterAll } = window.__TAURI__.globalShortcut;
-  const { invoke } = window.__TAURI__.core;
-  const { listen, emitTo } = window.__TAURI__.event;
+  const tauri = window.__TAURI__ || {};
+  const appWindow = tauri.window?.getCurrentWindow?.();
+  const globalShortcut = tauri.globalShortcut || {};
+  const events = tauri.event || {};
+  const invoke = tauri.core?.invoke;
+
+  const API_BASE = "http://127.0.0.1:8000";
 
   const closeBtn = document.getElementById("closeBtn");
   const minBtn = document.getElementById("minBtn");
@@ -15,177 +16,280 @@ document.addEventListener("DOMContentLoaded", async () => {
   const chatWindow = document.getElementById("chatWindow");
   const dragBar = document.querySelector(".drag-bar");
   const screenshotBtn = document.getElementById("screenshotBtn");
-  const opacitySlider = document.getElementById("opacitySlider");
   const perfBtn = document.getElementById("perfBtn");
   const voiceBtn = document.getElementById("voiceBtn");
   const gameSelect = document.getElementById("gameSelect");
   const hudBtn = document.getElementById("hudBtn");
+  const hudTestBtn = document.getElementById("hudTestBtn");
+  const protectBtn = document.getElementById("protectBtn");
   const resizeGrip = document.getElementById("resizeGrip");
-  
   const imagePreviewArea = document.getElementById("imagePreviewArea");
   const previewImg = document.getElementById("previewImg");
   const removeImgBtn = document.getElementById("removeImgBtn");
 
-  const appWindow = getCurrentWindow();
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  let hudWindowPromise = null;
-  let hudReady = false;
-  let hudReadyPromise = null;
-  
-  // ── 透明度初始化與監聽 ──
-  const savedOpacity = localStorage.getItem("ui-opacity") || "0.85";
-  document.documentElement.style.setProperty("--glass-opacity", savedOpacity);
-  if (opacitySlider) opacitySlider.value = savedOpacity;
+  let pendingImageBase64 = null;
+  let pendingCaptureSource = null;
+  let abortController = null;
+  let isSending = false;
+  let isVoiceRecording = false;
+  let isVoiceBusy = false;
+  let mediaRecorder = null;
+  let mediaStream = null;
+  let voiceChunks = [];
+  let voiceStatusMessage = null;
+  let isVoiceStarting = false;
+  let voiceStopRequested = false;
+  let lastHudError = "";
+  let captureProtectionEnabled = localStorage.getItem("protect-mode") !== "off";
 
-  if (opacitySlider) {
-    opacitySlider.addEventListener("input", (e) => {
-      const val = e.target.value;
-      document.documentElement.style.setProperty("--glass-opacity", val);
-      localStorage.setItem("ui-opacity", val);
-    });
+  localStorage.removeItem("hud-overlay");
+  await invoke?.("hide_hud_window").catch((err) => {
+    console.warn("Could not hide stale HUD window:", err);
+  });
+  document.documentElement.style.setProperty("--glass-opacity", "1");
+  localStorage.removeItem("ui-opacity");
+  await appWindow?.setContentProtected?.(false).catch((err) => {
+    console.warn("Could not clear main-window content protection:", err);
+  });
+  await invoke?.("set_main_capture_exclusion", { excluded: captureProtectionEnabled }).catch((err) => {
+    console.warn("Could not set window capture exclusion:", err);
+  });
+
+  if (localStorage.getItem("perf-mode") === "true") {
+    document.body.classList.add("perf-mode");
   }
-  
-  // ── 效能模式初始化與監聽 ──
-  const isPerfMode = localStorage.getItem("perf-mode") === "true";
-  if (isPerfMode) document.body.classList.add("perf-mode");
 
-  if (perfBtn) {
-    perfBtn.addEventListener("click", () => {
-      const enabled = document.body.classList.toggle("perf-mode");
-      localStorage.setItem("perf-mode", enabled);
-    });
-  }
-
-  // ── 語音輸入 (OpenVINO Whisper) ──
-  const guideIntentRe = /(攻略|怎麼打|怎麼走|在哪|哪裡|弱點|任務|素材|材料|路線|指路|地圖|boss|npc|quest|guide|route|map|weakness)/i;
-  let hudEnabled = localStorage.getItem("hud-enabled") !== "false";
-  if (hudBtn) hudBtn.classList.toggle("active", hudEnabled);
-
-  const waitForHudReady = async () => {
-    if (hudReady) return;
-    if (hudReadyPromise) return hudReadyPromise;
-
-    hudReadyPromise = new Promise(async (resolve) => {
-      let settled = false;
-      let unlisten = null;
-      const finish = async () => {
-        if (settled) return;
-        settled = true;
-        hudReady = true;
-        if (unlisten) await unlisten().catch(() => {});
-        resolve();
-      };
-
-      const timeout = setTimeout(finish, 4000);
-      unlisten = await listen("hud:ready", async (event) => {
-        if (event?.payload?.label === "hud") {
-          clearTimeout(timeout);
-          await finish();
-        }
-      }).catch(() => null);
-    });
-
-    return hudReadyPromise;
-  };
-
-  waitForHudReady();
-
-  const ensureHudWindow = async () => {
-    if (hudWindowPromise) return hudWindowPromise;
-
-    hudWindowPromise = (async () => {
-      const existing = await WebviewWindow.getByLabel("hud").catch(() => null);
-      if (existing) {
-        await waitForHudReady();
-        await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
-        return existing;
-      }
-
-      const readyPromise = waitForHudReady();
-      const hudWidth = Math.max(Number(window.screen?.width) || 1280, 1);
-      const hudHeight = Math.max(Number(window.screen?.height) || 720, 1);
-      const hudWindow = new WebviewWindow("hud", {
-        url: "/hud.html",
-        title: "game-guidance-hud",
-        x: 0,
-        y: 0,
-        width: hudWidth,
-        height: hudHeight,
-        transparent: true,
-        decorations: false,
-        alwaysOnTop: true,
-        skipTaskbar: true,
-        focusable: false,
-        resizable: false,
-        visible: false,
-        shadow: false
-      });
-
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(resolve, 2000);
-        hudWindow.once("tauri://created", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        hudWindow.once("tauri://error", (event) => {
-          clearTimeout(timeout);
-          hudWindowPromise = null;
-          reject(event.payload || event);
-        });
-      });
-
-      await readyPromise;
-      await hudWindow.hide().catch(() => {});
-      await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
-      return hudWindow;
-    })();
-
-    return hudWindowPromise;
-  };
-
-  const showHudOverlay = async (overlay) => {
-    if (!hudEnabled || !overlay || !overlay.items || !overlay.items.length) return;
-    try {
-      await ensureHudWindow();
-      await invoke("show_hud_window", {
-        width: Math.max(Number(window.screen?.width) || 1280, 1),
-        height: Math.max(Number(window.screen?.height) || 720, 1)
-      });
-      await emitTo("hud", "hud:show", overlay);
-    } catch (err) {
-      console.warn("HUD show failed:", err);
+  const updateProtectButton = () => {
+    protectBtn?.classList.toggle("active", captureProtectionEnabled);
+    if (protectBtn) {
+      protectBtn.textContent = captureProtectionEnabled ? "Protect" : "NoProt";
+      protectBtn.title = captureProtectionEnabled
+        ? "Windows capture protection on: companion windows are excluded from screenshots and screen sharing"
+        : "Windows capture protection off: companion windows can appear in screenshots and screen sharing";
     }
+    localStorage.setItem("protect-mode", captureProtectionEnabled ? "os-exclude" : "off");
   };
+
+  updateProtectButton();
+
+  protectBtn?.addEventListener("click", async () => {
+    captureProtectionEnabled = !captureProtectionEnabled;
+    updateProtectButton();
+    await invoke?.("set_main_capture_exclusion", { excluded: captureProtectionEnabled }).catch((err) => {
+      appendMessage(`Protect command failed: ${err?.message || err}`, "bot");
+    });
+    appendMessage(
+      captureProtectionEnabled
+        ? "Windows capture protection on."
+        : "Screenshot protection off.",
+      "bot"
+    );
+  });
+
+  perfBtn?.addEventListener("click", () => {
+    const enabled = document.body.classList.toggle("perf-mode");
+    localStorage.setItem("perf-mode", enabled ? "true" : "false");
+  });
 
   const clearHudOverlay = async () => {
-    try {
-      if (!hudWindowPromise) return;
-      await ensureHudWindow();
-      await emitTo("hud", "hud:clear");
-      await invoke("hide_hud_window").catch(() => {});
-    } catch (err) {
-      console.warn("HUD clear failed:", err);
+    localStorage.removeItem("hud-overlay");
+    if (invoke) {
+      await invoke("clear_hud_overlay").catch((err) => console.warn("HUD clear command failed:", err));
+      return;
+    }
+    if (events.emit) {
+      await events.emit("hud:clear").catch((err) => console.warn("HUD clear failed:", err));
     }
   };
 
-  if (hudBtn) {
-    hudBtn.addEventListener("click", async () => {
-      hudEnabled = !hudEnabled;
-      localStorage.setItem("hud-enabled", hudEnabled ? "true" : "false");
-      hudBtn.classList.toggle("active", hudEnabled);
-      if (!hudEnabled) await clearHudOverlay();
-    });
-  }
+  const hudTargetFromSource = (source) => {
+    const fallback = {
+      width: window.screen?.width || window.innerWidth || 1920,
+      height: window.screen?.height || window.innerHeight || 1080,
+      x: 0,
+      y: 0
+    };
+    const sourceWidth = Number(source?.capture_width ?? source?.width);
+    const sourceHeight = Number(source?.capture_height ?? source?.height);
+    const sourceLeft = Number(source?.capture_left ?? source?.left);
+    const sourceTop = Number(source?.capture_top ?? source?.top);
+    if (
+      Number.isFinite(sourceWidth) &&
+      Number.isFinite(sourceHeight) &&
+      sourceWidth > 32 &&
+      sourceHeight > 32 &&
+      Number.isFinite(sourceLeft) &&
+      Number.isFinite(sourceTop)
+    ) {
+      return {
+        width: sourceWidth,
+        height: sourceHeight,
+        x: sourceLeft,
+        y: sourceTop
+      };
+    }
+    return fallback;
+  };
+
+  const makeTestOverlay = (target) => {
+    const imageWidth = Number(target?.imageWidth || target?.width || window.screen?.width || 1920);
+    const imageHeight = Number(target?.imageHeight || target?.height || window.screen?.height || 1080);
+    const minEdge = Math.min(imageWidth, imageHeight);
+    return {
+      duration_ms: 6500,
+      coordinate_space: {
+        type: "source_image_pixels",
+        image_width: imageWidth,
+        image_height: imageHeight
+      },
+      items: [
+        {
+          type: "circle",
+          x: 0.5,
+          y: 0.5,
+          pixel_x: Math.round(imageWidth * 0.5),
+          pixel_y: Math.round(imageHeight * 0.5),
+          radius: 0.12,
+          radius_px: Math.round(minEdge * 0.12),
+          color: "#ff2d2d",
+          label: "HUD"
+        },
+        {
+          type: "arrow",
+          from: {
+            x: 0.2,
+            y: 0.78,
+            pixel_x: Math.round(imageWidth * 0.2),
+            pixel_y: Math.round(imageHeight * 0.78)
+          },
+          to: {
+            x: 0.5,
+            y: 0.5,
+            pixel_x: Math.round(imageWidth * 0.5),
+            pixel_y: Math.round(imageHeight * 0.5)
+          },
+          color: "#ff2d2d",
+          label: "Here"
+        }
+      ]
+    };
+  };
+
+  const showHudOverlay = async (overlay, captureSource = null) => {
+    if (!overlay?.items?.length) return;
+    lastHudError = "";
+    const target = hudTargetFromSource(captureSource);
+    const space = overlay.coordinate_space || {};
+    if (Number.isFinite(Number(space.image_width)) && Number.isFinite(Number(space.image_height))) {
+      target.imageWidth = Number(space.image_width);
+      target.imageHeight = Number(space.image_height);
+    }
+    const overlayForHud = {
+      ...overlay,
+      render_target: target
+    };
+    localStorage.setItem(
+      "hud-overlay",
+      JSON.stringify({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        overlay: overlayForHud,
+        target
+      })
+    );
+    if (invoke) {
+      try {
+        const args = { overlay: overlayForHud, width: target.width, height: target.height };
+        if (Number.isFinite(target.x) && Number.isFinite(target.y)) {
+          args.x = target.x;
+          args.y = target.y;
+        }
+        await invoke("show_hud_overlay", args);
+        return true;
+      } catch (err) {
+        lastHudError = `HUD command failed: ${err?.message || err}`;
+        console.warn(lastHudError);
+      }
+    }
+    if (events.emit) {
+      try {
+        await events.emit("hud:show", overlayForHud);
+        return true;
+      } catch (err) {
+        lastHudError = `HUD event failed: ${err?.message || err}`;
+        console.warn(lastHudError);
+      }
+    }
+    return false;
+  };
+
+  hudBtn?.addEventListener("click", async () => {
+    await clearHudOverlay();
+    appendMessage("HUD cleared.", "bot");
+  });
+
+  hudTestBtn?.addEventListener("click", async () => {
+    const testSource = pendingCaptureSource || {
+      capture_left: 0,
+      capture_top: 0,
+      capture_width: window.screen?.width || window.innerWidth || 1920,
+      capture_height: window.screen?.height || window.innerHeight || 1080,
+      bitmap_width: window.screen?.width || window.innerWidth || 1920,
+      bitmap_height: window.screen?.height || window.innerHeight || 1080
+    };
+    const target = hudTargetFromSource(testSource);
+    target.imageWidth = Number(testSource.bitmap_width || target.width);
+    target.imageHeight = Number(testSource.bitmap_height || target.height);
+    const ok = await showHudOverlay(makeTestOverlay(target), testSource);
+    appendMessage(ok ? "HUD test sent." : `HUD test failed. ${lastHudError}`, "bot");
+  });
+
+  const appendMessage = (text, sender) => {
+    const msgDiv = document.createElement("div");
+    msgDiv.classList.add("message", sender === "user" ? "user-message" : "bot-message");
+    msgDiv.textContent = text;
+    chatWindow.appendChild(msgDiv);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return msgDiv;
+  };
+
+  const showImagePreview = (base64, source = null) => {
+    pendingImageBase64 = base64;
+    pendingCaptureSource = source;
+    previewImg.src = `data:image/png;base64,${base64}`;
+    imagePreviewArea.style.display = "flex";
+  };
+
+  const clearImagePreview = () => {
+    pendingImageBase64 = null;
+    pendingCaptureSource = null;
+    previewImg.src = "";
+    imagePreviewArea.style.display = "none";
+  };
+
+  removeImgBtn?.addEventListener("click", clearImagePreview);
+
+  const appendUserMessage = (text, imageBase64) => {
+    const msgDiv = document.createElement("div");
+    msgDiv.classList.add("message", "user-message");
+    msgDiv.textContent = text || "[screenshot]";
+    if (imageBase64) {
+      const img = document.createElement("img");
+      img.src = `data:image/png;base64,${imageBase64}`;
+      msgDiv.appendChild(document.createElement("br"));
+      msgDiv.appendChild(img);
+    }
+    chatWindow.appendChild(msgDiv);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  };
 
   const loadGuideGames = async () => {
     if (!gameSelect) return;
-    const savedGameId = localStorage.getItem("currentGameId") || "";
     try {
-      const resp = await fetch("http://127.0.0.1:8000/guides/games");
+      const resp = await fetch(`${API_BASE}/guides/games`);
       const data = await resp.json();
-      const games = Array.isArray(data.games) ? data.games : [];
-      gameSelect.innerHTML = '<option value="">遊戲</option>';
-      for (const game of games) {
+      const savedGameId = localStorage.getItem("currentGameId") || "";
+      gameSelect.innerHTML = '<option value="">Game</option>';
+      for (const game of data.games || []) {
         const option = document.createElement("option");
         option.value = game;
         option.textContent = game;
@@ -193,419 +297,354 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       gameSelect.value = savedGameId;
     } catch (err) {
-      console.warn("Guide game list unavailable:", err);
+      console.warn("Guide list unavailable:", err);
     }
   };
 
-  if (gameSelect) {
-    gameSelect.value = localStorage.getItem("currentGameId") || "";
-    gameSelect.addEventListener("change", () => {
-      localStorage.setItem("currentGameId", gameSelect.value);
-    });
-    loadGuideGames();
-  }
+  gameSelect?.addEventListener("change", () => {
+    localStorage.setItem("currentGameId", gameSelect.value || "");
+  });
+  await loadGuideGames();
 
-  let mediaRecorder = null;
-  let audioChunks = [];
+  const setBusy = (busy) => {
+    isSending = busy;
+    sendBtn.style.display = busy ? "none" : "block";
+    stopBtn.style.display = busy ? "block" : "none";
+  };
 
-  // 輔助函式：將 AudioBuffer 轉換為 WAV 格式
-  function audioBufferToWav(buffer) {
-    const numOfChan = buffer.numberOfChannels,
-          length = buffer.length * numOfChan * 2 + 44,
-          bufferArr = new ArrayBuffer(length),
-          view = new DataView(bufferArr),
-          channels = [];
-    let sample, offset = 0, pos = 0;
-
-    const setUint16 = (data) => { view.setUint16(pos, data, true); pos += 2; };
-    const setUint32 = (data) => { view.setUint32(pos, data, true); pos += 4; };
-
-    setUint32(0x46464952); // "RIFF"
-    setUint32(length - 8);
-    setUint32(0x45564157); // "WAVE"
-    setUint32(0x20746d66); // "fmt "
-    setUint32(16);
-    setUint16(1); // PCM
-    setUint16(numOfChan);
-    setUint32(buffer.sampleRate);
-    setUint32(buffer.sampleRate * 2 * numOfChan);
-    setUint16(numOfChan * 2);
-    setUint16(16);
-    setUint32(0x61746164); // "data"
-    setUint32(length - pos - 4);
-
-    for (let i = 0; i < numOfChan; i++) channels.push(buffer.getChannelData(i));
-    while (pos < length) {
-      for (let i = 0; i < numOfChan; i++) {
-        sample = Math.max(-1, Math.min(1, channels[i][offset]));
-        sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF) | 0;
-        view.setInt16(pos, sample, true);
-        pos += 2;
-      }
-      offset++;
+  const setVoiceRecording = (recording) => {
+    isVoiceRecording = recording;
+    voiceBtn?.classList.toggle("recording", recording);
+    if (voiceBtn) {
+      voiceBtn.textContent = recording ? "Rec" : "Mic";
+      voiceBtn.title = recording ? "Recording voice input" : "Voice input";
+      voiceBtn.disabled = isVoiceBusy && !recording;
     }
-    return new Blob([bufferArr], { type: 'audio/wav' });
-  }
+  };
 
-  const handleRecordingStop = async () => {
-    const webmBlob = new Blob(audioChunks, { type: 'audio/webm' });
-    const originalIcon = voiceBtn ? voiceBtn.innerText : "🎙️";
-    if (voiceBtn) voiceBtn.innerText = "⌛"; // 辨識中
-    
+  const setVoiceBusy = (busy) => {
+    isVoiceBusy = busy;
+    if (voiceBtn && !isVoiceRecording) {
+      voiceBtn.disabled = busy;
+      voiceBtn.textContent = busy ? "..." : "Mic";
+    }
+  };
+
+  const stopVoiceTracks = () => {
+    mediaStream?.getTracks?.().forEach((track) => track.stop());
+    mediaStream = null;
+  };
+
+  const transcribeVoiceBlob = async (blob, statusMessage = null) => {
+    if (blob.size < 800) {
+      if (statusMessage) statusMessage.textContent = "No voice was recorded.";
+      return;
+    }
+
+    setVoiceBusy(true);
+    if (statusMessage) statusMessage.textContent = "Transcribing voice...";
+
     try {
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const arrayBuffer = await webmBlob.arrayBuffer();
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-      
-      const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 16000), 16000);
-      const source = offlineCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(offlineCtx.destination);
-      source.start();
-      const resampledBuffer = await offlineCtx.startRendering();
-      
-      const wavBlob = audioBufferToWav(resampledBuffer);
       const formData = new FormData();
-      formData.append('file', wavBlob, 'record.wav');
-
-      const resp = await fetch("http://127.0.0.1:8000/transcribe", {
+      formData.append("file", blob, "voice.webm");
+      const response = await fetch(`${API_BASE}/transcribe`, {
         method: "POST",
         body: formData
       });
-      const data = await resp.json();
-      if (data.status === "success" && data.text) {
-        messageInput.value = data.text;
-        messageInput.focus();
-        // 自動送出
-        if (sendBtn.style.display !== "none") {
-          sendMessage();
-        }
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Transcription failed: ${response.status}${detail ? ` ${detail}` : ""}`);
       }
+
+      const data = await response.json();
+      const transcript = (data.text || "").trim();
+      if (!transcript) {
+        if (statusMessage) statusMessage.textContent = "I could not hear clear speech.";
+        return;
+      }
+
+      const typedText = messageInput.value.trim();
+      const combinedText = typedText ? `${typedText} ${transcript}` : transcript;
+      if (statusMessage) statusMessage.textContent = `Heard: ${transcript}`;
+      await sendMessage(combinedText);
     } catch (err) {
-      console.error("STT Failed:", err);
+      if (statusMessage) {
+        statusMessage.textContent = `Voice failed: ${err.message || err}`;
+      } else {
+        appendMessage(`Voice failed: ${err.message || err}`, "bot");
+      }
     } finally {
-      if (voiceBtn) voiceBtn.innerText = originalIcon;
+      setVoiceBusy(false);
     }
   };
 
-  const startRecording = async () => {
-    if (mediaRecorder && mediaRecorder.state === "recording") return;
+  const startVoiceRecording = async () => {
+    if (isVoiceStarting || isVoiceRecording || isVoiceBusy || isSending) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      appendMessage("Voice input is not available in this WebView.", "bot");
+      return;
+    }
+
+    isVoiceStarting = true;
+    voiceStopRequested = false;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream);
-      audioChunks = [];
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
-      mediaRecorder.onstop = handleRecordingStop;
-      mediaRecorder.start();
-      if (voiceBtn) voiceBtn.classList.add("recording");
+      voiceChunks = [];
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      const preferredMime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "";
+      mediaRecorder = new MediaRecorder(
+        mediaStream,
+        preferredMime ? { mimeType: preferredMime } : undefined
+      );
+
+      mediaRecorder.addEventListener("dataavailable", (event) => {
+        if (event.data?.size > 0) voiceChunks.push(event.data);
+      });
+
+      mediaRecorder.addEventListener("stop", async () => {
+        const mimeType = mediaRecorder?.mimeType || preferredMime || "audio/webm";
+        const blob = new Blob(voiceChunks, { type: mimeType });
+        mediaRecorder = null;
+        stopVoiceTracks();
+        setVoiceRecording(false);
+        await transcribeVoiceBlob(blob, voiceStatusMessage);
+        voiceStatusMessage = null;
+      });
+
+      mediaRecorder.addEventListener("error", (event) => {
+        stopVoiceTracks();
+        setVoiceRecording(false);
+        const message = event.error?.message || "Recording error";
+        if (voiceStatusMessage) voiceStatusMessage.textContent = `Voice failed: ${message}`;
+        voiceStatusMessage = null;
+      });
+
+      mediaRecorder.start(250);
+      setVoiceRecording(true);
+      voiceStatusMessage = appendMessage("Listening...", "bot");
+      if (voiceStopRequested) stopVoiceRecording();
     } catch (err) {
-      console.error("Mic Error:", err);
+      stopVoiceTracks();
+      setVoiceRecording(false);
+      appendMessage(`Mic permission or recording failed: ${err.message || err}`, "bot");
+    } finally {
+      isVoiceStarting = false;
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorder && mediaRecorder.state === "recording") {
+  const stopVoiceRecording = () => {
+    if (isVoiceStarting) {
+      voiceStopRequested = true;
+      return;
+    }
+    if (!isVoiceRecording || !mediaRecorder) return;
+    if (voiceStatusMessage) voiceStatusMessage.textContent = "Stopping recording...";
+    try {
       mediaRecorder.stop();
-      if (voiceBtn) voiceBtn.classList.remove("recording");
-      mediaRecorder.stream.getTracks().forEach(track => track.stop());
-    }
-  };
-
-  // 監聽全域快捷鍵
-  listen("voice-hotkey-start", startRecording);
-  listen("voice-hotkey-stop", stopRecording);
-
-  if (voiceBtn) {
-    voiceBtn.addEventListener("mousedown", startRecording);
-    voiceBtn.addEventListener("mouseup", stopRecording);
-    voiceBtn.addEventListener("mouseleave", stopRecording);
-  }
-
-  let pendingImageBase64 = null;
-  let abortController = null;
-
-  // ── 頂部可拖曳區域 ──
-  if (dragBar) {
-    dragBar.addEventListener("mousedown", async (e) => {
-      if (e.target.closest(".drag-bar-actions")) return;
-      await appWindow.startDragging();
-    });
-  }
-
-  // ── 關閉按鈕 ──
-  const toggleMaximize = async () => {
-    try {
-      await appWindow.toggleMaximize();
     } catch (err) {
-      console.warn("Toggle maximize failed:", err);
+      stopVoiceTracks();
+      setVoiceRecording(false);
+      appendMessage(`Voice stop failed: ${err.message || err}`, "bot");
     }
   };
 
-  if (dragBar) {
-    dragBar.addEventListener("dblclick", async (e) => {
-      if (e.target.closest(".drag-bar-actions")) return;
-      await toggleMaximize();
-    });
-  }
-
-  if (minBtn) {
-    minBtn.addEventListener("click", async () => {
-      try {
-        await appWindow.minimize();
-      } catch (err) {
-        console.warn("Minimize failed:", err);
-      }
-    });
-  }
-
-  if (maxBtn) {
-    maxBtn.addEventListener("click", toggleMaximize);
-  }
-
-  if (resizeGrip) {
-    resizeGrip.addEventListener("mousedown", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      try {
-        await appWindow.startResizeDragging("SouthEast");
-      } catch (err) {
-        console.warn("Resize drag failed:", err);
-      }
-    });
-  }
-
-  if (closeBtn) {
-    closeBtn.addEventListener("click", async () => {
-      try { await unregisterAll(); } catch (_) {}
-      await appWindow.close();
-    });
-  }
-
-  // ── 圖片預覽管理 ──
-  const showImagePreview = (base64) => {
-    pendingImageBase64 = base64;
-    previewImg.src = `data:image/png;base64,${base64}`;
-    imagePreviewArea.style.display = "flex";
-  };
-
-  const clearImagePreview = () => {
-    pendingImageBase64 = null;
-    previewImg.src = "";
-    imagePreviewArea.style.display = "none";
-  };
-
-  removeImgBtn.addEventListener("click", clearImagePreview);
-
-  // ── 訊息顯示 ──
-  const appendMessage = (text, sender) => {
-    const msgDiv = document.createElement("div");
-    msgDiv.classList.add("message", sender === "user" ? "user-message" : "bot-message");
-    msgDiv.innerText = text;
-    chatWindow.appendChild(msgDiv);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
-    return msgDiv;
-  };
-
-  // ── 傳送訊息給 AI ──
-  const sendToAI = async (text, imageBase64 = null) => {
-    // 顯示「停止」按鈕，隱藏「發送」按鈕
-    sendBtn.style.display = "none";
-    stopBtn.style.display = "block";
-    
-    const botMsgDiv = appendMessage("💭 思考中...", "bot");
+  const sendToAI = async (text, imageBase64 = null, captureSource = null) => {
+    if (isSending) return;
+    setBusy(true);
     abortController = new AbortController();
 
+    const botMsgDiv = appendMessage(
+      imageBase64 ? "Reading screenshot... vision usually takes 10-20 seconds." : "Reading response...",
+      "bot"
+    );
+    let receivedText = false;
+
     try {
-      const currentGameId = gameSelect ? gameSelect.value : (localStorage.getItem("currentGameId") || "");
       const body = {
         message: text,
-        game_id: currentGameId || null,
-        use_guides: guideIntentRe.test(text || ""),
+        game_id: gameSelect?.value || null,
+        use_guides: false,
         use_memory: true
       };
       if (imageBase64) body.image_base64 = imageBase64;
 
-      const response = await fetch("http://127.0.0.1:8000/chat", {
+      const response = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: abortController.signal
       });
 
-      if (!response.body) throw new Error("No response body");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Backend returned ${response.status}: ${detail}`);
+      }
+      const rawResponse = await response.text();
+      const lines = rawResponse.split(/\r?\n/);
+      let collected = "";
+      let showedOverlay = false;
 
-      let buffer = "";
-      let sseBuffer = "";
-      let rafId = null;
-      let hasStreamContent = false;
-
-      const updateUI = () => {
-        if (buffer) {
-          if (!hasStreamContent) {
-            botMsgDiv.innerText = "";
-            hasStreamContent = true;
-          }
-          botMsgDiv.innerText += buffer;
-          buffer = "";
-          chatWindow.scrollTop = chatWindow.scrollHeight;
-        }
-        rafId = null;
-      };
-
-      const handleSseLine = (line) => {
+      const handleSseLine = async (line) => {
         if (!line.startsWith("data: ")) return;
-        const dataStr = line.replace("data: ", "").trim();
-        if (!dataStr) return;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === "[DONE]") return;
+
         try {
           const dataObj = JSON.parse(dataStr);
-          const content = dataObj.content || "";
           if (dataObj.overlay) {
-            showHudOverlay(dataObj.overlay);
-          }
-          if (content) {
-            buffer += content;
-            if (!rafId) {
-              rafId = requestAnimationFrame(updateUI);
+            const hudShown = await showHudOverlay(dataObj.overlay, captureSource);
+            showedOverlay = showedOverlay || hudShown;
+            if (!hudShown) {
+              collected += `\nHUD 顯示失敗。${lastHudError}`;
+              receivedText = true;
             }
           }
+          const content = dataObj.content || "";
+          if (!content) return;
+          collected += content;
+          receivedText = true;
         } catch (err) {
-          console.warn("SSE parse failed:", err);
+          console.warn("Could not parse SSE line:", line, err);
         }
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        sseBuffer += decoder.decode(value, { stream: true });
-        let lineEnd = sseBuffer.indexOf("\n");
-        while (lineEnd >= 0) {
-          const line = sseBuffer.slice(0, lineEnd).trimEnd();
-          sseBuffer = sseBuffer.slice(lineEnd + 1);
-          handleSseLine(line);
-          lineEnd = sseBuffer.indexOf("\n");
-        }
-      }
-      if (sseBuffer.trim()) handleSseLine(sseBuffer.trimEnd());
-      // 確保最後剩餘的內容也被渲染
-      if (rafId) cancelAnimationFrame(rafId);
-      updateUI();
+      for (const line of lines) await handleSseLine(line.trimEnd());
+      botMsgDiv.textContent = collected.trim() || (
+        showedOverlay
+          ? "HUD 已標記。"
+          : "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
+      );
+      chatWindow.scrollTop = chatWindow.scrollHeight;
     } catch (error) {
       if (error.name === "AbortError") {
-        botMsgDiv.innerText += "\n\n⚠️ 中斷回覆。";
+        botMsgDiv.textContent += "\n\nStopped.";
       } else {
         console.error(error);
-        botMsgDiv.innerText = "❌ 出現錯誤，請確認後端是否啟動。";
+        botMsgDiv.textContent = `Connection failed: ${error.message || error}`;
       }
     } finally {
-      sendBtn.style.display = "block";
-      stopBtn.style.display = "none";
       abortController = null;
+      setBusy(false);
     }
   };
 
-  // ── 停止按鈕功能 ──
-  stopBtn.addEventListener("click", () => {
-    if (abortController) {
-      abortController.abort();
-    }
-  });
+  const sendMessage = async (overrideText = null) => {
+    const text = (overrideText ?? messageInput.value).trim();
+    const imageBase64 = pendingImageBase64;
+    const captureSource = pendingCaptureSource;
+    if (!text && !imageBase64) return;
 
-  // ── 截圖核心函式 ──
+    messageInput.value = "";
+    clearImagePreview();
+    appendUserMessage(text || "Analyze this screenshot.", imageBase64);
+    const fixedSourceHint = captureSource?.window_title
+      ? `\n\nScreenshot source window title: ${captureSource.window_title}`
+      : "";
+    await sendToAI(
+      (text || "Analyze this screenshot and give one useful next step.") + fixedSourceHint,
+      imageBase64,
+      captureSource
+    );
+  };
+
   const takeScreenshot = async () => {
-    if (screenshotBtn.disabled) return;
+    if (screenshotBtn.disabled || isSending) return;
+    screenshotBtn.disabled = true;
+    screenshotBtn.textContent = "Shot...";
 
     try {
-      screenshotBtn.textContent = "⏳";
-      screenshotBtn.disabled = true;
-
-      await clearHudOverlay();
-      await appWindow.hide();
-      await sleep(280);
-
-      const res = await fetch("http://127.0.0.1:8000/screenshot");
-      if (!res.ok) throw new Error(`Screenshot API failed: ${res.status}`);
-      const data = await res.json();
-
-      if (data.image_base64) {
-        showImagePreview(data.image_base64);
+      const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=0`);
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
       }
+      const data = await res.json();
+      if (!data.image_base64) throw new Error("Screenshot API returned no image.");
+      showImagePreview(data.image_base64, data.source || null);
+      const title = data.source?.window_title || "full screen";
+      appendMessage(`Captured ${data.width}x${data.height} from ${title}. Add your prompt, then press Send.`, "bot");
+      messageInput?.focus();
     } catch (err) {
-      console.error("截圖失敗", err);
+      appendMessage(`Screenshot failed: ${err.message || err}`, "bot");
     } finally {
-      await appWindow.show().catch(() => {});
-      screenshotBtn.textContent = "📷";
+      screenshotBtn.textContent = "Shot";
       screenshotBtn.disabled = false;
     }
   };
 
-  screenshotBtn.addEventListener("click", takeScreenshot);
-  await listen("capture-hotkey", () => {
-    takeScreenshot();
+  sendBtn?.addEventListener("click", () => sendMessage());
+  messageInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !isSending) {
+      event.preventDefault();
+      sendMessage();
+    }
   });
-  await listen("clear-hud-hotkey", () => {
+
+  stopBtn?.addEventListener("click", () => {
+    abortController?.abort();
+  });
+
+  screenshotBtn?.addEventListener("click", takeScreenshot);
+
+  voiceBtn?.addEventListener("click", () => {
+    if (isVoiceRecording) {
+      stopVoiceRecording();
+    } else {
+      startVoiceRecording();
+    }
+  });
+
+  dragBar?.addEventListener("mousedown", async (event) => {
+    if (event.target.closest(".drag-bar-actions")) return;
+    await appWindow?.startDragging?.().catch(() => {});
+  });
+
+  dragBar?.addEventListener("dblclick", async (event) => {
+    if (event.target.closest(".drag-bar-actions")) return;
+    await appWindow?.toggleMaximize?.().catch(() => {});
+  });
+
+  minBtn?.addEventListener("click", async () => {
+    await appWindow?.minimize?.().catch(() => {});
+  });
+
+  maxBtn?.addEventListener("click", async () => {
+    await appWindow?.toggleMaximize?.().catch(() => {});
+  });
+
+  closeBtn?.addEventListener("click", async () => {
+    await globalShortcut.unregisterAll?.().catch(() => {});
+    await appWindow?.close?.();
+  });
+
+  resizeGrip?.addEventListener("mousedown", async (event) => {
+    event.preventDefault();
+    await appWindow?.startResizeDragging?.("SouthEast").catch(() => {});
+  });
+
+  await events.listen?.("capture-hotkey", takeScreenshot).catch(() => {});
+  await events.listen?.("voice-hotkey-start", startVoiceRecording).catch(() => {});
+  await events.listen?.("voice-hotkey-stop", stopVoiceRecording).catch(() => {});
+  await events.listen?.("clear-hud-hotkey", async () => {
+    await clearHudOverlay();
+    appendMessage("HUD cleared.", "bot");
+  }).catch(() => {});
+
+  await globalShortcut.register?.("F9", takeScreenshot).catch((err) => {
+    console.warn("F9 registration failed:", err);
+  });
+
+  await globalShortcut.register?.("F10", () => {
     clearHudOverlay();
-  });
-
-  // ── 全局快捷鍵 F9 ──
-  try {
-    await register("F9", () => {
-      takeScreenshot();
-    });
-    console.log("✅ 全局快捷鍵 F9 已啟用");
-  } catch (e) {
-    console.warn("⚠️ 全局快捷鍵 F9 註冊失敗:", e);
-  }
-
-  try {
-    await register("F10", () => {
-      clearHudOverlay();
-    });
-    console.log("✅ 全局快捷鍵 F10 已啟用");
-  } catch (e) {
-    console.warn("⚠️ 全局快捷鍵 F10 註冊失敗:", e);
-  }
-
-  // ── 發送文字訊息 ──
-  const sendMessage = async () => {
-    const text = messageInput.value.trim();
-    const hasImage = !!pendingImageBase64;
-    
-    if (!text && !hasImage) return;
-
-    // 清空輸入
-    messageInput.value = "";
-    
-    // 顯示使用者發送的訊息內容
-    const userDiv = document.createElement("div");
-    userDiv.classList.add("message", "user-message");
-    
-    let userContent = text || (hasImage ? "📷 [影像已發送]" : "");
-    userDiv.innerText = userContent;
-    
-    if (hasImage) {
-      const img = document.createElement("img");
-      img.src = `data:image/png;base64,${pendingImageBase64}`;
-      userDiv.appendChild(document.createElement("br"));
-      userDiv.appendChild(img);
-    }
-    
-    chatWindow.appendChild(userDiv);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
-
-    const currentImage = pendingImageBase64;
-    clearImagePreview();
-
-    await sendToAI(text || "請分析這張截圖。", currentImage);
-  };
-
-  sendBtn.addEventListener("click", sendMessage);
-  messageInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      if (sendBtn.style.display !== "none") {
-        sendMessage();
-      }
-    }
-  });
+    appendMessage("HUD cleared.", "bot");
+  }).catch(() => {});
 });

@@ -4,14 +4,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Qwen Overlay Chat</title>
+  <title>Game Companion</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 
-<body style="background: rgba(30, 30, 35, 0.92); color: #f0f0f0;">
-  <!-- 頂部拖曳攔 -->
+<body>
   <div class="drag-bar" data-tauri-drag-region>
-    <div class="title" data-tauri-drag-region>遊戲陪伴Beta</div>
+    <div class="title" data-tauri-drag-region>Game Companion Beta</div>
     <div class="drag-bar-actions">
       <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize"></button>
       <button id="maxBtn" class="window-btn max-btn" title="Maximize" aria-label="Maximize"></button>
@@ -20,40 +19,36 @@
   </div>
 
   <div class="tool-strip">
-    <select id="gameSelect" class="game-select" title="目前遊戲">
-      <option value="">遊戲</option>
+    <select id="gameSelect" class="game-select" title="Game">
+      <option value="">Game</option>
     </select>
-    <button id="hudBtn" class="hud-btn active" title="HUD 指引開關">HUD</button>
-    <button id="perfBtn" class="perf-btn" title="切換效能模式 (開啟/關閉模糊)">⚡</button>
+    <button id="hudBtn" class="hud-btn active" title="Clear HUD overlay">HUD</button>
+    <button id="hudTestBtn" class="hud-btn" title="Show a HUD test mark">Test</button>
+    <button id="protectBtn" class="hud-btn active" title="Hide companion windows from screenshots">Protect</button>
+    <button id="perfBtn" class="perf-btn" title="Performance mode">Perf</button>
   </div>
 
-  <!-- 聊天對話框 -->
   <div id="chatWindow" class="chat-window">
     <div class="message bot-message">
-      您好！我是存在iGPU裡的大語言模型助理，有什麼我可以幫忙的嗎？<br>
-      <small style="opacity:0.6">💡 按 F9 或點 📷 按鈕可截圖並詢問 AI</small>
+      Ready. I can watch the screen, answer questions, and help during play.
+      <br>
+      <small style="opacity:0.72">F8 voice, F9 screenshot.</small>
     </div>
   </div>
 
-  <!-- 影像預覽區域 (截圖後暫存在此) -->
   <div id="imagePreviewArea" class="image-preview-area" style="display: none;">
     <div class="preview-container">
-      <img id="previewImg" src="" />
-      <button id="removeImgBtn" class="remove-img-btn">✕</button>
+      <img id="previewImg" src="" alt="Screenshot preview" />
+      <button id="removeImgBtn" class="remove-img-btn" title="Remove image" aria-label="Remove image">x</button>
     </div>
   </div>
 
-  <!-- 輸入區域 -->
   <div class="input-area">
-    <div class="opacity-control mini">
-      <input type="range" id="opacitySlider" class="opacity-slider" min="0.1" max="1" step="0.05" value="0.85"
-        title="調整視窗透明度" />
-    </div>
-    <button id="voiceBtn" class="voice-btn" title="語音輸入 (按住錄音)">🎙️</button>
-    <button id="screenshotBtn" class="screenshot-btn" title="截圖全螢幕 (F9)">📷</button>
-    <input type="text" id="messageInput" placeholder="輸入訊息，或按 F9 截圖..." />
-    <button id="stopBtn" class="stop-btn" style="display: none;">停止</button>
-    <button id="sendBtn">發送</button>
+    <button id="voiceBtn" class="voice-btn" title="Voice input">Mic</button>
+    <button id="screenshotBtn" class="screenshot-btn" title="Screenshot (F9)">Shot</button>
+    <input type="text" id="messageInput" placeholder="Ask for help, or press F9 for screenshot analysis..." />
+    <button id="stopBtn" class="stop-btn" style="display: none;">Stop</button>
+    <button id="sendBtn">Send</button>
   </div>
 
   <button id="resizeGrip" class="resize-grip" title="Resize" aria-label="Resize"></button>
