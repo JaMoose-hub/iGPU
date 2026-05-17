@@ -28,6 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const removeImgBtn = document.getElementById("removeImgBtn");
 
   let pendingImageBase64 = null;
+  let pendingImageMimeType = "image/jpeg";
   let pendingCaptureSource = null;
   let abortController = null;
   let isSending = false;
@@ -40,7 +41,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let isVoiceStarting = false;
   let voiceStopRequested = false;
   let lastHudError = "";
-  let captureProtectionEnabled = localStorage.getItem("protect-mode") !== "off";
+  localStorage.setItem("protect-mode", "off");
+  let captureProtectionEnabled = false;
 
   localStorage.removeItem("hud-overlay");
   await invoke?.("hide_hud_window").catch((err) => {
@@ -188,14 +190,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       ...overlay,
       render_target: target
     };
-    localStorage.setItem(
-      "hud-overlay",
-      JSON.stringify({
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        overlay: overlayForHud,
-        target
-      })
-    );
+    const payload = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      overlay: overlayForHud,
+      target
+    };
     if (invoke) {
       try {
         const args = { overlay: overlayForHud, width: target.width, height: target.height };
@@ -219,6 +218,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         console.warn(lastHudError);
       }
     }
+    localStorage.setItem("hud-overlay", JSON.stringify(payload));
     return false;
   };
 
@@ -252,15 +252,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     return msgDiv;
   };
 
-  const showImagePreview = (base64, source = null) => {
+  const showImagePreview = (base64, source = null, mimeType = "image/jpeg") => {
     pendingImageBase64 = base64;
+    pendingImageMimeType = mimeType || "image/jpeg";
     pendingCaptureSource = source;
-    previewImg.src = `data:image/png;base64,${base64}`;
+    previewImg.src = `data:${pendingImageMimeType};base64,${base64}`;
     imagePreviewArea.style.display = "flex";
   };
 
   const clearImagePreview = () => {
     pendingImageBase64 = null;
+    pendingImageMimeType = "image/jpeg";
     pendingCaptureSource = null;
     previewImg.src = "";
     imagePreviewArea.style.display = "none";
@@ -268,13 +270,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   removeImgBtn?.addEventListener("click", clearImagePreview);
 
-  const appendUserMessage = (text, imageBase64) => {
+  const AUTO_CAPTURE_RE =
+    /(你看見|你看到|看見什麼|看到什麼|幫我看|看一下|畫面|螢幕|截圖|圈出|圈起|框出|標記|標出|指給|指引|箭頭|在哪|哪裡|what.*see|what.*screen|describe.*screen|look.*screen|circle|mark|highlight|arrow|where|target|objective|hud)/i;
+
+  const shouldAutoCapture = (text) => AUTO_CAPTURE_RE.test(text || "");
+
+  const captureScreen = async (profile = "turbo") => {
+    const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=0&profile=${profile}`);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
+    }
+    const data = await res.json();
+    if (!data.image_base64) throw new Error("Screenshot API returned no image.");
+    return data;
+  };
+
+  const appendUserMessage = (text, imageBase64, mimeType = "image/jpeg") => {
     const msgDiv = document.createElement("div");
     msgDiv.classList.add("message", "user-message");
     msgDiv.textContent = text || "[screenshot]";
     if (imageBase64) {
       const img = document.createElement("img");
-      img.src = `data:image/png;base64,${imageBase64}`;
+      img.src = `data:${mimeType || "image/jpeg"};base64,${imageBase64}`;
       msgDiv.appendChild(document.createElement("br"));
       msgDiv.appendChild(img);
     }
@@ -463,7 +481,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     abortController = new AbortController();
 
     const botMsgDiv = appendMessage(
-      imageBase64 ? "Reading screenshot... vision usually takes 10-20 seconds." : "Reading response...",
+      imageBase64 ? "Reading compressed screenshot..." : "Reading response...",
       "bot"
     );
     let receivedText = false;
@@ -539,13 +557,37 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const sendMessage = async (overrideText = null) => {
     const text = (overrideText ?? messageInput.value).trim();
-    const imageBase64 = pendingImageBase64;
-    const captureSource = pendingCaptureSource;
+    let imageBase64 = pendingImageBase64;
+    let imageMimeType = pendingImageMimeType;
+    let captureSource = pendingCaptureSource;
     if (!text && !imageBase64) return;
+
+    if (!imageBase64 && shouldAutoCapture(text)) {
+      const status = appendMessage("Auto-capturing screen...", "bot");
+      try {
+        screenshotBtn.disabled = true;
+        screenshotBtn.textContent = "Shot...";
+        const data = await captureScreen("turbo");
+        imageBase64 = data.image_base64;
+        imageMimeType = data.mime_type || "image/jpeg";
+        captureSource = data.source || null;
+        const sourceWidth = data.source?.capture_width || data.original_width || data.width;
+        const sourceHeight = data.source?.capture_height || data.original_height || data.height;
+        status.textContent = `Auto-captured ${data.width}x${data.height} from source ${sourceWidth}x${sourceHeight}.`;
+      } catch (err) {
+        status.textContent = `Auto screenshot failed: ${err.message || err}`;
+        screenshotBtn.textContent = "Shot";
+        screenshotBtn.disabled = false;
+        return;
+      } finally {
+        screenshotBtn.textContent = "Shot";
+        screenshotBtn.disabled = false;
+      }
+    }
 
     messageInput.value = "";
     clearImagePreview();
-    appendUserMessage(text || "Analyze this screenshot.", imageBase64);
+    appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
     const fixedSourceHint = captureSource?.window_title
       ? `\n\nScreenshot source window title: ${captureSource.window_title}`
       : "";
@@ -562,16 +604,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     screenshotBtn.textContent = "Shot...";
 
     try {
-      const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=0`);
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
-      }
-      const data = await res.json();
-      if (!data.image_base64) throw new Error("Screenshot API returned no image.");
-      showImagePreview(data.image_base64, data.source || null);
+      const data = await captureScreen("turbo");
+      showImagePreview(data.image_base64, data.source || null, data.mime_type || "image/jpeg");
       const title = data.source?.window_title || "full screen";
-      appendMessage(`Captured ${data.width}x${data.height} from ${title}. Add your prompt, then press Send.`, "bot");
+      const sourceWidth = data.source?.capture_width || data.original_width || data.width;
+      const sourceHeight = data.source?.capture_height || data.original_height || data.height;
+      appendMessage(
+        `Captured ${data.width}x${data.height} turbo view from ${title} (source ${sourceWidth}x${sourceHeight}). Add your prompt, then press Send.`,
+        "bot"
+      );
       messageInput?.focus();
     } catch (err) {
       appendMessage(`Screenshot failed: ${err.message || err}`, "bot");

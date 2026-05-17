@@ -1,6 +1,5 @@
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
-use std::time::Duration;
 
 // WDA_EXCLUDEFROMCAPTURE = 0x11，告訴 Windows 截圖時忽略這個視窗
 #[cfg(windows)]
@@ -117,7 +116,6 @@ fn show_hud_overlay(
     y: Option<f64>,
 ) -> Result<(), String> {
     show_hud_window(app.clone(), width, height, x, y)?;
-    std::thread::sleep(Duration::from_millis(80));
 
     let Some(hud) = app.get_webview_window("hud") else {
         return Err("hud window not found".to_string());
