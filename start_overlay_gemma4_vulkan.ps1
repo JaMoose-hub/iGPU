@@ -5,16 +5,16 @@ param(
     [string]$ApiHost = "127.0.0.1",
     [int]$LlamaPort = 18080,
     [int]$LlamaCtxSize = 8192,
-    [int]$LlamaGpuLayers = 1,
+    [int]$LlamaGpuLayers = 99,
     [int]$LlamaParallel = 0,
     [int]$LlamaCacheRamMiB = -1,
     [string]$VulkanDevice = "0",
     [string]$ChatBackend = "llama",
-    [string]$LlamaHfRepo = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q8_0",
-    [string]$LlamaHfFile = "",
-    [string]$LlamaModelAlias = "qwen2.5-vl-3b-instruct-q8_0",
-    [int]$LlamaImageMinTokens = 1024,
-    [int]$LlamaImageMaxTokens = 2048,
+    [string]$LlamaHfRepo = "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+    [string]$LlamaHfFile = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",
+    [string]$LlamaModelAlias = "qwen3-vl-8b-instruct-ud-q4_k_xl",
+    [int]$LlamaImageMinTokens = 256,
+    [int]$LlamaImageMaxTokens = 512,
     [string]$HermesWslDistro = "Ubuntu-24.04",
     [int]$TimeoutSeconds = 360
 )
@@ -23,6 +23,9 @@ $ErrorActionPreference = "Stop"
 
 if (-not $Python) {
     $Python = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $Python)) {
+        $Python = Join-Path $env:USERPROFILE "Miniconda3\envs\igpu\python.exe"
+    }
 }
 
 function Test-BackendReady {
@@ -75,6 +78,9 @@ function Get-ListenerProcessCommandLine {
 
 $backendScript = Join-Path $Root "llama_vulkan_api_server.py"
 $overlayExe = Join-Path $Root "overlay-chat\src-tauri\target\release\overlay-chat.exe"
+if (-not (Test-Path -LiteralPath $overlayExe)) {
+    $overlayExe = Join-Path $Root "overlay-chat\src-tauri\target\debug\overlay-chat.exe"
+}
 $logDir = Join-Path $Root "logs"
 $stdoutLog = Join-Path $logDir "llama-vulkan-api.log"
 $stderrLog = Join-Path $logDir "llama-vulkan-api.err.log"
@@ -121,6 +127,16 @@ $env:LLAMA_HF_FILE = $LlamaHfFile
 $env:LLAMA_CHAT_TEMPLATE_KWARGS = ""
 $env:LLAMA_ARG_IMAGE_MIN_TOKENS = "$LlamaImageMinTokens"
 $env:LLAMA_ARG_IMAGE_MAX_TOKENS = "$LlamaImageMaxTokens"
+$env:LLAMA_VISION_LONG_EDGE = "960"
+$env:LLAMA_VISION_IMAGE_FORMAT = "JPEG"
+$env:LLAMA_VISION_IMAGE_QUALITY = "65"
+$env:IGPU_SCREENSHOT_LONG_EDGE = "960"
+$env:IGPU_SCREENSHOT_FORMAT = "JPEG"
+$env:IGPU_SCREENSHOT_QUALITY = "65"
+$env:LLAMA_IMAGE_RESPONSE_TOKENS = "64"
+$env:LLAMA_OVERLAY_GRID_LONG_EDGE = "960"
+$env:LLAMA_OVERLAY_GRID_IMAGE_QUALITY = "68"
+$env:LLAMA_OVERLAY_RESPONSE_TOKENS = "128"
 $env:LLAMA_SKIP_CHAT_PARSING = "1"
 $env:HERMES_WSL_DISTRO = $HermesWslDistro
 if ($LlamaParallel -gt 0) {
@@ -159,6 +175,36 @@ try {
     }
     elseif ($health.llama_gpu_layers -and "$($health.llama_gpu_layers)" -ne "$LlamaGpuLayers") {
         Write-Host "Stopping backend to switch GPU layers from $($health.llama_gpu_layers) to $LlamaGpuLayers."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.llama_image_min_tokens -and "$($health.llama_image_min_tokens)" -ne "$LlamaImageMinTokens") {
+        Write-Host "Stopping backend and llama-server to switch image min tokens from $($health.llama_image_min_tokens) to $LlamaImageMinTokens."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.llama_image_max_tokens -and "$($health.llama_image_max_tokens)" -ne "$LlamaImageMaxTokens") {
+        Write-Host "Stopping backend and llama-server to switch image max tokens from $($health.llama_image_max_tokens) to $LlamaImageMaxTokens."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.vision_long_edge -and "$($health.vision_long_edge)" -ne "960") {
+        Write-Host "Stopping backend to switch vision long edge from $($health.vision_long_edge) to 960."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.screenshot_long_edge -and "$($health.screenshot_long_edge)" -ne "960") {
+        Write-Host "Stopping backend to switch screenshot long edge from $($health.screenshot_long_edge) to 960."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.image_response_tokens -and "$($health.image_response_tokens)" -ne "64") {
+        Write-Host "Stopping backend to switch image response tokens from $($health.image_response_tokens) to 64."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.overlay_grid_long_edge -and "$($health.overlay_grid_long_edge)" -ne "960") {
+        Write-Host "Stopping backend to switch overlay grid long edge from $($health.overlay_grid_long_edge) to 960."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.overlay_response_tokens -and "$($health.overlay_response_tokens)" -ne "128") {
+        Write-Host "Stopping backend to switch overlay response tokens from $($health.overlay_response_tokens) to 128."
         Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
     }
 }
