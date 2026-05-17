@@ -1,5 +1,5 @@
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 // WDA_EXCLUDEFROMCAPTURE = 0x11，告訴 Windows 截圖時忽略這個視窗
 #[cfg(windows)]
@@ -11,10 +11,7 @@ const WDA_NONE: u32 = 0x00000000;
 fn find_hud_hwnd() -> windows_sys::Win32::Foundation::HWND {
     let title: Vec<u16> = "game-guidance-hud\0".encode_utf16().collect();
     unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
-            std::ptr::null(),
-            title.as_ptr(),
-        )
+        windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(std::ptr::null(), title.as_ptr())
     }
 }
 
@@ -154,6 +151,17 @@ fn hide_hud_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn show_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(tasks) = app.get_webview_window("tasks") else {
+        return Err("tasks window not found".to_string());
+    };
+
+    let _ = tasks.set_always_on_top(true);
+    tasks.show().map_err(|err| err.to_string())?;
+    tasks.set_focus().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn set_main_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(), String> {
     if app.get_webview_window("main").is_none() {
         return Err("main window not found".to_string());
@@ -166,7 +174,7 @@ fn set_main_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(
         } else {
             WDA_NONE
         };
-        for label in ["main", "hud"] {
+        for label in ["main", "hud", "tasks"] {
             let Some(window) = app.get_webview_window(label) else {
                 continue;
             };
@@ -205,6 +213,9 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         match shortcut.key {
+                            Code::F7 => {
+                                let _ = app.emit("task-hotkey", ());
+                            }
                             Code::F8 => {
                                 let _ = app.emit("voice-hotkey-start", ());
                             }
@@ -224,7 +235,7 @@ pub fn run() {
         )
         .setup(|app| {
             // 註冊全域快捷鍵
-            for key in [Code::F8, Code::F9, Code::F10] {
+            for key in [Code::F7, Code::F8, Code::F9, Code::F10] {
                 let shortcut = Shortcut::new(None, key);
                 let _ = app.global_shortcut().register(shortcut);
             }
@@ -234,6 +245,10 @@ pub fn run() {
                 let _ = hud.set_skip_taskbar(true);
                 let _ = hud.set_focusable(false);
                 let _ = hud.hide();
+            }
+            if let Some(tasks) = app.get_webview_window("tasks") {
+                let _ = tasks.set_always_on_top(true);
+                let _ = tasks.hide();
             }
 
             // 在 Windows 上設定視窗截圖排除
@@ -245,6 +260,7 @@ pub fn run() {
             show_hud_overlay,
             clear_hud_overlay,
             hide_hud_window,
+            show_tasks_window,
             set_main_capture_exclusion
         ])
         .run(tauri::generate_context!())

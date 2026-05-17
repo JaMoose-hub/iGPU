@@ -16,7 +16,7 @@
         "height": 620,
         "minWidth": 460,
         "minHeight": 560,
-        "transparent": false,
+        "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
         "resizable": true
@@ -36,6 +36,20 @@
         "focusable": false,
         "visible": false,
         "resizable": false
+      },
+      {
+        "label": "tasks",
+        "title": "game-task-log",
+        "url": "tasks.html",
+        "width": 380,
+        "height": 560,
+        "minWidth": 340,
+        "minHeight": 420,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": true
       }
     ],
     "security": {

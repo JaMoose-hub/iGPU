@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>任務紀錄</title>
+  <link rel="stylesheet" href="tasks.css" />
+</head>
+
+<body>
+  <div class="task-drag" data-tauri-drag-region>
+    <div class="task-title" data-tauri-drag-region>
+      <span class="icon" data-icon="list"></span>
+      <span>任務紀錄</span>
+    </div>
+    <div class="task-window-actions">
+      <button id="refreshBtn" class="window-btn" title="Refresh" aria-label="Refresh">
+        <span class="icon" data-icon="refresh"></span>
+      </button>
+      <button id="closeBtn" class="window-btn close-btn" title="Hide" aria-label="Hide">
+        <span class="icon" data-icon="x"></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="task-toolbar">
+    <div class="filter-tabs" role="tablist" aria-label="Task filter">
+      <button class="filter-btn active" data-filter="active">進行中</button>
+      <button class="filter-btn" data-filter="done">完成</button>
+      <button class="filter-btn" data-filter="all">全部</button>
+    </div>
+    <button id="clearDoneBtn" class="ghost-btn" title="Clear completed tasks">
+      <span class="icon" data-icon="trash"></span>
+    </button>
+  </div>
+
+  <div class="search-row">
+    <span class="icon" data-icon="search"></span>
+    <input id="searchInput" type="search" placeholder="搜尋任務..." />
+  </div>
+
+  <main id="taskList" class="task-list"></main>
+
+  <template id="emptyTemplate">
+    <section class="empty-state">
+      <span class="icon" data-icon="flag"></span>
+      <p>尚無任務</p>
+      <small>等待下一個目標。</small>
+    </section>
+  </template>
+
+  <script type="module" src="/tasks.js"></script>
+</body>
+
+</html>

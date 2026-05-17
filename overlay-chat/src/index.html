@@ -12,9 +12,18 @@
   <div class="drag-bar" data-tauri-drag-region>
     <div class="title" data-tauri-drag-region>Game Companion Beta</div>
     <div class="drag-bar-actions">
-      <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize"></button>
-      <button id="maxBtn" class="window-btn max-btn" title="Maximize" aria-label="Maximize"></button>
-      <button id="closeBtn" class="window-btn close-btn" title="Close" aria-label="Close"></button>
+      <button id="tasksBtn" class="window-btn task-window-btn" title="Task log" aria-label="Task log">
+        <span class="icon" data-icon="list"></span>
+      </button>
+      <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize">
+        <span class="icon" data-icon="minus"></span>
+      </button>
+      <button id="maxBtn" class="window-btn max-btn" title="Maximize" aria-label="Maximize">
+        <span class="icon" data-icon="square"></span>
+      </button>
+      <button id="closeBtn" class="window-btn close-btn" title="Close" aria-label="Close">
+        <span class="icon" data-icon="x"></span>
+      </button>
     </div>
   </div>
 
@@ -22,36 +31,73 @@
     <select id="gameSelect" class="game-select" title="Game">
       <option value="">Game</option>
     </select>
-    <button id="hudBtn" class="hud-btn active" title="Clear HUD overlay">HUD</button>
-    <button id="hudTestBtn" class="hud-btn" title="Show a HUD test mark">Test</button>
-    <button id="protectBtn" class="hud-btn active" title="Hide companion windows from screenshots">Protect</button>
-    <button id="perfBtn" class="perf-btn" title="Performance mode">Perf</button>
+    <button id="hudBtn" class="hud-btn active" title="Clear HUD overlay">
+      <span class="icon" data-icon="crosshair"></span>
+      <span class="button-label">HUD</span>
+    </button>
+    <button id="hudTestBtn" class="hud-btn" title="Show a HUD test mark">
+      <span class="icon" data-icon="target"></span>
+      <span class="button-label">Test</span>
+    </button>
+    <button id="protectBtn" class="hud-btn active" title="Hide companion windows from screenshots">
+      <span class="icon" data-icon="shield"></span>
+      <span class="button-label">Protect</span>
+    </button>
+    <button id="perfBtn" class="perf-btn" title="Performance mode">
+      <span class="icon" data-icon="gauge"></span>
+      <span class="button-label">Perf</span>
+    </button>
+    <div class="opacity-control" title="Window opacity">
+      <span class="icon" data-icon="blend"></span>
+      <input id="opacitySlider" type="range" min="10" max="100" step="5" value="100" aria-label="Window opacity" />
+      <span id="opacityValue" class="opacity-value">100</span>
+    </div>
   </div>
 
   <div id="chatWindow" class="chat-window">
     <div class="message bot-message">
       Ready. I can watch the screen, answer questions, and help during play.
       <br>
-      <small style="opacity:0.72">F8 voice, F9 screenshot.</small>
+      <small style="opacity:0.72">F7 task, F8 voice, F9 screenshot.</small>
     </div>
   </div>
 
   <div id="imagePreviewArea" class="image-preview-area" style="display: none;">
     <div class="preview-container">
       <img id="previewImg" src="" alt="Screenshot preview" />
-      <button id="removeImgBtn" class="remove-img-btn" title="Remove image" aria-label="Remove image">x</button>
+      <button id="removeImgBtn" class="remove-img-btn" title="Remove image" aria-label="Remove image">
+        <span class="icon" data-icon="x"></span>
+      </button>
     </div>
   </div>
 
   <div class="input-area">
-    <button id="voiceBtn" class="voice-btn" title="Voice input">Mic</button>
-    <button id="screenshotBtn" class="screenshot-btn" title="Screenshot (F9)">Shot</button>
+    <button id="voiceBtn" class="voice-btn" title="Voice input">
+      <span class="icon" data-icon="mic"></span>
+      <span class="button-label">Mic</span>
+    </button>
+    <button id="screenshotBtn" class="screenshot-btn" title="Screenshot (F9)">
+      <span class="icon" data-icon="camera"></span>
+      <span class="button-label">Shot</span>
+    </button>
+    <button id="taskCaptureBtn" class="task-btn" title="Create task from screen and input (F7)">
+      <span class="icon" data-icon="flag"></span>
+      <span class="button-label">Task</span>
+    </button>
     <input type="text" id="messageInput" placeholder="Ask for help, or press F9 for screenshot analysis..." />
-    <button id="stopBtn" class="stop-btn" style="display: none;">Stop</button>
-    <button id="sendBtn">Send</button>
+    <button id="stopBtn" class="stop-btn" style="display: none;">
+      <span class="icon" data-icon="square"></span>
+      <span class="button-label">Stop</span>
+    </button>
+    <button id="sendBtn">
+      <span class="icon" data-icon="send"></span>
+      <span class="button-label">Send</span>
+    </button>
   </div>
 
-  <button id="resizeGrip" class="resize-grip" title="Resize" aria-label="Resize"></button>
+  <button id="resizeGrip" class="resize-grip" title="Resize" aria-label="Resize">
+    <span class="icon" data-icon="grip"></span>
+  </button>
 
   <script type="module" src="/main.js"></script>
 </body>

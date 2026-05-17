@@ -156,6 +156,13 @@ class MemorySearchRequest(BaseModel):
     limit: int = 5
 
 
+class TaskAnalyzeRequest(BaseModel):
+    message: str = ""
+    image_base64: Optional[str] = None
+    game_id: Optional[str] = None
+    source_title: Optional[str] = None
+
+
 def get_system_prompt() -> str:
     return (
         "你是即時遊戲陪玩助理。用繁體中文回答，語氣自然、簡短、直接。"
@@ -787,6 +794,179 @@ def clean_vision_answer(text: str) -> str:
     }.items():
         text = text.replace(source, target)
     return text
+
+
+def sanitize_task_analysis(raw: dict[str, Any], message: str, game_id: Optional[str]) -> dict[str, Any]:
+    def clean(value: Any, default: str = "") -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text[:400] if text else default
+
+    def clean_list(value: Any, limit: int = 5) -> list[str]:
+        if isinstance(value, str):
+            parts = re.split(r"[\n;；]+", value)
+        elif isinstance(value, list):
+            parts = value
+        else:
+            parts = []
+        items: list[str] = []
+        for item in parts:
+            text = clean(item)
+            if text and text not in items:
+                items.append(text[:160])
+            if len(items) >= limit:
+                break
+        return items
+
+    fallback_title = clean(message, "調查目前取得的物品")
+    title = clean(raw.get("title"), fallback_title)[:80]
+    item_name = clean(raw.get("item_name") or raw.get("item"), "")
+    objective = clean(raw.get("objective"), title)
+    why = clean(raw.get("why") or raw.get("reason"), "")
+    next_steps = clean_list(raw.get("next_steps"), 4)
+    if not next_steps and objective:
+        next_steps = [objective]
+    tags = clean_list(raw.get("tags"), 6)
+    if item_name and item_name not in tags:
+        tags.insert(0, item_name[:40])
+    category = clean(raw.get("category"), "unknown").lower()
+    if category not in {"item", "quest", "indicator", "resource", "location", "unknown"}:
+        category = "unknown"
+    try:
+        confidence = float(raw.get("confidence", 0.45))
+    except Exception:
+        confidence = 0.45
+    confidence = max(0.0, min(confidence, 1.0))
+    summary = clean(raw.get("summary"), "")
+    if not summary:
+        summary = clean("；".join(part for part in [item_name, objective, why] if part), title)
+
+    return {
+        "title": title,
+        "category": category,
+        "item_name": item_name,
+        "objective": objective,
+        "why": why,
+        "next_steps": next_steps,
+        "tags": tags[:6],
+        "confidence": confidence,
+        "summary": summary,
+        "game_id": normalize_game_id(game_id) or "global",
+    }
+
+
+def fallback_task_analysis(message: str, game_id: Optional[str], error: Optional[str] = None) -> dict[str, Any]:
+    cleaned = re.sub(r"\s+", " ", (message or "").strip())
+    result = sanitize_task_analysis(
+        {
+            "title": cleaned[:80] or "調查目前取得的物品",
+            "category": "unknown",
+            "objective": "先確認這個物品或指標的用途，再決定下一步",
+            "why": "模型沒有穩定產生結構化任務，所以先保留為待查目標。",
+            "next_steps": ["查看物品描述", "詢問這個物品能用在哪", "找到相關 NPC、配方或任務提示"],
+            "tags": ["待查"],
+            "confidence": 0.25,
+            "summary": cleaned or "從目前畫面建立待查任務。",
+        },
+        message,
+        game_id,
+    )
+    if error:
+        result["warning"] = error[:300]
+    return result
+
+
+def build_task_analysis_messages(
+    message: str,
+    image_base64: Optional[str],
+    ocr_text: str,
+    rag_context: str,
+    source_title: Optional[str],
+) -> list[dict[str, Any]]:
+    system = (
+        "You are a game task logger. Convert the player's screenshot and note into one actionable task record. "
+        "Return one compact JSON object only, no Markdown. Use Traditional Chinese. "
+        "Do not invent exact game facts if they are not visible or in local context; mark uncertainty in why and lower confidence. "
+        "JSON keys: title, category, item_name, objective, why, next_steps, tags, confidence, summary. "
+        "category must be one of item, quest, indicator, resource, location, unknown. "
+        "next_steps and tags must be arrays of short strings. confidence is 0.0 to 1.0. "
+        "Focus on obtained items, visible item descriptions, quest/indicator text, what it may unlock, and what the player should check next."
+    )
+    user_text = (
+        f"Player note: {message or '根據目前截圖建立任務目標。'}\n"
+        f"Screenshot source title: {source_title or 'unknown'}\n\n"
+        "Create a task goal for the player. If the screenshot shows an item description but the use is unclear, "
+        "make the objective about discovering its use and list concrete checks such as recipe, NPC, quest, upgrade, or map marker."
+    )
+    if ocr_text:
+        user_text += "\n\nReadable screenshot text:\n" + ocr_text[:2000]
+    if rag_context:
+        user_text += "\n\nLocal guide/player memory context:\n" + rag_context[:2500]
+
+    if not image_base64:
+        return [{"role": "system", "content": system}, {"role": "user", "content": user_text}]
+
+    return [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_to_data_url(image_base64)}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+
+def analyze_task_sync(request: TaskAnalyzeRequest) -> dict[str, Any]:
+    message = (request.message or "").strip()
+    image_base64 = request.image_base64
+    if image_base64 and "," in image_base64:
+        image_base64 = image_base64.split(",", 1)[1]
+
+    ocr_text = ""
+    if image_base64 and ENABLE_OCR_CONTEXT:
+        try:
+            ocr_text = extract_ocr_text(image_base64)
+        except Exception as exc:
+            print(f"Task OCR failed: {exc}")
+
+    query = " ".join(part for part in [message, ocr_text] if part).strip()
+    guide_results = search_guides_sync(query, request.game_id, 4) if query else []
+    memory_results = search_memory_sync(query, request.game_id, ["task", "state", "note"], 4) if query else []
+    rag_context = format_rag_context(guide_results, memory_results, bool(guide_results))
+    messages = build_task_analysis_messages(
+        message,
+        image_base64,
+        ocr_text,
+        rag_context,
+        request.source_title,
+    )
+
+    try:
+        output = call_llama_once(messages, int(os.environ.get("LLAMA_TASK_RESPONSE_TOKENS", "360")))
+        raw = extract_json_object(output)
+        result = sanitize_task_analysis(raw, message, request.game_id)
+        result["raw_response"] = output[:1200]
+    except Exception as exc:
+        result = fallback_task_analysis(message, request.game_id, str(exc))
+
+    memory_text = (
+        f"任務目標：{result['title']}；"
+        f"物品/指標：{result.get('item_name') or '未確認'}；"
+        f"目的：{result.get('objective') or result['summary']}；"
+        f"下一步：{'、'.join(result.get('next_steps') or [])}"
+    )
+    try:
+        result["memory_item"] = add_memory_sync(
+            memory_text,
+            request.game_id,
+            "task",
+            ",".join(result.get("tags") or []),
+            4,
+        )
+    except Exception as exc:
+        result["memory_warning"] = str(exc)
+    return result
 
 
 def get_stt_model() -> Any:
@@ -1866,6 +2046,13 @@ async def memory_search(request: MemorySearchRequest):
 async def memory_recent(game_id: Optional[str] = None, limit: int = 10):
     results = await asyncio.to_thread(recent_memory_sync, game_id, limit)
     return {"game_id": normalize_game_id(game_id), "results": results}
+
+
+@app.post("/tasks/analyze")
+async def task_analyze(request: TaskAnalyzeRequest):
+    async with generate_lock:
+        result = await asyncio.to_thread(analyze_task_sync, request)
+    return {"status": "ok", "task": result}
 
 
 @app.get("/v1/models")
