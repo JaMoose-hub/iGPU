@@ -62,8 +62,8 @@ LLAMA_HF_REPO = os.environ.get(
 ).strip()
 LLAMA_HF_FILE = os.environ.get("LLAMA_HF_FILE", "").strip()
 LLAMA_CHAT_TEMPLATE_KWARGS = os.environ.get("LLAMA_CHAT_TEMPLATE_KWARGS", "").strip()
-LLAMA_IMAGE_MIN_TOKENS = os.environ.get("LLAMA_ARG_IMAGE_MIN_TOKENS", "1024").strip()
-LLAMA_IMAGE_MAX_TOKENS_SERVER = os.environ.get("LLAMA_ARG_IMAGE_MAX_TOKENS", "2048").strip()
+LLAMA_IMAGE_MIN_TOKENS = os.environ.get("LLAMA_ARG_IMAGE_MIN_TOKENS", "256").strip()
+LLAMA_IMAGE_MAX_TOKENS_SERVER = os.environ.get("LLAMA_ARG_IMAGE_MAX_TOKENS", "512").strip()
 LLAMA_SKIP_CHAT_PARSING = os.environ.get("LLAMA_SKIP_CHAT_PARSING", "1").strip().lower() in {
     "1",
     "true",
@@ -72,12 +72,12 @@ LLAMA_SKIP_CHAT_PARSING = os.environ.get("LLAMA_SKIP_CHAT_PARSING", "1").strip()
 }
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LLAMA_LOG = LOG_DIR / "llama-server.log"
-LATEST_SCREENSHOT = LOG_DIR / "latest-screenshot.png"
-LATEST_VISION_INPUT = LOG_DIR / "latest-vision-input.png"
-LATEST_OCR_INPUT = LOG_DIR / "latest-ocr-input.png"
-LATEST_OVERLAY_GRID_INPUT = LOG_DIR / "latest-overlay-grid-input.png"
-OVERLAY_GRID_COLUMNS = 4
-OVERLAY_GRID_ROWS = 3
+LATEST_SCREENSHOT = LOG_DIR / "latest-screenshot.jpg"
+LATEST_VISION_INPUT = LOG_DIR / "latest-vision-input.jpg"
+LATEST_OCR_INPUT = LOG_DIR / "latest-ocr-input.jpg"
+LATEST_OVERLAY_GRID_INPUT = LOG_DIR / "latest-overlay-grid-input.jpg"
+OVERLAY_GRID_COLUMNS = 6
+OVERLAY_GRID_ROWS = 4
 ENABLE_OCR_CONTEXT = os.environ.get("IGPU_ENABLE_OCR_CONTEXT", "1").strip().lower() in {
     "1",
     "true",
@@ -400,21 +400,65 @@ def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 def normalize_vision_image(img: Image.Image) -> Image.Image:
     img = img.convert("RGB")
-    long_edge = bounded_int_env("LLAMA_VISION_LONG_EDGE", 1920, 768, 2560)
+    long_edge = bounded_int_env("LLAMA_VISION_LONG_EDGE", 960, 512, 2560)
     if max(img.size) > long_edge:
         img = img.copy()
         img.thumbnail((long_edge, long_edge), Image.Resampling.LANCZOS)
     return img
 
 
-def encode_png_base64(img: Image.Image, *, save_path: Optional[Path] = None) -> str:
+def resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
+    img = img.convert("RGB")
+    if max(img.size) <= long_edge:
+        return img
+    resized = img.copy()
+    resized.thumbnail((long_edge, long_edge), Image.Resampling.LANCZOS)
+    return resized
+
+
+def encode_image_base64(
+    img: Image.Image,
+    *,
+    image_format: str = "JPEG",
+    quality: int = 72,
+    save_path: Optional[Path] = None,
+) -> tuple[str, str]:
+    image_format = (image_format or "JPEG").upper()
+    if image_format == "JPG":
+        image_format = "JPEG"
+
     buffered = io.BytesIO()
-    img.save(buffered, format="PNG", optimize=True)
+    if image_format == "JPEG":
+        img.convert("RGB").save(
+            buffered,
+            format="JPEG",
+            quality=max(35, min(int(quality), 95)),
+            optimize=True,
+            subsampling=1,
+        )
+        mime_type = "image/jpeg"
+    elif image_format == "WEBP":
+        img.convert("RGB").save(
+            buffered,
+            format="WEBP",
+            quality=max(35, min(int(quality), 95)),
+            method=4,
+        )
+        mime_type = "image/webp"
+    else:
+        img.save(buffered, format="PNG", optimize=True)
+        mime_type = "image/png"
+
     data = buffered.getvalue()
     if save_path:
         save_path.parent.mkdir(exist_ok=True)
         save_path.write_bytes(data)
-    return base64.b64encode(data).decode("ascii")
+    return base64.b64encode(data).decode("ascii"), mime_type
+
+
+def encode_png_base64(img: Image.Image, *, save_path: Optional[Path] = None) -> str:
+    encoded, _ = encode_image_base64(img, image_format="PNG", save_path=save_path)
+    return encoded
 
 
 def decode_image_size(image_base64: str) -> tuple[int, int]:
@@ -442,7 +486,8 @@ def overlay_grid_font(width: int, height: int) -> ImageFont.ImageFont:
 
 
 def make_overlay_grid_image(img: Image.Image) -> Image.Image:
-    base = normalize_vision_image(img).convert("RGBA")
+    long_edge = bounded_int_env("LLAMA_OVERLAY_GRID_LONG_EDGE", 960, 384, 1280)
+    base = resize_to_long_edge(img, long_edge).convert("RGBA")
     width, height = base.size
     draw = ImageDraw.Draw(base, "RGBA")
     line_width = max(2, min(6, int(min(width, height) / 420)))
@@ -486,8 +531,13 @@ def image_to_data_url(image_base64: str) -> str:
     image_bytes = base64.b64decode(raw)
     with Image.open(io.BytesIO(image_bytes)) as img:
         img = normalize_vision_image(img)
-        normalized = encode_png_base64(img, save_path=LATEST_VISION_INPUT)
-    return f"data:image/png;base64,{normalized}"
+        normalized, mime_type = encode_image_base64(
+            img,
+            image_format=os.environ.get("LLAMA_VISION_IMAGE_FORMAT", "JPEG"),
+            quality=bounded_int_env("LLAMA_VISION_IMAGE_QUALITY", 72, 35, 95),
+            save_path=LATEST_VISION_INPUT,
+        )
+    return f"data:{mime_type};base64,{normalized}"
 
 
 def image_to_overlay_grid_data_url(image_base64: str) -> str:
@@ -495,8 +545,13 @@ def image_to_overlay_grid_data_url(image_base64: str) -> str:
     image_bytes = base64.b64decode(raw)
     with Image.open(io.BytesIO(image_bytes)) as img:
         gridded = make_overlay_grid_image(img)
-        normalized = encode_png_base64(gridded, save_path=LATEST_OVERLAY_GRID_INPUT)
-    return f"data:image/png;base64,{normalized}"
+        normalized, mime_type = encode_image_base64(
+            gridded,
+            image_format=os.environ.get("LLAMA_VISION_IMAGE_FORMAT", "JPEG"),
+            quality=bounded_int_env("LLAMA_OVERLAY_GRID_IMAGE_QUALITY", 68, 35, 95),
+            save_path=LATEST_OVERLAY_GRID_INPUT,
+        )
+    return f"data:{mime_type};base64,{normalized}"
 
 
 def get_ocr_engine() -> Optional[Any]:
@@ -593,13 +648,15 @@ def build_messages(
     prompt = add_context_to_prompt(prompt, IMAGE_HISTORY_CONTEXT_MESSAGES)
     vision_prompt = (
         f"{prompt}\n\n"
-        "Analyze the screenshot pixels first, then answer in Traditional Chinese in at most two sentences. "
+        "Analyze the screenshot pixels first, then answer in Traditional Chinese. "
+        "For normal gameplay requests, reply with one short sentence under 45 Chinese characters. "
+        "Only give a longer answer when the player explicitly asks for detailed analysis. "
         "Describe only visible objects, UI, scene layout, and immediate risks. "
         "Do not invent movement, vehicles, enemies, objectives, or actions that are not clearly visible. "
         "For first-person shooter screenshots with ammo, crosshair, minimap, or alive counters, treat the large foreground object as the player's held weapon unless wheels or a full vehicle body are clearly visible. "
         "Do not call an object a motorcycle or vehicle unless wheels, seat, and vehicle body are visible. "
         "If the foreground object is ambiguous, describe its visible shape instead of guessing. "
-        "Then give one immediate next-step suggestion."
+        "Give at most one immediate next-step suggestion."
     )
     if ocr_text:
         vision_prompt += (
@@ -1118,11 +1175,20 @@ def should_use_guides(prompt: str, explicit: Optional[bool]) -> bool:
 
 
 def should_use_overlay(prompt: str, image_base64: Optional[str]) -> bool:
-    return bool(image_base64 and OVERLAY_INTENT_RE.search(prompt or ""))
+    return bool(
+        image_base64
+        and (
+            OVERLAY_INTENT_RE.search(prompt or "")
+            or re.search(r"(圈出|圈起|框出|標記|標出|幫我圈|幫我標|指給我)", prompt or "", re.IGNORECASE)
+        )
+    )
 
 
 def should_use_visual_scene(prompt: str) -> bool:
-    return bool(VISUAL_SCENE_INTENT_RE.search(prompt or ""))
+    return bool(
+        VISUAL_SCENE_INTENT_RE.search(prompt or "")
+        or re.search(r"(你看見|你看到|看見什麼|看到什麼|幫我看|看一下.*畫面|畫面.*什麼|螢幕.*什麼)", prompt or "", re.IGNORECASE)
+    )
 
 
 def detect_memory_add(prompt: str) -> Optional[dict[str, str]]:
@@ -1233,13 +1299,20 @@ def build_augmented_prompt(original_prompt: str, rag_context: str) -> str:
 
 
 def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> list[dict[str, Any]]:
+    valid_cells = [
+        f"{chr(ord('A') + col)}{row + 1}"
+        for row in range(OVERLAY_GRID_ROWS)
+        for col in range(OVERLAY_GRID_COLUMNS)
+    ]
+    valid_cells_text = ", ".join(valid_cells)
+    grid_span = f"A1 through {chr(ord('A') + OVERLAY_GRID_COLUMNS - 1)}{OVERLAY_GRID_ROWS}"
     if wants_circle_marker(prompt):
         user_text = prompt
         if rag_context:
             user_text += "\n\nLocal context:\n" + rag_context
         user_text += (
-            "\n\nThe screenshot has a red planning grid with cells A1 through D3. "
-            "Valid cells are A1, B1, C1, D1, A2, B2, C2, D2, A3, B3, C3, D3. "
+            f"\n\nThe screenshot has a red planning grid with cells {grid_span}. "
+            f"Valid cells are {valid_cells_text}. "
             "Pick the single cell that contains the requested visible object or the best visible target. "
             "If the object spans multiple cells, choose the cell containing its center. "
             "If the object is not visible or you are unsure, reply NONE. "
@@ -1264,7 +1337,8 @@ def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> 
     system = (
         "You are a game companion HUD planner. Return one compact ASCII JSON object only, no Markdown. "
         "Use Traditional Chinese for answer and labels. "
-        "The screenshot has a red planning grid with cells A1 through D3. The grid is not part of the game. "
+        f"The screenshot has a red planning grid with cells {grid_span}. The grid is not part of the game. "
+        f"Valid cells are {valid_cells_text}. "
         "For every visual HUD item, prefer the cell key instead of numeric x/y. "
         "If you are not visually confident about the requested object or cell, return an empty overlay items array. "
         "Use exact JSON keys only: answer, overlay, duration_ms, items, type, cell, x, y, radius, label, color, from, to, points. "
@@ -1312,7 +1386,7 @@ def clamp_float(value: Any, default: float = 0.0) -> float:
 def grid_cell_to_xy(cell: Any) -> Optional[tuple[float, float]]:
     if cell is None:
         return None
-    match = re.search(r"\b([A-Ha-h])\s*[-_ ]?\s*([1-6])\b", str(cell))
+    match = re.search(r"\b([A-Za-z])\s*[-_ ]?\s*(\d{1,2})\b", str(cell))
     if not match:
         return None
     col = ord(match.group(1).upper()) - ord("A")
@@ -1500,7 +1574,7 @@ def find_loose_number_after(text: str, label: str) -> Optional[float]:
 
 
 def find_cell_candidate(fragment: str) -> Optional[str]:
-    for match in re.finditer(r"([A-Ha-h])\s*[-_ ]?([1-6])", fragment or ""):
+    for match in re.finditer(r"([A-Za-z])\s*[-_ ]?(\d{1,2})", fragment or ""):
         cell = f"{match.group(1).upper()}{match.group(2)}"
         if grid_cell_to_xy(cell):
             return cell
@@ -1598,6 +1672,24 @@ def fallback_circle_overlay() -> dict[str, Any]:
     }
 
 
+def cell_circle_overlay(cell: str) -> Optional[dict[str, Any]]:
+    cell_xy = grid_cell_to_xy(cell)
+    if not cell_xy:
+        return None
+    return {
+        "duration_ms": 4500,
+        "items": [
+            {
+                "type": "circle",
+                "x": cell_xy[0],
+                "y": cell_xy[1],
+                "radius": 0.13,
+                "color": "#ff2d2d",
+            }
+        ],
+    }
+
+
 def prompt_position_fallback_overlay(prompt: str) -> dict[str, Any]:
     text = (prompt or "").lower()
     x = 0.5
@@ -1627,11 +1719,25 @@ def create_overlay_response(prompt: str, image_base64: str, rag_context: str) ->
         overlay = attach_overlay_image_space(prompt_position_fallback_overlay(prompt), image_base64)
         return {"answer": "我已依照你指定的位置畫上紅圈。", "overlay": overlay}
 
-    output = call_llama_once(build_overlay_messages(prompt, image_base64, rag_context), max_tokens=320)
+    circle_marker_request = wants_circle_marker(prompt)
+    output = call_llama_once(
+        build_overlay_messages(prompt, image_base64, rag_context),
+        max_tokens=8 if circle_marker_request else int(os.environ.get("LLAMA_OVERLAY_RESPONSE_TOKENS", "128")),
+    )
     try:
         (LOG_DIR / "latest-overlay-raw.txt").write_text(output, encoding="utf-8")
     except Exception:
         pass
+    if circle_marker_request:
+        cell = find_cell_candidate(output)
+        if cell:
+            overlay = attach_overlay_image_space(cell_circle_overlay(cell), image_base64)
+            return {"answer": "我已標記。", "overlay": overlay}
+        fallback = fallback_overlay_for_prompt(prompt)
+        if fallback:
+            fallback = attach_overlay_image_space(fallback, image_base64)
+            return {"answer": "我先用紅圈標出可能區域。", "overlay": fallback}
+        return {"answer": "我沒有抓到可靠座標，所以先不畫錯位置。請指定方位或物件。", "overlay": None}
     try:
         parsed = extract_json_object(output)
     except Exception:
@@ -1683,6 +1789,17 @@ async def health():
         "llama_gpu_layers": LLAMA_GPU_LAYERS,
         "llama_image_min_tokens": LLAMA_IMAGE_MIN_TOKENS or "default",
         "llama_image_max_tokens": LLAMA_IMAGE_MAX_TOKENS_SERVER or "default",
+        "image_response_tokens": os.environ.get(
+            "LLAMA_IMAGE_RESPONSE_TOKENS",
+            os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "64"),
+        ),
+        "overlay_grid_long_edge": bounded_int_env("LLAMA_OVERLAY_GRID_LONG_EDGE", 960, 384, 1280),
+        "overlay_grid_columns": OVERLAY_GRID_COLUMNS,
+        "overlay_grid_rows": OVERLAY_GRID_ROWS,
+        "overlay_response_tokens": os.environ.get("LLAMA_OVERLAY_RESPONSE_TOKENS", "128"),
+        "vision_long_edge": bounded_int_env("LLAMA_VISION_LONG_EDGE", 960, 512, 2560),
+        "screenshot_long_edge": bounded_int_env("IGPU_SCREENSHOT_LONG_EDGE", 960, 512, 2560),
+        "screenshot_format": os.environ.get("IGPU_SCREENSHOT_FORMAT", "JPEG"),
         "llama_parallel": LLAMA_PARALLEL or "auto",
         "llama_cache_ram_mib": LLAMA_CACHE_RAM or "default",
         "chat_backend": CHAT_BACKEND,
@@ -2290,8 +2407,56 @@ def make_capture_source(
     return source
 
 
+def screenshot_profile_settings(profile: str) -> tuple[int, int, str]:
+    profile_name = (profile or "fast").strip().lower()
+    if profile_name == "full":
+        return 2560, 90, "PNG"
+    if profile_name == "balanced":
+        return 1280, 76, "JPEG"
+    if profile_name == "turbo":
+        return 768, 60, "JPEG"
+    return (
+        bounded_int_env("IGPU_SCREENSHOT_LONG_EDGE", 960, 512, 2560),
+        bounded_int_env("IGPU_SCREENSHOT_QUALITY", 65, 35, 95),
+        os.environ.get("IGPU_SCREENSHOT_FORMAT", "JPEG"),
+    )
+
+
+def make_screenshot_response(img: Image.Image, source: dict[str, Any], profile: str) -> dict[str, Any]:
+    long_edge, quality, image_format = screenshot_profile_settings(profile)
+    model_img = resize_to_long_edge(img, long_edge)
+    encoded, mime_type = encode_image_base64(
+        model_img,
+        image_format=image_format,
+        quality=quality,
+        save_path=LATEST_SCREENSHOT,
+    )
+
+    source = dict(source)
+    source["bitmap_width"] = int(model_img.width)
+    source["bitmap_height"] = int(model_img.height)
+    source["model_width"] = int(model_img.width)
+    source["model_height"] = int(model_img.height)
+    source["model_long_edge"] = int(long_edge)
+    source["model_mime_type"] = mime_type
+    source["model_scale_x"] = float(model_img.width / max(1, int(source.get("capture_width") or img.width)))
+    source["model_scale_y"] = float(model_img.height / max(1, int(source.get("capture_height") or img.height)))
+
+    return {
+        "image_base64": encoded,
+        "mime_type": mime_type,
+        "width": model_img.width,
+        "height": model_img.height,
+        "source": source,
+        "debug_path": str(LATEST_SCREENSHOT),
+        "profile": (profile or "fast").strip().lower(),
+        "original_width": int(img.width),
+        "original_height": int(img.height),
+    }
+
+
 @app.get("/screenshot")
-async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] = None):
+async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] = None, profile: str = "fast"):
     try:
         mode_name = mode.lower()
         window = None
@@ -2305,21 +2470,15 @@ async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] =
                 captured = capture_window_image(window)
                 if captured is not None:
                     img, capture_method = captured
-                    encoded = encode_png_base64(img, save_path=LATEST_SCREENSHOT)
-                    return {
-                        "image_base64": encoded,
-                        "width": img.width,
-                        "height": img.height,
-                        "source": make_capture_source(
+                    source = make_capture_source(
                             mode="window",
                             capture_method=capture_method,
                             img=img,
                             capture_left=int(window["left"]),
                             capture_top=int(window["top"]),
                             window=window,
-                        ),
-                        "debug_path": str(LATEST_SCREENSHOT),
-                    }
+                    )
+                    return make_screenshot_response(img, source, profile)
                 print("Direct window capture failed; falling back to screen crop.")
             else:
                 print("No target window found; falling back to monitor capture.")
@@ -2371,14 +2530,7 @@ async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] =
             )
             source["redacted_overlay_windows"] = redacted_count
             source["capture_protection"] = "redaction" if redaction_enabled else "off"
-            encoded = encode_png_base64(img, save_path=LATEST_SCREENSHOT)
-            return {
-                "image_base64": encoded,
-                "width": img.width,
-                "height": img.height,
-                "source": source,
-                "debug_path": str(LATEST_SCREENSHOT),
-            }
+            return make_screenshot_response(img, source, profile)
     except HTTPException:
         raise
     except Exception as exc:
@@ -2551,7 +2703,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                     answer = await asyncio.to_thread(
                         call_llama_once,
                         messages,
-                        int(os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "160")),
+                        int(
+                            os.environ.get(
+                                "LLAMA_IMAGE_RESPONSE_TOKENS",
+                                os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "64"),
+                            )
+                        ),
                     )
                 except Exception as exc:
                     yield f"data: {json.dumps({'content': f'截圖分析失敗：{exc}'}, ensure_ascii=False)}\n\n"

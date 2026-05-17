@@ -10,6 +10,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   let currentOverlay = null;
   let currentTarget = null;
   let lastStoredOverlayId = null;
+  let hudVisible = false;
+  let lastTargetKey = "";
+  let resizeRaf = null;
 
   const clamp = (value, fallback = 0) => {
     const number = Number(value);
@@ -18,11 +21,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const resize = () => {
+    resizeRaf = null;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
-    canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    const nextWidth = Math.max(1, Math.floor(window.innerWidth * dpr));
+    const nextHeight = Math.max(1, Math.floor(window.innerHeight * dpr));
+    if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+      canvas.width = nextWidth;
+      canvas.height = nextHeight;
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     draw();
+  };
+
+  const scheduleResize = () => {
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(resize);
   };
 
   const imageSpace = () => {
@@ -187,6 +200,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     currentOverlay = null;
     currentTarget = null;
+    hudVisible = false;
+    lastTargetKey = "";
     localStorage.removeItem("hud-overlay");
     document.body.classList.remove("visible");
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
@@ -213,10 +228,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!overlay?.items?.length) return;
     if (hideTimer) clearTimeout(hideTimer);
     currentTarget = target || overlay.render_target || null;
-    await invoke("show_hud_window", hudTargetArgs(currentTarget)).catch((err) => console.warn("HUD show failed:", err));
     currentOverlay = overlay;
+    const targetArgs = hudTargetArgs(currentTarget);
+    const targetKey = JSON.stringify(targetArgs);
+    if (!hudVisible || targetKey !== lastTargetKey) {
+      await invoke("show_hud_window", targetArgs).catch((err) => console.warn("HUD show failed:", err));
+      hudVisible = true;
+      lastTargetKey = targetKey;
+    }
     document.body.classList.add("visible");
-    resize();
+    scheduleResize();
     hideTimer = setTimeout(clearHud, Math.max(3000, Math.min(Number(overlay.duration_ms) || 6000, 8000)));
   };
 
@@ -237,9 +258,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   await listen("hud:show", (event) => showHud(event.payload));
   await listen("hud:clear", clearHud);
   await invoke("configure_hud_window").catch((err) => console.warn("HUD configure failed:", err));
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", scheduleResize);
+  window.addEventListener("storage", readStoredOverlay);
   resize();
-  setInterval(readStoredOverlay, 250);
+  setInterval(readStoredOverlay, 1000);
   readStoredOverlay();
   await emit("hud:ready", { label: "hud" });
 });

@@ -53,7 +53,7 @@ args, unknown = parser.parse_known_args()
 # 優先順序：--model 標籤 > 位置參數 > 預設 gemma4
 SELECTED_MODEL = args.model or args.model_pos or "gemma4"
 IS_VISION_MODEL = "vl" in SELECTED_MODEL.lower() or "gemma" in SELECTED_MODEL.lower()
-DEVICE = "GPU" # 如果 GPU 跑不動，會自動回退到 CPU
+DEVICE = os.environ.get("IGPU_DEVICE", "CPU") # Set IGPU_DEVICE=GPU to try iGPU acceleration.
 
 # --- 修復與註冊專區 ---
 def patch_model_for_gpu_precision(model_path, xml_filename):
@@ -286,7 +286,12 @@ try:
         print(f"Initializing OpenVINO GenAI VLMPipeline on {DEVICE}...")
         model = ov_genai.VLMPipeline(VLM_MODEL_PATH, DEVICE)
         # GenAI Pipeline 內建了 Tokenizer 與 Processor 功能
-        processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+        try:
+            processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+        except Exception as component_error:
+            print(f"Warning: Transformers processor unavailable for qwen3: {component_error}")
+            tokenizer = model.get_tokenizer()
+            processor = tokenizer
     else:
         # --- 其他模型 (如 Gemma-4): 使用 Optimum-Intel 載入 ---
         processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
@@ -320,7 +325,13 @@ except Exception as e:
     
     if SELECTED_MODEL == "qwen3":
         model = ov_genai.VLMPipeline(VLM_MODEL_PATH, "CPU")
-        if not processor: processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+        if not processor:
+            try:
+                processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
+            except Exception as component_error:
+                print(f"Warning: Transformers processor unavailable for qwen3: {component_error}")
+                tokenizer = model.get_tokenizer()
+                processor = tokenizer
     else:
         if not processor: processor, tokenizer = load_vlm_components(VLM_MODEL_PATH, SELECTED_MODEL)
         config = (GemmaConfig.from_pretrained(VLM_MODEL_PATH) 
@@ -348,6 +359,28 @@ else:
 history = [] 
 generate_lock = asyncio.Lock()
 
+def build_chat_prompt(messages):
+    try:
+        return processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    except Exception as e:
+        print(f"Processor chat template failed, using local Qwen fallback: {e}")
+
+    rendered = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if item.get("type") == "image":
+                    parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+                elif item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+            content = "\n".join(part for part in parts if part)
+        rendered.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    rendered.append("<|im_start|>assistant\n")
+    return "\n".join(rendered)
+
 def get_system_prompt():
     return (
         "你是『🎮 AI 遊戲陪伴也是電腦系統效能分析師』，一個充滿活力、說話幽默且親切的遊戲高手。 "
@@ -359,6 +392,7 @@ def get_system_prompt():
 class ChatRequest(BaseModel):
     message: str
     image_base64: Optional[str] = None
+    max_tokens: Optional[int] = 512
 
 # --- OpenAI Compatibility Models ---
 class OpenAIMessage(BaseModel):
@@ -474,7 +508,6 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             # --- 使用 OpenVINO GenAI VLMPipeline 生成 ---
             queue = asyncio.Queue()
             loop = asyncio.get_event_loop()
-            streamer = GenAIStreamer(queue, loop)
             
             # 1. 準備輸入影像
             ov_images = []
@@ -483,15 +516,17 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                     ov_images.extend([pil_to_ov_tensor(img) for img in msg["images"]])
 
             # 2. 準備輸入文字
-            full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
+            full_prompt = build_chat_prompt(history)
 
             def generate_in_thread():
                 try:
                     # 修正：GenAI 不接受 images=None。如果沒圖就完全不傳該參數。
+                    max_tokens = min(chat_request.max_tokens or 512, 8192)
                     if ov_images:
-                        model.generate(full_prompt, images=ov_images, streamer=streamer, max_new_tokens=8192)
+                        result = model.generate(full_prompt, images=ov_images, max_new_tokens=max_tokens)
                     else:
-                        model.generate(full_prompt, streamer=streamer, max_new_tokens=8192)
+                        result = model.generate(full_prompt, max_new_tokens=max_tokens)
+                    loop.call_soon_threadsafe(queue.put_nowait, str(result))
                 except Exception as e:
                     print(f"GenAI Thread Error: {e}")
                 finally:
@@ -523,7 +558,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 if "images" in msg and msg["images"]:
                     all_images.extend(msg["images"])
             
-            full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
+            full_prompt = build_chat_prompt(history)
             target_images = all_images if all_images else None
             if target_images and len(target_images) == 1: target_images = target_images[0]
                 
@@ -631,12 +666,60 @@ async def openai_chat_endpoint(fastapi_request: Request, request: OpenAICompleti
     
     # 2. 調用現有的推理邏輯 (重用 event_generator 邏輯但改進輸出格式)
     async def openai_event_generator():
+        completion_id = f"chatcmpl-{uuid.uuid4()}"
+
+        if SELECTED_MODEL == "qwen3":
+            queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+            ov_images = []
+            for msg in history:
+                if "images" in msg and msg["images"]:
+                    ov_images.extend([pil_to_ov_tensor(img) for img in msg["images"]])
+
+            full_prompt = build_chat_prompt(history)
+
+            def generate_in_thread():
+                try:
+                    max_tokens = min(request.max_tokens or 512, 8192)
+                    if ov_images:
+                        result = model.generate(full_prompt, images=ov_images, max_new_tokens=max_tokens)
+                    else:
+                        result = model.generate(full_prompt, max_new_tokens=max_tokens)
+                    loop.call_soon_threadsafe(queue.put_nowait, str(result))
+                except Exception as e:
+                    print(f"OpenAI GenAI Error: {e}")
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            async with generate_lock:
+                thread = Thread(target=generate_in_thread)
+                thread.start()
+                try:
+                    while True:
+                        token = await queue.get()
+                        if token is None:
+                            break
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": SELECTED_MODEL,
+                            "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}]
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
+                finally:
+                    thread.join()
+                    gc.collect()
+            return
+
         all_images = []
         for msg in history:
             if "images" in msg and msg["images"]:
                 all_images.extend(msg["images"])
         
-        full_prompt = processor.apply_chat_template(history, add_generation_prompt=True, tokenize=False)
+        full_prompt = build_chat_prompt(history)
         target_images = all_images if len(all_images) > 0 else None
         if target_images and len(target_images) == 1: target_images = target_images[0]
         
@@ -652,7 +735,6 @@ async def openai_chat_endpoint(fastapi_request: Request, request: OpenAICompleti
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         generation_kwargs = dict(**inputs, streamer=streamer, max_new_tokens=request.max_tokens, do_sample=False)
         
-        completion_id = f"chatcmpl-{uuid.uuid4()}"
         def generate_in_thread():
             try: model.generate(**generation_kwargs)
             except Exception as e: print(f"OpenAI Gen Error: {e}")
@@ -685,7 +767,7 @@ async def openai_chat_endpoint(fastapi_request: Request, request: OpenAICompleti
         # 非串流模式（簡單實現）
         full_response = ""
         async for chunk in openai_event_generator():
-            if "content" in chunk:
+            if chunk.startswith("data: ") and "[DONE]" not in chunk:
                 data = json.loads(chunk.replace("data: ", ""))
                 if "choices" in data and "content" in data["choices"][0]["delta"]:
                     full_response += data["choices"][0]["delta"]["content"]
