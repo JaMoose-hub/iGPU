@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game Search</title>
+  <link rel="stylesheet" href="search.css" />
+</head>
+
+<body>
+  <div class="search-drag" data-tauri-drag-region>
+    <div class="search-title" data-tauri-drag-region>
+      <span class="icon" data-icon="search"></span>
+      <span>Game Search</span>
+    </div>
+    <div class="search-window-actions">
+      <button id="closeBtn" class="window-btn close-btn" title="Close" aria-label="Close">
+        <span class="icon" data-icon="x"></span>
+      </button>
+    </div>
+  </div>
+
+  <main class="search-panel">
+    <label class="field-label" for="gameInput">Current game</label>
+    <div class="field-row">
+      <span class="icon" data-icon="gamepad"></span>
+      <input id="gameInput" type="text" placeholder="Game name" autocomplete="off" />
+    </div>
+
+    <label class="field-label" for="keywordInput">Keyword</label>
+    <form id="searchForm" class="search-form">
+      <div class="field-row keyword-row">
+        <span class="icon" data-icon="search"></span>
+        <input id="keywordInput" type="search" placeholder="item, quest, build, map..." autocomplete="off" />
+      </div>
+      <button id="searchBtn" class="primary-btn" type="submit">
+        <span class="icon" data-icon="panel"></span>
+        <span>Search</span>
+      </button>
+      <button id="externalBtn" class="secondary-btn" type="button">
+        <span class="icon" data-icon="external"></span>
+        <span>External</span>
+      </button>
+    </form>
+
+    <div class="engine-row" role="group" aria-label="Search engine">
+      <button class="engine-btn active" data-engine="google" type="button">Google</button>
+      <button class="engine-btn" data-engine="youtube" type="button">YouTube</button>
+      <button class="engine-btn" data-engine="wiki" type="button">Wiki</button>
+    </div>
+
+    <div id="quickChips" class="quick-chips" aria-label="Quick keywords"></div>
+
+    <div id="browserNav" class="browser-nav" aria-label="Browser controls">
+      <button id="browserBackBtn" class="nav-btn" type="button" title="Back" aria-label="Back" disabled>
+        <span class="icon" data-icon="back"></span>
+      </button>
+      <button id="browserForwardBtn" class="nav-btn" type="button" title="Forward" aria-label="Forward" disabled>
+        <span class="icon" data-icon="forward"></span>
+      </button>
+      <button id="browserReloadBtn" class="nav-btn" type="button" title="Reload" aria-label="Reload" disabled>
+        <span class="icon" data-icon="reload"></span>
+      </button>
+      <button id="browserHomeBtn" class="nav-btn" type="button" title="Current search" aria-label="Current search" disabled>
+        <span class="icon" data-icon="home"></span>
+      </button>
+      <div id="browserAddress" class="browser-address">No page loaded</div>
+    </div>
+
+    <section id="browserHost" class="browser-host">
+      <div id="browserEmpty" class="browser-empty">
+        <span class="icon" data-icon="panel"></span>
+        <span>Search results will open here.</span>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/search.js"></script>
+</body>
+
+</html>

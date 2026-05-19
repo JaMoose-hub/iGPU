@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import ctypes
+import http.client
 import html
 import io
 import json
 import os
 import re
 import shlex
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -54,12 +56,30 @@ ASSET_ROOT = Path(
 )
 LLAMA_DIR = ASSET_ROOT / "tools" / "llama.cpp-vulkan"
 LLAMA_SERVER = LLAMA_DIR / "llama-server.exe"
-MODEL_PATH = ASSET_ROOT / "models" / "gemma-4-E4B-it-Q4_K_M.gguf"
-MMPROJ_PATH = ASSET_ROOT / "models" / "mmproj-BF16.gguf"
+MODEL_PATH = Path(
+    os.environ.get(
+        "LLAMA_MODEL_PATH",
+        str(ASSET_ROOT / "models" / "gemma-4-E4B-it-Q4_K_M.gguf"),
+    )
+)
+MMPROJ_PATH = Path(
+    os.environ.get(
+        "LLAMA_MMPROJ_PATH",
+        str(ASSET_ROOT / "models" / "mmproj-BF16.gguf"),
+    )
+)
 LLAMA_HF_REPO = os.environ.get(
     "LLAMA_HF_REPO",
     "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q8_0",
 ).strip()
+LLAMA_FORCE_LOCAL_MODEL = os.environ.get("LLAMA_FORCE_LOCAL_MODEL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+if LLAMA_FORCE_LOCAL_MODEL:
+    LLAMA_HF_REPO = ""
 LLAMA_HF_FILE = os.environ.get("LLAMA_HF_FILE", "").strip()
 LLAMA_CHAT_TEMPLATE_KWARGS = os.environ.get("LLAMA_CHAT_TEMPLATE_KWARGS", "").strip()
 LLAMA_IMAGE_MIN_TOKENS = os.environ.get("LLAMA_ARG_IMAGE_MIN_TOKENS", "256").strip()
@@ -70,10 +90,11 @@ LLAMA_SKIP_CHAT_PARSING = os.environ.get("LLAMA_SKIP_CHAT_PARSING", "1").strip()
     "yes",
     "on",
 }
-LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR = Path(os.environ.get("IGPU_LOG_DIR", str(Path(__file__).resolve().parent / "logs")))
 LLAMA_LOG = LOG_DIR / "llama-server.log"
 LATEST_SCREENSHOT = LOG_DIR / "latest-screenshot.jpg"
 LATEST_VISION_INPUT = LOG_DIR / "latest-vision-input.jpg"
+LATEST_VISION_RETRY_INPUT = LOG_DIR / "latest-vision-retry-input.jpg"
 LATEST_OCR_INPUT = LOG_DIR / "latest-ocr-input.jpg"
 LATEST_OVERLAY_GRID_INPUT = LOG_DIR / "latest-overlay-grid-input.jpg"
 OVERLAY_GRID_COLUMNS = 6
@@ -84,7 +105,17 @@ ENABLE_OCR_CONTEXT = os.environ.get("IGPU_ENABLE_OCR_CONTEXT", "1").strip().lowe
     "yes",
     "on",
 }
-IGNORED_CAPTURE_TITLES = ("Game Companion", "overlay-chat", "game-guidance-hud")
+IGNORED_CAPTURE_TITLES = (
+    "Game Companion",
+    "overlay-chat",
+    "game-guidance-hud",
+    "game-task-log",
+    "game-search",
+)
+IGNORED_CAPTURE_PROCESSES = (
+    "overlay-chat.exe",
+    "textinputhost.exe",
+)
 GENERATED_DIR = Path(__file__).resolve().parent / "generated_files"
 PROJECT_ROOT = Path(__file__).resolve().parent
 HERMES_CHAT_SCRIPT = PROJECT_ROOT / "scripts" / "hermes_no_tools_chat.py"
@@ -293,6 +324,21 @@ def validate_assets() -> None:
         raise RuntimeError("Missing llama.cpp Vulkan assets:\n" + "\n".join(missing))
 
 
+def stop_llama_server() -> None:
+    global llama_process
+    if llama_process and llama_process.poll() is None:
+        try:
+            llama_process.terminate()
+            llama_process.wait(timeout=10)
+        except Exception:
+            try:
+                llama_process.kill()
+                llama_process.wait(timeout=5)
+            except Exception:
+                pass
+    llama_process = None
+
+
 def start_llama_server() -> None:
     global llama_process
     if llama_ready():
@@ -395,6 +441,36 @@ def start_llama_server() -> None:
         time.sleep(2)
 
     raise RuntimeError(f"llama-server did not become ready in time. See {LLAMA_LOG}")
+
+
+def restart_llama_server(reason: str) -> None:
+    print(f"Restarting llama-server after transient failure: {reason}")
+    stop_llama_server()
+    time.sleep(1)
+    start_llama_server()
+
+
+def is_retryable_llama_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+            TimeoutError,
+            socket.timeout,
+            http.client.RemoteDisconnected,
+        ),
+    ):
+        return True
+    if isinstance(exc, urllib.error.HTTPError) and exc.code in {500, 502, 503, 504}:
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    text = str(exc).lower()
+    return "10054" in text or "connection reset" in text or "remote end closed" in text
 
 
 def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -559,6 +635,51 @@ def image_to_overlay_grid_data_url(image_base64: str) -> str:
             save_path=LATEST_OVERLAY_GRID_INPUT,
         )
     return f"data:{mime_type};base64,{normalized}"
+
+
+def message_has_image(messages: list[dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                return True
+    return False
+
+
+def compact_image_data_url(data_url: str, *, long_edge: int, quality: int) -> str:
+    raw = data_url.split(",", 1)[1] if "," in data_url else data_url
+    image_bytes = base64.b64decode(raw)
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = resize_to_long_edge(img, long_edge)
+        normalized, mime_type = encode_image_base64(
+            img,
+            image_format="JPEG",
+            quality=quality,
+            save_path=LATEST_VISION_RETRY_INPUT,
+        )
+    return f"data:{mime_type};base64,{normalized}"
+
+
+def compact_vision_messages_for_retry(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted = json.loads(json.dumps(messages))
+    long_edge = bounded_int_env("LLAMA_RETRY_VISION_LONG_EDGE", 640, 384, 1280)
+    quality = bounded_int_env("LLAMA_RETRY_VISION_QUALITY", 50, 35, 85)
+    for message in compacted:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            image_url = item.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            url = image_url.get("url")
+            if isinstance(url, str) and url.startswith("data:image/"):
+                image_url["url"] = compact_image_data_url(url, long_edge=long_edge, quality=quality)
+    return compacted
 
 
 def get_ocr_engine() -> Optional[Any]:
@@ -739,7 +860,13 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(stripped)
 
 
-def call_llama_once(messages: list[dict[str, Any]], max_tokens: int = 1536) -> str:
+def call_llama_chat_payload(payload: dict[str, Any]) -> str:
+    with post_json(f"{llama_base_url()}/v1/chat/completions", payload, 600) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data["choices"][0]["message"].get("content") or ""
+
+
+def call_llama_once_no_recovery(messages: list[dict[str, Any]], max_tokens: int = 1536) -> str:
     payload = {
         "model": MODEL_ALIAS,
         "messages": messages,
@@ -750,9 +877,7 @@ def call_llama_once(messages: list[dict[str, Any]], max_tokens: int = 1536) -> s
         "top_k": 20,
         "repeat_penalty": 1.0,
     }
-    with post_json(f"{llama_base_url()}/v1/chat/completions", payload, 600) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    content = data["choices"][0]["message"].get("content") or ""
+    content = call_llama_chat_payload(payload)
     if content.strip():
         return content
 
@@ -764,9 +889,37 @@ def call_llama_once(messages: list[dict[str, Any]], max_tokens: int = 1536) -> s
             "min_p": 0.05,
         }
     )
-    with post_json(f"{llama_base_url()}/v1/chat/completions", retry_payload, 600) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    return data["choices"][0]["message"].get("content") or ""
+    return call_llama_chat_payload(retry_payload)
+
+
+def call_llama_once(messages: list[dict[str, Any]], max_tokens: int = 1536) -> str:
+    attempts: list[tuple[str, list[dict[str, Any]], int]] = [("primary", messages, max_tokens)]
+    if message_has_image(messages):
+        retry_tokens = min(max_tokens, bounded_int_env("LLAMA_RETRY_IMAGE_RESPONSE_TOKENS", 64, 16, 512))
+        attempts.append(("recovered-compact-image", compact_vision_messages_for_retry(messages), retry_tokens))
+    else:
+        attempts.append(("recovered", messages, max_tokens))
+
+    last_exc: Optional[BaseException] = None
+    for index, (label, attempt_messages, attempt_max_tokens) in enumerate(attempts):
+        try:
+            if index > 0:
+                print(f"Retrying llama request with profile: {label}")
+            return call_llama_once_no_recovery(attempt_messages, attempt_max_tokens)
+        except Exception as exc:
+            last_exc = exc
+            if index >= len(attempts) - 1 or not is_retryable_llama_error(exc):
+                raise
+            try:
+                restart_llama_server(str(exc))
+            except Exception as restart_exc:
+                raise RuntimeError(
+                    f"llama-server connection failed and restart did not recover it: {restart_exc}"
+                ) from exc
+
+    if last_exc:
+        raise last_exc
+    return ""
 
 
 def clean_short_answer(text: str) -> str:
@@ -1953,8 +2106,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if llama_process and llama_process.poll() is None:
-        llama_process.terminate()
+    stop_llama_server()
 
 
 @app.get("/health")
@@ -2205,19 +2357,56 @@ def get_foreground_window_info() -> Optional[dict[str, Any]]:
         return None
 
 
+def get_window_process_path(user32: Any, hwnd: int) -> str:
+    if os.name != "nt":
+        return ""
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        process_id = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(wintypes.HWND(int(hwnd)), ctypes.byref(process_id))
+        if not process_id.value:
+            return ""
+
+        process_query_limited_information = 0x1000
+        handle = kernel32.OpenProcess(process_query_limited_information, False, process_id.value)
+        if not handle:
+            return ""
+
+        try:
+            path_buffer = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(path_buffer))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, path_buffer, ctypes.byref(size)):
+                return path_buffer.value
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+    return ""
+
+
 def get_window_info(
     user32: Any,
     hwnd: int,
     *,
     allow_ignored: bool = False,
 ) -> Optional[dict[str, Any]]:
-    if not hwnd or not user32.IsWindowVisible(hwnd):
+    if not hwnd:
         return None
 
+    visible = bool(user32.IsWindowVisible(hwnd))
     title_buffer = ctypes.create_unicode_buffer(512)
     user32.GetWindowTextW(hwnd, title_buffer, 512)
     title = title_buffer.value.strip()
-    ignored_window = any(ignored in title for ignored in IGNORED_CAPTURE_TITLES)
+    process_path = get_window_process_path(user32, int(hwnd))
+    process_name = Path(process_path).name.lower() if process_path else ""
+    title_lower = title.lower()
+    ignored_window = any(ignored.lower() in title_lower for ignored in IGNORED_CAPTURE_TITLES) or (
+        process_name in IGNORED_CAPTURE_PROCESSES
+    )
+    if not visible and not (allow_ignored and ignored_window):
+        return None
     if ignored_window and not allow_ignored:
         return None
 
@@ -2228,12 +2417,15 @@ def get_window_info(
     window_rect = rect_to_dict(rect)
     width = window_rect["width"]
     height = window_rect["height"]
-    if width < 320 or height < 240:
+    if width <= 0 or height <= 0:
+        return None
+    if not allow_ignored and (width < 320 or height < 240):
         return None
 
     return {
         "hwnd": int(hwnd),
         "title": title,
+        "visible": visible,
         "left": window_rect["left"],
         "top": window_rect["top"],
         "right": window_rect["right"],
@@ -2242,6 +2434,8 @@ def get_window_info(
         "height": height,
         "window_rect": window_rect,
         "dwm_extended_frame_bounds": get_dwm_extended_frame_bounds(int(hwnd)),
+        "process_name": process_name,
+        "process_path": process_path,
         "ignored": ignored_window,
     }
 
@@ -2264,18 +2458,120 @@ def get_ignored_window_infos() -> list[dict[str, Any]]:
 
     try:
         user32 = ctypes.windll.user32
-        hwnd = user32.GetTopWindow(0)
-        checked = 0
         ignored: list[dict[str, Any]] = []
-        while hwnd and checked < 120:
-            info = get_window_info(user32, hwnd, allow_ignored=True)
+
+        enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        @enum_proc_type
+        def enum_window(hwnd: int, _lparam: int) -> bool:
+            info = get_window_info(user32, int(hwnd), allow_ignored=True)
             if info and info.get("ignored"):
                 ignored.append(info)
-            hwnd = user32.GetWindow(hwnd, 2)
-            checked += 1
+
+            return True
+
+        user32.EnumWindows(enum_window, 0)
         return ignored
     except Exception:
         return []
+
+
+def hide_ignored_windows_for_capture(enabled: bool) -> list[dict[str, Any]]:
+    if not enabled or os.name != "nt":
+        return []
+
+    try:
+        user32 = ctypes.windll.user32
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        hidden: list[dict[str, Any]] = []
+        swp_no_size = 0x0001
+        swp_no_zorder = 0x0004
+        swp_no_activate = 0x0010
+        move_flags = swp_no_size | swp_no_zorder | swp_no_activate
+        for window in get_ignored_window_infos():
+            hwnd_value = int(window.get("hwnd") or 0)
+            if not hwnd_value:
+                continue
+            hwnd = wintypes.HWND(hwnd_value)
+            hidden.append(
+                {
+                    "hwnd": hwnd_value,
+                    "visible": bool(window.get("visible")),
+                    "left": int(window.get("left") or 0),
+                    "top": int(window.get("top") or 0),
+                }
+            )
+            user32.SetWindowPos(hwnd, wintypes.HWND(0), -32000, -32000, 0, 0, move_flags)
+            if window.get("visible"):
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        if hidden:
+            try:
+                ctypes.windll.dwmapi.DwmFlush()
+            except Exception:
+                pass
+            time.sleep(0.18)
+        return hidden
+    except Exception as exc:
+        print(f"Could not hide companion windows before capture: {exc}")
+        return []
+
+
+def restore_hidden_windows_after_capture(hidden_windows: list[dict[str, Any]]) -> None:
+    if not hidden_windows or os.name != "nt":
+        return
+
+    try:
+        user32 = ctypes.windll.user32
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        swp_no_size = 0x0001
+        swp_no_zorder = 0x0004
+        swp_no_activate = 0x0010
+        move_flags = swp_no_size | swp_no_zorder | swp_no_activate
+        for window in reversed(hidden_windows):
+            hwnd = wintypes.HWND(int(window.get("hwnd") or 0))
+            if user32.IsWindow(hwnd):
+                if window.get("visible"):
+                    user32.SetWindowPos(
+                        hwnd,
+                        wintypes.HWND(0),
+                        int(window.get("left") or 0),
+                        int(window.get("top") or 0),
+                        0,
+                        0,
+                        move_flags,
+                    )
+                    user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+        try:
+            ctypes.windll.dwmapi.DwmFlush()
+        except Exception:
+            pass
+        time.sleep(0.04)
+    except Exception as exc:
+        print(f"Could not restore companion windows after capture: {exc}")
 
 
 def crop_to_foreground_window(
@@ -2652,72 +2948,75 @@ async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] =
             if not window:
                 window = get_foreground_window_info()
 
-        if mode_name == "window":
-            if window:
-                captured = capture_window_image(window)
-                if captured is not None:
-                    img, capture_method = captured
-                    source = make_capture_source(
-                            mode="window",
-                            capture_method=capture_method,
-                            img=img,
-                            capture_left=int(window["left"]),
-                            capture_top=int(window["top"]),
-                            window=window,
-                    )
-                    return make_screenshot_response(img, source, profile)
-                print("Direct window capture failed; falling back to screen crop.")
-            else:
-                print("No target window found; falling back to monitor capture.")
-
-        with mss.mss() as sct:
-            monitor, monitor_index = select_capture_monitor(sct.monitors, window)
-            sct_img = sct.grab(monitor)
-            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            capture_bounds = get_capture_bounds(monitor)
-            source: dict[str, Any] = make_capture_source(
-                mode="screen",
-                capture_method="mss_monitor",
-                img=img,
-                capture_left=int(capture_bounds[0]),
-                capture_top=int(capture_bounds[1]),
-                monitor={**monitor, "index": monitor_index},
-            )
-
-            if mode_name in {"foreground", "window"}:
+        protection_enabled = (
+            redact
+            if redact is not None
+            else os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        hidden_hwnds = hide_ignored_windows_for_capture(bool(protection_enabled))
+        try:
+            if mode_name == "window":
                 if window:
-                    cropped = crop_to_foreground_window(img, monitor, window)
-                    if cropped:
-                        img = cropped
-                        capture_bounds = get_capture_bounds(monitor, window)
+                    captured = capture_window_image(window)
+                    if captured is not None:
+                        img, capture_method = captured
                         source = make_capture_source(
-                            mode=mode_name,
-                            capture_method=(
-                                "screen_crop_fallback" if mode_name == "window" else "screen_crop"
-                            ),
-                            img=img,
-                            capture_left=int(capture_bounds[0]),
-                            capture_top=int(capture_bounds[1]),
-                            window=window,
-                            monitor={**monitor, "index": monitor_index},
+                                mode="window",
+                                capture_method=capture_method,
+                                img=img,
+                                capture_left=int(window["left"]),
+                                capture_top=int(window["top"]),
+                                window=window,
                         )
-                        if mode_name == "window":
-                            source["direct_capture_failed"] = True
+                        source["ignored_overlay_windows"] = len(hidden_hwnds)
+                        source["redacted_overlay_windows"] = 0
+                        source["capture_protection"] = "hide_restore" if protection_enabled else "off"
+                        return make_screenshot_response(img, source, profile)
+                    print("Direct window capture failed; falling back to screen crop.")
+                else:
+                    print("No target window found; falling back to monitor capture.")
 
-            redaction_enabled = (
-                redact
-                if redact is not None
-                else os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
-            img, redacted_count = redact_ignored_windows(
-                img,
-                capture_bounds,
-                enabled=redaction_enabled,
-            )
-            source["redacted_overlay_windows"] = redacted_count
-            source["capture_protection"] = "redaction" if redaction_enabled else "off"
-            return make_screenshot_response(img, source, profile)
+            with mss.mss() as sct:
+                monitor, monitor_index = select_capture_monitor(sct.monitors, window)
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                capture_bounds = get_capture_bounds(monitor)
+                source: dict[str, Any] = make_capture_source(
+                    mode="screen",
+                    capture_method="mss_monitor",
+                    img=img,
+                    capture_left=int(capture_bounds[0]),
+                    capture_top=int(capture_bounds[1]),
+                    monitor={**monitor, "index": monitor_index},
+                )
+
+                if mode_name in {"foreground", "window"}:
+                    if window:
+                        cropped = crop_to_foreground_window(img, monitor, window)
+                        if cropped:
+                            img = cropped
+                            capture_bounds = get_capture_bounds(monitor, window)
+                            source = make_capture_source(
+                                mode=mode_name,
+                                capture_method=(
+                                    "screen_crop_fallback" if mode_name == "window" else "screen_crop"
+                                ),
+                                img=img,
+                                capture_left=int(capture_bounds[0]),
+                                capture_top=int(capture_bounds[1]),
+                                window=window,
+                                monitor={**monitor, "index": monitor_index},
+                            )
+                            if mode_name == "window":
+                                source["direct_capture_failed"] = True
+
+                source["ignored_overlay_windows"] = len(hidden_hwnds)
+                source["redacted_overlay_windows"] = 0
+                source["capture_protection"] = "hide_restore" if protection_enabled else "off"
+                return make_screenshot_response(img, source, profile)
+        finally:
+            restore_hidden_windows_after_capture(hidden_hwnds)
     except HTTPException:
         raise
     except Exception as exc:

@@ -12,9 +12,6 @@
   <div class="drag-bar" data-tauri-drag-region>
     <div class="title" data-tauri-drag-region>Game Companion Beta</div>
     <div class="drag-bar-actions">
-      <button id="tasksBtn" class="window-btn task-window-btn" title="Task log" aria-label="Task log">
-        <span class="icon" data-icon="list"></span>
-      </button>
       <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize">
         <span class="icon" data-icon="minus"></span>
       </button>
@@ -31,6 +28,14 @@
     <select id="gameSelect" class="game-select" title="Game">
       <option value="">Game</option>
     </select>
+    <button id="searchBtn" class="hud-btn utility-window-btn" title="Game search">
+      <span class="icon" data-icon="search"></span>
+      <span class="button-label">Search</span>
+    </button>
+    <button id="tasksBtn" class="hud-btn utility-window-btn" title="Task log">
+      <span class="icon" data-icon="list"></span>
+      <span class="button-label">Tasks</span>
+    </button>
     <button id="hudBtn" class="hud-btn active" title="Clear HUD overlay">
       <span class="icon" data-icon="crosshair"></span>
       <span class="button-label">HUD</span>
@@ -39,7 +44,7 @@
       <span class="icon" data-icon="target"></span>
       <span class="button-label">Test</span>
     </button>
-    <button id="protectBtn" class="hud-btn active" title="Hide companion windows from screenshots">
+    <button id="protectBtn" class="hud-btn" title="Content protection (F4)">
       <span class="icon" data-icon="shield"></span>
       <span class="button-label">Protect</span>
     </button>
@@ -58,7 +63,7 @@
     <div class="message bot-message">
       Ready. I can watch the screen, answer questions, and help during play.
       <br>
-      <small style="opacity:0.72">F7 task, F8 voice, F9 screenshot.</small>
+      <small style="opacity:0.72">F4 protect, F5 search, F6 tasks, F7 task capture, F8 voice, F9 screenshot.</small>
     </div>
   </div>
 
@@ -72,7 +77,7 @@
   </div>
 
   <div class="input-area">
-    <button id="voiceBtn" class="voice-btn" title="Voice input">
+    <button id="voiceBtn" class="voice-btn" title="Voice mode">
       <span class="icon" data-icon="mic"></span>
       <span class="button-label">Mic</span>
     </button>

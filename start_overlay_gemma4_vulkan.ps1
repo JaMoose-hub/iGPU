@@ -116,6 +116,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $env:GGML_VK_VISIBLE_DEVICES = $VulkanDevice
 $env:LLAMA_PORT = "$LlamaPort"
+$env:LLAMA_STARTUP_TIMEOUT = "$TimeoutSeconds"
 $env:LLAMA_CTX_SIZE = "$LlamaCtxSize"
 $env:LLAMA_GPU_LAYERS = "$LlamaGpuLayers"
 $env:LLAMA_ARG_FLASH_ATTN = "1"

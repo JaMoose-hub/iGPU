@@ -10,6 +10,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const closeBtn = document.getElementById("closeBtn");
   const minBtn = document.getElementById("minBtn");
   const maxBtn = document.getElementById("maxBtn");
+  const searchBtn = document.getElementById("searchBtn");
   const tasksBtn = document.getElementById("tasksBtn");
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
@@ -44,6 +45,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     mic: '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>',
     minus: '<path d="M5 12h14"/>',
     radio: '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9c3.9 3.9 3.9 10.3 0 14.1"/>',
+    search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
     send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
     shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1Z"/>',
     "shield-off": '<path d="M2 2 22 22"/><path d="M18.7 18.7A13 13 0 0 1 12.34 22a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c1.2 0 2.6-.43 3.9-1.08"/><path d="M11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1v7a8.7 8.7 0 0 1-.56 3.14"/>',
@@ -71,6 +73,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   hydrateIcons();
+  document.querySelectorAll(".drag-bar-actions button").forEach((button) => {
+    button.addEventListener("mousedown", (event) => event.stopPropagation());
+    button.addEventListener("dblclick", (event) => event.stopPropagation());
+  });
 
   let pendingImageBase64 = null;
   let pendingImageMimeType = "image/jpeg";
@@ -78,6 +84,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let abortController = null;
   let isSending = false;
   let isVoiceRecording = false;
+  let isVoiceModeEnabled = false;
   let isVoiceBusy = false;
   let mediaRecorder = null;
   let mediaStream = null;
@@ -96,8 +103,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   let liveVoiceStopRequested = false;
   let skipVoiceBlobTranscription = false;
   let lastHudError = "";
-  localStorage.setItem("protect-mode", "off");
-  let captureProtectionEnabled = false;
+  const voiceSendQueue = [];
+  let isVoiceQueueRunning = false;
+  let lastVoiceHotkeyToggleAt = 0;
+  let lastSentVoiceText = "";
+  let lastSentVoiceAt = 0;
+  const storedProtectMode = localStorage.getItem("protect-mode");
+  let captureProtectionEnabled = storedProtectMode === "software-redact" || storedProtectMode === "os-exclude";
 
   localStorage.removeItem("hud-overlay");
   await invoke?.("hide_hud_window").catch((err) => {
@@ -131,27 +143,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (protectBtn) {
       setButtonContent(protectBtn, captureProtectionEnabled ? "shield" : "shield-off", captureProtectionEnabled ? "Protect" : "NoProt");
       protectBtn.title = captureProtectionEnabled
-        ? "Windows capture protection on: companion windows are excluded from screenshots and screen sharing"
-        : "Windows capture protection off: companion windows can appear in screenshots and screen sharing";
+        ? "Content protection on; all overlay windows are excluded from capture"
+        : "Screenshot protection off";
     }
-    localStorage.setItem("protect-mode", captureProtectionEnabled ? "os-exclude" : "off");
+    localStorage.setItem("protect-mode", captureProtectionEnabled ? "software-redact" : "off");
   };
 
   updateProtectButton();
 
-  protectBtn?.addEventListener("click", async () => {
+  const toggleCaptureProtection = async () => {
     captureProtectionEnabled = !captureProtectionEnabled;
     updateProtectButton();
+    await appWindow?.setContentProtected?.(false).catch((err) => {
+      console.warn("Could not clear main-window content protection:", err);
+    });
     await invoke?.("set_main_capture_exclusion", { excluded: captureProtectionEnabled }).catch((err) => {
       appendMessage(`Protect command failed: ${err?.message || err}`, "bot");
     });
     appendMessage(
       captureProtectionEnabled
-        ? "Windows capture protection on."
+        ? "Content protection on. Main, Task, Game Search, and HUD are controlled by this lock; app screenshots still ignore them cleanly."
         : "Screenshot protection off.",
       "bot"
     );
-  });
+  };
+
+  protectBtn?.addEventListener("click", toggleCaptureProtection);
 
   perfBtn?.addEventListener("click", () => {
     const enabled = document.body.classList.toggle("perf-mode");
@@ -173,8 +190,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const fallback = {
       width: window.screen?.width || window.innerWidth || 1920,
       height: window.screen?.height || window.innerHeight || 1080,
-      x: 0,
-      y: 0
+      fullscreen: true
     };
     const sourceWidth = Number(source?.capture_width ?? source?.width);
     const sourceHeight = Number(source?.capture_height ?? source?.height);
@@ -293,18 +309,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   hudTestBtn?.addEventListener("click", async () => {
-    const testSource = pendingCaptureSource || {
-      capture_left: 0,
-      capture_top: 0,
-      capture_width: window.screen?.width || window.innerWidth || 1920,
-      capture_height: window.screen?.height || window.innerHeight || 1080,
-      bitmap_width: window.screen?.width || window.innerWidth || 1920,
-      bitmap_height: window.screen?.height || window.innerHeight || 1080
-    };
-    const target = hudTargetFromSource(testSource);
-    target.imageWidth = Number(testSource.bitmap_width || target.width);
-    target.imageHeight = Number(testSource.bitmap_height || target.height);
-    const ok = await showHudOverlay(makeTestOverlay(target), testSource);
+    const target = hudTargetFromSource(null);
+    target.imageWidth = Number(target.width);
+    target.imageHeight = Number(target.height);
+    const ok = await showHudOverlay(makeTestOverlay(target), null);
     appendMessage(ok ? "HUD test sent." : `HUD test failed. ${lastHudError}`, "bot");
   });
 
@@ -348,7 +356,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const shouldTaskIntent = (text) => TASK_INTENT_RE.test(text || "") || VOICE_TASK_INTENT_RE.test(text || "");
 
   const captureScreen = async (profile = "turbo") => {
-    const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=0&profile=${profile}`);
+    const redact = captureProtectionEnabled ? 1 : 0;
+    const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=${redact}&profile=${profile}`);
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
@@ -397,6 +406,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     await events.emit?.("tasks:updated", { tasks: loadTasks() }).catch(() => {});
   };
+
+  const openSearchWindow = async (keyword = "") => {
+    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    localStorage.setItem("currentGameId", game);
+    localStorage.setItem("igpu-game-search-pending-keyword", keyword || "");
+    if (invoke) {
+      await invoke("show_search_window").catch((err) => {
+        appendMessage(`Search window failed: ${err?.message || err}`, "bot");
+      });
+    }
+    await events.emit?.("search:context", { game, keyword }).catch(() => {});
+  };
+
+  tasksBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    openTasksWindow();
+  });
+  searchBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    openSearchWindow(messageInput?.value || "");
+  });
 
   const addTaskFromAnalysis = (analysis, note, captureSource = null) => {
     const now = new Date().toISOString();
@@ -517,6 +547,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   gameSelect?.addEventListener("change", () => {
     localStorage.setItem("currentGameId", gameSelect.value || "");
+    events.emit?.("search:context", { game: gameSelect.value || "" }).catch(() => {});
   });
   await loadGuideGames();
 
@@ -529,16 +560,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   const setVoiceRecording = (recording) => {
     isVoiceRecording = recording;
     voiceBtn?.classList.toggle("recording", recording);
+    voiceBtn?.classList.toggle("voice-mode", isVoiceModeEnabled);
     if (voiceBtn) {
-      setButtonContent(voiceBtn, recording ? "radio" : "mic", recording ? "Rec" : "Mic");
-      voiceBtn.title = recording ? "Recording voice input" : "Voice input";
+      const active = recording || isVoiceModeEnabled;
+      setButtonContent(voiceBtn, active ? "radio" : "mic", active ? "On" : "Mic");
+      voiceBtn.title = isVoiceModeEnabled
+        ? "Voice mode on: speak anytime, pauses auto-send"
+        : "Voice mode";
       voiceBtn.disabled = isVoiceBusy && !recording;
     }
   };
 
   const setVoiceBusy = (busy) => {
     isVoiceBusy = busy;
-    if (voiceBtn && !isVoiceRecording) {
+    if (voiceBtn && !isVoiceRecording && !isVoiceModeEnabled) {
       voiceBtn.disabled = busy;
       setButtonContent(voiceBtn, busy ? "loader" : "mic", busy ? "..." : "Mic");
     }
@@ -586,6 +621,45 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   };
 
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const drainVoiceSendQueue = async () => {
+    if (isVoiceQueueRunning) return;
+    isVoiceQueueRunning = true;
+    try {
+      while (voiceSendQueue.length) {
+        const nextText = voiceSendQueue.shift();
+        while (isSending) {
+          await sleep(250);
+        }
+        await sendMessage(nextText);
+      }
+    } finally {
+      isVoiceQueueRunning = false;
+    }
+  };
+
+  const queueVoiceMessage = (text) => {
+    const normalized = normalizeSpeechText(text);
+    if (!normalized) return;
+    voiceSendQueue.push(normalized);
+    drainVoiceSendQueue().catch((err) => {
+      appendMessage(`Voice queue failed: ${err.message || err}`, "bot");
+    });
+  };
+
+  const resetVoiceModePhrase = () => {
+    liveVoiceBaseText = "";
+    liveVoiceFinalText = "";
+    liveVoiceInterimText = "";
+    liveVoiceSent = false;
+    skipVoiceBlobTranscription = false;
+    if (messageInput) messageInput.value = "";
+    if (voiceStatusMessage && isVoiceModeEnabled) {
+      voiceStatusMessage.textContent = "Voice mode on. Speak anytime; I will send after you pause.";
+    }
+  };
+
   const stopRecorderAfterLiveSpeech = () => {
     if (mediaRecorder?.state && mediaRecorder.state !== "inactive") {
       try {
@@ -606,15 +680,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     const spoken = liveVoiceSpokenText(includeInterim);
     if (!spoken) return false;
     const messageText = composeLiveVoiceText(includeInterim);
+    const now = Date.now();
+    if (spoken === lastSentVoiceText && now - lastSentVoiceAt < 3500) {
+      clearLiveSpeechSilence();
+      clearLiveVoiceDraft({ clearInput: true });
+      return false;
+    }
 
     clearLiveSpeechSilence();
     liveVoiceSent = true;
+    lastSentVoiceText = spoken;
+    lastSentVoiceAt = now;
     skipVoiceBlobTranscription = true;
     clearLiveVoiceDraft({ clearInput: true });
     if (voiceStatusMessage) voiceStatusMessage.textContent = `Heard: ${spoken}`;
-    sendMessage(messageText).catch((err) => {
-      appendMessage(`Voice send failed: ${err.message || err}`, "bot");
-    });
+    queueVoiceMessage(messageText);
     return true;
   };
 
@@ -625,9 +705,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     liveSpeechSilenceTimer = window.setTimeout(() => {
       if (!isVoiceRecording || liveVoiceSent || !liveVoiceSpokenText(true)) return;
       if (sendLiveVoiceTranscript({ includeInterim: true })) {
-        stopLiveSpeechRecognition();
-        stopRecorderAfterLiveSpeech();
-        voiceStatusMessage = null;
+        if (isVoiceModeEnabled) {
+          window.setTimeout(resetVoiceModePhrase, 250);
+        } else {
+          stopLiveSpeechRecognition();
+          stopRecorderAfterLiveSpeech();
+          voiceStatusMessage = null;
+        }
       }
     }, 1400);
   };
@@ -652,6 +736,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const startLiveSpeechRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return false;
+    if (speechRecognition) return true;
 
     clearLiveSpeechRestart();
     liveSpeechBlocked = false;
@@ -666,7 +751,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       recognition.addEventListener("start", () => {
         if (voiceStatusMessage) {
-          voiceStatusMessage.textContent = "Listening live... speech will appear in the input box.";
+          voiceStatusMessage.textContent = isVoiceModeEnabled
+            ? "Voice mode on. Speak anytime; I will send after you pause."
+            : "Listening live... speech will appear in the input box.";
         }
       });
 
@@ -694,30 +781,49 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       recognition.addEventListener("error", (event) => {
         const error = event.error || "speech-recognition";
+        if (error === "no-speech") {
+          if (voiceStatusMessage && isVoiceModeEnabled) {
+            voiceStatusMessage.textContent = "Voice mode on. Waiting for speech...";
+          }
+          return;
+        }
         if (["not-allowed", "service-not-allowed", "audio-capture"].includes(error)) {
           liveSpeechBlocked = true;
         }
         if (error !== "aborted" && voiceStatusMessage) {
-          voiceStatusMessage.textContent = "Live speech unavailable; recording fallback is still running.";
+          voiceStatusMessage.textContent = isVoiceModeEnabled
+            ? "Voice mode paused; trying to reconnect the microphone..."
+            : "Live speech unavailable; recording fallback is still running.";
         }
       });
 
       recognition.addEventListener("end", () => {
         if (speechRecognition !== recognition) return;
         speechRecognition = null;
-        if (liveVoiceSent) return;
+        if (liveVoiceSent && !isVoiceModeEnabled) return;
         liveVoiceInterimText = "";
         updateLiveVoiceInput();
 
         if (sendLiveVoiceTranscript({ includeInterim: false })) {
-          stopRecorderAfterLiveSpeech();
-          voiceStatusMessage = null;
-          return;
+          if (isVoiceModeEnabled) {
+            window.setTimeout(resetVoiceModePhrase, 250);
+          } else {
+            stopRecorderAfterLiveSpeech();
+            voiceStatusMessage = null;
+            return;
+          }
         }
 
-        if (!liveVoiceStopRequested && !liveSpeechBlocked && isVoiceRecording) {
+        if (!liveVoiceStopRequested && !liveSpeechBlocked && (isVoiceRecording || isVoiceModeEnabled)) {
           liveSpeechRestartTimer = window.setTimeout(() => {
-            if (liveVoiceStopRequested || liveSpeechBlocked || !isVoiceRecording || liveVoiceSent) return;
+            if (
+              liveVoiceStopRequested ||
+              liveSpeechBlocked ||
+              (!isVoiceRecording && !isVoiceModeEnabled) ||
+              (liveVoiceSent && !isVoiceModeEnabled)
+            ) {
+              return;
+            }
             try {
               recognition.start();
               speechRecognition = recognition;
@@ -783,6 +889,61 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } finally {
       setVoiceBusy(false);
+    }
+  };
+
+  const startVoiceMode = async () => {
+    if (isVoiceModeEnabled || isVoiceStarting) return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      appendMessage("Voice mode is not available in this WebView. Use the Mic button as one-shot recording after updating WebView2.", "bot");
+      return;
+    }
+
+    isVoiceModeEnabled = true;
+    voiceStopRequested = false;
+    liveVoiceStopRequested = false;
+    liveSpeechBlocked = false;
+    liveVoiceSent = false;
+    skipVoiceBlobTranscription = true;
+    liveVoiceBaseText = messageInput.value.trim();
+    liveVoiceFinalText = "";
+    liveVoiceInterimText = "";
+    setVoiceRecording(true);
+    voiceStatusMessage = appendMessage("Voice mode on. Speak anytime; I will send after you pause.", "bot");
+
+    const started = startLiveSpeechRecognition();
+    if (!started) {
+      isVoiceModeEnabled = false;
+      setVoiceRecording(false);
+      if (voiceStatusMessage) {
+        voiceStatusMessage.textContent = "Voice mode could not start.";
+        voiceStatusMessage = null;
+      }
+    }
+  };
+
+  const stopVoiceMode = () => {
+    if (!isVoiceModeEnabled && !isVoiceRecording) return;
+    isVoiceModeEnabled = false;
+    voiceStopRequested = true;
+    liveVoiceStopRequested = true;
+    clearLiveSpeechRestart();
+    clearLiveSpeechSilence();
+    stopLiveSpeechRecognition(true);
+    clearLiveVoiceDraft({ clearInput: true });
+    setVoiceRecording(false);
+    if (voiceStatusMessage) {
+      voiceStatusMessage.textContent = "Voice mode off.";
+      voiceStatusMessage = null;
+    }
+  };
+
+  const toggleVoiceMode = () => {
+    if (isVoiceModeEnabled || isVoiceRecording) {
+      stopVoiceMode();
+    } else {
+      startVoiceMode();
     }
   };
 
@@ -870,6 +1031,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const stopVoiceRecording = () => {
+    if (isVoiceModeEnabled && !mediaRecorder) {
+      stopVoiceMode();
+      return;
+    }
     if (isVoiceStarting) {
       voiceStopRequested = true;
       return;
@@ -1061,15 +1226,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   taskCaptureBtn?.addEventListener("click", () => {
     createTaskFromContext(messageInput?.value || "", { capture: true });
   });
-  tasksBtn?.addEventListener("click", openTasksWindow);
-
-  voiceBtn?.addEventListener("click", () => {
-    if (isVoiceRecording) {
-      stopVoiceRecording();
-    } else {
-      startVoiceRecording();
-    }
-  });
+  voiceBtn?.addEventListener("click", toggleVoiceMode);
 
   dragBar?.addEventListener("mousedown", async (event) => {
     if (event.target.closest(".drag-bar-actions")) return;
@@ -1100,11 +1257,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await events.listen?.("capture-hotkey", takeScreenshot).catch(() => {});
+  await events.listen?.("protect-state-changed", (event) => {
+    const enabled = Boolean(event.payload?.enabled);
+    if (captureProtectionEnabled === enabled) return;
+    captureProtectionEnabled = enabled;
+    updateProtectButton();
+    appendMessage(enabled ? "Content protection on. (F4)" : "Screenshot protection off. (F4)", "bot");
+  }).catch(() => {});
   await events.listen?.("task-hotkey", () => {
     createTaskFromContext(messageInput?.value || "", { capture: true });
   }).catch(() => {});
-  await events.listen?.("voice-hotkey-start", startVoiceRecording).catch(() => {});
-  await events.listen?.("voice-hotkey-stop", stopVoiceRecording).catch(() => {});
+  await events.listen?.("voice-hotkey-start", () => {
+    const now = Date.now();
+    if (now - lastVoiceHotkeyToggleAt < 500) return;
+    lastVoiceHotkeyToggleAt = now;
+    toggleVoiceMode();
+  }).catch(() => {});
+  await events.listen?.("voice-hotkey-stop", () => {}).catch(() => {});
   await events.listen?.("clear-hud-hotkey", async () => {
     await clearHudOverlay();
     appendMessage("HUD cleared.", "bot");

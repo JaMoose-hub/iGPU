@@ -63,16 +63,18 @@ body {
 }
 
 .tool-strip {
-  height: 38px;
+  min-height: 38px;
   display: flex;
   align-items: center;
+  align-content: center;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 0 12px;
+  padding: 4px 12px;
   background: rgba(0, 0, 0, 0.12);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .icon {
@@ -136,9 +138,18 @@ body::before {
   color: #cfd8ff;
 }
 
+.search-window-btn {
+  color: #b9f0ff;
+}
+
 .task-window-btn:hover {
   color: #ffffff;
   background: rgba(100, 108, 255, 0.18);
+}
+
+.search-window-btn:hover {
+  color: #ffffff;
+  background: rgba(80, 210, 230, 0.16);
 }
 
 .perf-btn {
@@ -301,6 +312,11 @@ body.perf-mode {
   max-width: 82px;
 }
 
+.tool-strip .utility-window-btn {
+  min-width: 72px;
+  border-color: rgba(124, 156, 255, 0.34);
+}
+
 .opacity-control {
   height: 30px;
   width: 106px;
@@ -332,15 +348,16 @@ body.perf-mode {
 
 /* 錄音中狀態 */
 .voice-btn.recording {
-  background: rgba(255, 60, 60, 0.4);
-  border-color: rgba(255, 60, 60, 0.6);
-  animation: pulse-red 1.5s infinite;
+  background: rgba(30, 180, 120, 0.34);
+  border-color: rgba(76, 255, 188, 0.68);
+  color: #caffee;
+  animation: pulse-voice 1.8s infinite;
 }
 
-@keyframes pulse-red {
-  0% { box-shadow: 0 0 0 0 rgba(255, 60, 60, 0.7); }
-  70% { box-shadow: 0 0 0 10px rgba(255, 60, 60, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(255, 60, 60, 0); }
+@keyframes pulse-voice {
+  0% { box-shadow: 0 0 0 0 rgba(76, 255, 188, 0.5); }
+  70% { box-shadow: 0 0 0 10px rgba(76, 255, 188, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 255, 188, 0); }
 }
 
 /* 截圖預覽圖泡泡 */

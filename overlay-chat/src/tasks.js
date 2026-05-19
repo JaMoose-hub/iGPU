@@ -2,6 +2,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.();
   const events = tauri.event || {};
+  const invoke = tauri.core?.invoke;
 
   const TASK_STORAGE_KEY = "igpu-task-log-v1";
   const taskList = document.getElementById("taskList");
@@ -231,7 +232,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   closeBtn?.addEventListener("click", async () => {
-    await appWindow?.hide?.().catch(() => {});
+    if (invoke) {
+      await invoke("hide_tasks_window").catch(() => appWindow?.hide?.().catch(() => {}));
+    } else {
+      await appWindow?.hide?.().catch(() => {});
+    }
   });
 
   await events.listen?.("tasks:updated", (event) => {
@@ -239,6 +244,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(event.payload.tasks.slice(0, 80)));
     }
     render();
+  }).catch(() => {});
+
+  await events.listen?.("companion-window-shown", () => {
+    applyOpacity(localStorage.getItem("ui-opacity") || "100");
+    render();
+    requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   }).catch(() => {});
 
   await events.listen?.("ui-opacity-updated", (event) => {
