@@ -283,8 +283,13 @@ body.perf-mode {
   color: #9ff6ff;
 }
 
+.game-auto-btn.active {
+  border-color: rgba(92, 255, 176, 0.58);
+  color: #c9ffe1;
+}
+
 .game-select {
-  width: 68px;
+  width: 86px;
   height: 100%;
   flex-shrink: 0;
   border-radius: 8px;
@@ -297,6 +302,24 @@ body.perf-mode {
 }
 
 .game-select option {
+  background: #202024;
+  color: white;
+}
+
+.screen-select {
+  width: 74px;
+  height: 42px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 0 6px;
+  outline: none;
+}
+
+.screen-select option {
   background: #202024;
   color: white;
 }
@@ -315,6 +338,10 @@ body.perf-mode {
 .tool-strip .utility-window-btn {
   min-width: 72px;
   border-color: rgba(124, 156, 255, 0.34);
+}
+
+.tool-strip .game-auto-btn {
+  max-width: 76px;
 }
 
 .opacity-control {

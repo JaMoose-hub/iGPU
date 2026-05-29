@@ -32,17 +32,38 @@ LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "18080"))
 API_HOST = os.environ.get("IGPU_API_HOST", "127.0.0.1")
 API_PORT = int(os.environ.get("IGPU_API_PORT", "8000"))
 MODEL_ALIAS = os.environ.get("LLAMA_MODEL_ALIAS", "qwen2.5-vl-3b-instruct-q8_0")
-VULKAN_DEVICE = os.environ.get("GGML_VK_VISIBLE_DEVICES", "0")
-LLAMA_CTX_SIZE = os.environ.get("LLAMA_CTX_SIZE", "8192")
+VULKAN_DEVICE = os.environ.get("GGML_VK_VISIBLE_DEVICES", "1")
+LLAMA_CTX_SIZE = os.environ.get("LLAMA_CTX_SIZE", "32768")
 LLAMA_GPU_LAYERS = os.environ.get("LLAMA_GPU_LAYERS", "1")
+LLAMA_FLASH_ATTN = os.environ.get("LLAMA_FLASH_ATTN", "off").strip().lower()
 LLAMA_PARALLEL = os.environ.get("LLAMA_PARALLEL", "").strip()
 LLAMA_CACHE_RAM = os.environ.get("LLAMA_CACHE_RAM", "").strip()
 CHAT_BACKEND = os.environ.get("IGPU_CHAT_BACKEND", "llama").strip().lower()
+LLAMA_AUTO_START = os.environ.get(
+    "LLAMA_AUTO_START",
+    "0" if CHAT_BACKEND == "hermes" else "1",
+).strip().lower() in {"1", "true", "yes", "on"}
 HISTORY_CONTEXT_MESSAGES = int(os.environ.get("IGPU_HISTORY_CONTEXT_MESSAGES", "30"))
 IMAGE_HISTORY_CONTEXT_MESSAGES = int(os.environ.get("IGPU_IMAGE_HISTORY_CONTEXT_MESSAGES", "12"))
 HISTORY_STORE_MESSAGES = int(os.environ.get("IGPU_HISTORY_STORE_MESSAGES", "80"))
 HERMES_WSL_DISTRO = os.environ.get("HERMES_WSL_DISTRO", "Ubuntu-24.04")
-HERMES_TIMEOUT_SECONDS = int(os.environ.get("HERMES_TIMEOUT_SECONDS", "180"))
+HERMES_TIMEOUT_SECONDS = int(os.environ.get("HERMES_TIMEOUT_SECONDS", "600"))
+HERMES_BASE_URL = os.environ.get("HERMES_BASE_URL", f"http://127.0.0.1:{API_PORT}/v1").strip()
+HERMES_MAX_TOKENS = int(os.environ.get("HERMES_MAX_TOKENS", "160"))
+HERMES_CONTEXT_LENGTH = int(os.environ.get("HERMES_CONTEXT_LENGTH", "32768"))
+HERMES_USE_CONFIG_MODEL = os.environ.get("HERMES_USE_CONFIG_MODEL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+HERMES_AGENT_WEB_ENABLED = os.environ.get(
+    "HERMES_AGENT_WEB_ENABLED",
+    "1" if HERMES_USE_CONFIG_MODEL else "0",
+).strip().lower() in {"1", "true", "yes", "on"}
+HERMES_AGENT_TOOLSETS = os.environ.get("HERMES_AGENT_TOOLSETS", "web").strip() or "web"
+HERMES_AGENT_MAX_TOKENS = int(os.environ.get("HERMES_AGENT_MAX_TOKENS", "360"))
+OPENAI_MAX_TOKENS_CAP = int(os.environ.get("LLAMA_OPENAI_MAX_TOKENS_CAP", "0"))
 ENABLE_LOCAL_TOOLS = os.environ.get(
     "IGPU_ENABLE_LOCAL_TOOLS",
     "0" if CHAT_BACKEND == "hermes" else "1",
@@ -119,14 +140,18 @@ IGNORED_CAPTURE_PROCESSES = (
 GENERATED_DIR = Path(__file__).resolve().parent / "generated_files"
 PROJECT_ROOT = Path(__file__).resolve().parent
 HERMES_CHAT_SCRIPT = PROJECT_ROOT / "scripts" / "hermes_no_tools_chat.py"
+HERMES_AGENT_WEB_SCRIPT = PROJECT_ROOT / "scripts" / "hermes_agent_web_chat.py"
 GAME_GUIDES_DIR = PROJECT_ROOT / "game_guides"
 GUIDE_CACHE_DIR = PROJECT_ROOT / "guide_cache"
 GUIDE_DB = GUIDE_CACHE_DIR / "guide.sqlite"
+GAME_PROFILES_FILE = PROJECT_ROOT / "game_profiles.json"
 MEMORY_CACHE_DIR = PROJECT_ROOT / "memory_cache"
 MEMORY_DB = MEMORY_CACHE_DIR / "memory.sqlite"
 
 llama_process: Optional[subprocess.Popen] = None
 history: list[dict[str, Any]] = []
+last_active_game_window: Optional[dict[str, Any]] = None
+last_active_game_detection: Optional[dict[str, Any]] = None
 generate_lock = asyncio.Lock()
 ocr_engine: Any = None
 stt_model: Any = None
@@ -194,6 +219,14 @@ class TaskAnalyzeRequest(BaseModel):
     source_title: Optional[str] = None
 
 
+class GameProfileLearnRequest(BaseModel):
+    game_id: str
+    name: Optional[str] = None
+    process_name: Optional[str] = None
+    process_path: Optional[str] = None
+    window_title: Optional[str] = None
+
+
 def get_system_prompt() -> str:
     return (
         "你是即時遊戲陪玩助理。用繁體中文回答，語氣自然、簡短、直接。"
@@ -249,6 +282,12 @@ def windows_path_to_wsl(path: Path) -> str:
 
 def get_hermes_system_prompt() -> str:
     return (
+        "You are the game companion AI. Reply in Traditional Chinese with a concise, friendly tone. "
+        "You are currently called through Hermes Agent using the model configured in Hermes. "
+        "Do not perform system actions or use tools in this text-only bridge unless an explicit "
+        "Hermes tool route is enabled."
+    )
+    return (
         "你是遊戲陪伴 AI，也是電腦系統效能分析師。"
         "你用繁體中文回答，語氣親切、簡潔，像會陪玩家一起看局勢的隊友。"
         "目前你是透過 Hermes Agent 呼叫本機 llama.cpp Vulkan 上的 Gemma4 模型。"
@@ -271,17 +310,154 @@ def build_hermes_prompt(prompt: str) -> str:
     return "\n".join(lines)
 
 
-def call_hermes_no_tools(prompt: str) -> str:
+def get_hermes_agent_web_system_prompt() -> str:
+    return (
+        "You are the Game Companion Hermes Agent. Reply in Traditional Chinese, concise and practical. "
+        "You may use only the Hermes web toolset, backed by Tavily, and you must decide by yourself "
+        "whether web search is needed. Do not search for every message. Search only when it clearly "
+        "helps: walkthroughs, guides, item usage, version/update differences, current events, unclear "
+        "game mechanics, or when the player explicitly asks to check the web. If local context is enough, "
+        "answer directly without web search. Default to no-spoiler guidance: avoid story twists, later "
+        "area names, character fate, endings, and surprise encounters unless the player explicitly asks "
+        "for the full solution. Prefer a hint ladder: Hint 1, Hint 2, Hint 3. If the player asks for the "
+        "answer directly, give a clear solution but still avoid unnecessary story spoilers. When you do "
+        "search, use retrieved pages only as private background material. Condense them into useful player "
+        "guidance. Do not include a sources/references/links section, source titles, or URLs unless the "
+        "player explicitly asks for sources or links. Mention uncertainty or version mismatch only when it "
+        "affects the advice. Never copy long passages from sources."
+    )
+
+
+def build_hermes_agent_web_prompt(
+    prompt: str,
+    *,
+    game_id: str,
+    rag_context: str = "",
+    active_game: Optional[dict[str, Any]] = None,
+) -> str:
+    lines = [get_hermes_agent_web_system_prompt()]
+    if history[-8:]:
+        lines.append("\nRecent chat:")
+        for item in history[-8:]:
+            role = "Player" if item.get("role") == "user" else "Assistant"
+            content = str(item.get("content") or "").strip()
+            if content:
+                lines.append(f"{role}: {content}")
+
+    lines.append("\nCurrent game context:")
+    if game_id:
+        lines.append(f"- selected_game_id: {game_id}")
+    if active_game:
+        lines.append(f"- detected_game: {active_game.get('name') or active_game.get('game_id') or ''}")
+        lines.append(f"- detection_confidence: {active_game.get('confidence')}")
+        lines.append(f"- process_name: {active_game.get('process_name') or ''}")
+        lines.append(f"- window_title: {active_game.get('window_title') or ''}")
+    if rag_context:
+        lines.append("\nLocal context:")
+        lines.append(rag_context)
+
+    lines.append("\nPlayer message:")
+    lines.append(prompt)
+    lines.append(
+        "\nUse your own judgment: answer directly if enough context exists; otherwise use Tavily web "
+        "search through the web toolset. For guide searches, build queries from game + platform/version "
+        "+ scene/item/objective + guide/walkthrough/tips/no spoilers. If you search, summarize the result "
+        "for the player and omit references/URLs unless explicitly requested."
+    )
+    return "\n".join(lines)
+
+
+def wants_source_details(prompt: str) -> bool:
+    return bool(
+        re.search(
+            r"(來源|參考|連結|網址|source|sources|reference|references|link|links|url)",
+            prompt or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def condense_agent_answer(answer: str, prompt: str) -> str:
+    text = str(answer or "").strip()
+    if not text or wants_source_details(prompt):
+        return text
+
+    source_header_re = re.compile(
+        r"^\s*(?:來源|資料來源|參考|參考資料|參考來源|連結|相關連結|Sources?|References?|Links?)\s*[:：]?\s*$",
+        re.IGNORECASE,
+    )
+    inline_source_re = re.compile(
+        r"^\s*(?:來源|資料來源|參考|參考資料|參考來源|Sources?|References?|Links?)\s*[:：]",
+        re.IGNORECASE,
+    )
+    source_line_re = re.compile(
+        r"^\s*(?:[-*]|\d+[.)、])?\s*(?:https?://|\[[^\]]+\]\(https?://)",
+        re.IGNORECASE,
+    )
+    kept: list[str] = []
+    skipping_sources = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if source_header_re.match(stripped) or inline_source_re.match(stripped):
+            skipping_sources = True
+            continue
+        if skipping_sources:
+            continue
+        if source_line_re.match(stripped):
+            continue
+        kept.append(line)
+
+    cleaned = "\n".join(kept).strip()
+    cleaned = re.sub(
+        r"\n{0,2}\s*(?:來源|資料來源|參考資料|參考來源|Sources?|References?|Links?)\s*[:：].*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return cleaned or text
+
+
+def call_hermes_no_tools(
+    prompt: str,
+    *,
+    image_file: Optional[Path] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
     if not HERMES_CHAT_SCRIPT.exists():
         raise RuntimeError(f"Missing Hermes chat script: {HERMES_CHAT_SCRIPT}")
 
     project_wsl = windows_path_to_wsl(PROJECT_ROOT)
     script_wsl = windows_path_to_wsl(HERMES_CHAT_SCRIPT)
+    token_limit = int(max_tokens or HERMES_MAX_TOKENS)
+    hermes_env = {
+        "HERMES_API_TIMEOUT": str(max(HERMES_TIMEOUT_SECONDS, 600)),
+        "HERMES_API_CALL_STALE_TIMEOUT": str(max(HERMES_TIMEOUT_SECONDS, 600)),
+        "HERMES_MAX_TOKENS": str(token_limit),
+        "HERMES_CONTEXT_LENGTH": str(HERMES_CONTEXT_LENGTH),
+    }
+    if HERMES_USE_CONFIG_MODEL:
+        hermes_env["HERMES_USE_CONFIG_MODEL"] = "1"
+    else:
+        hermes_env["OPENAI_API_KEY"] = "no-key-required"
+        hermes_env["CUSTOM_BASE_URL"] = HERMES_BASE_URL
+    env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in hermes_env.items())
+    script_args = [
+        f"--api-port {API_PORT}",
+        f"--max-tokens {token_limit}",
+        f"--context-length {HERMES_CONTEXT_LENGTH}",
+        f"--api-timeout {max(HERMES_TIMEOUT_SECONDS, 600)}",
+        f"--api-call-stale-timeout {max(HERMES_TIMEOUT_SECONDS, 600)}",
+    ]
+    if image_file:
+        script_args.append(f"--image-file {shlex.quote(windows_path_to_wsl(image_file))}")
+    if not HERMES_USE_CONFIG_MODEL:
+        script_args.insert(0, f"--model {shlex.quote(MODEL_ALIAS)}")
+        script_args.insert(0, f"--base-url {shlex.quote(HERMES_BASE_URL)}")
     command = (
         f"cd {shlex.quote(project_wsl)} && "
-        "OPENAI_API_KEY=no-key-required "
+        f"{env_prefix} "
         f"~/.hermes/hermes-agent/venv/bin/python {shlex.quote(script_wsl)} "
-        f"--api-port {API_PORT} --model {shlex.quote(MODEL_ALIAS)}"
+        + " ".join(script_args)
     )
     args = ["wsl.exe", "-d", HERMES_WSL_DISTRO, "--", "bash", "-lc", command]
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -302,6 +478,107 @@ def call_hermes_no_tools(prompt: str) -> str:
     if not output:
         raise RuntimeError("Hermes returned an empty response.")
     return output
+
+
+def call_hermes_web_agent(
+    prompt: str,
+    *,
+    image_file: Optional[Path] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    if not HERMES_AGENT_WEB_SCRIPT.exists():
+        raise RuntimeError(f"Missing Hermes web agent script: {HERMES_AGENT_WEB_SCRIPT}")
+
+    project_wsl = windows_path_to_wsl(PROJECT_ROOT)
+    script_wsl = windows_path_to_wsl(HERMES_AGENT_WEB_SCRIPT)
+    token_limit = int(max_tokens or HERMES_AGENT_MAX_TOKENS)
+    hermes_env = {
+        "HERMES_API_TIMEOUT": str(max(HERMES_TIMEOUT_SECONDS, 900)),
+        "HERMES_API_CALL_STALE_TIMEOUT": str(max(HERMES_TIMEOUT_SECONDS, 900)),
+        "HERMES_AGENT_MAX_TOKENS": str(token_limit),
+        "HERMES_CONTEXT_LENGTH": str(HERMES_CONTEXT_LENGTH),
+        "HERMES_AGENT_TOOLSETS": HERMES_AGENT_TOOLSETS,
+    }
+    if HERMES_USE_CONFIG_MODEL:
+        hermes_env["HERMES_USE_CONFIG_MODEL"] = "1"
+    else:
+        hermes_env["OPENAI_API_KEY"] = "no-key-required"
+        hermes_env["CUSTOM_BASE_URL"] = HERMES_BASE_URL
+    env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in hermes_env.items())
+    script_args = [
+        f"--api-port {API_PORT}",
+        f"--toolsets {shlex.quote(HERMES_AGENT_TOOLSETS)}",
+        f"--max-tokens {token_limit}",
+        f"--context-length {HERMES_CONTEXT_LENGTH}",
+        f"--api-timeout {max(HERMES_TIMEOUT_SECONDS, 900)}",
+        f"--api-call-stale-timeout {max(HERMES_TIMEOUT_SECONDS, 900)}",
+    ]
+    if image_file:
+        script_args.append(f"--image-file {shlex.quote(windows_path_to_wsl(image_file))}")
+    if not HERMES_USE_CONFIG_MODEL:
+        script_args.insert(0, f"--model {shlex.quote(MODEL_ALIAS)}")
+        script_args.insert(0, f"--base-url {shlex.quote(HERMES_BASE_URL)}")
+    command = (
+        f"cd {shlex.quote(project_wsl)} && "
+        f"{env_prefix} "
+        f"~/.hermes/hermes-agent/venv/bin/python {shlex.quote(script_wsl)} "
+        + " ".join(script_args)
+    )
+    args = ["wsl.exe", "-d", HERMES_WSL_DISTRO, "--", "bash", "-lc", command]
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    result = subprocess.run(
+        args,
+        input=prompt,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=max(HERMES_TIMEOUT_SECONDS, 900),
+        creationflags=creationflags,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or f"Hermes web agent exited with code {result.returncode}")
+    output = result.stdout.strip()
+    if not output:
+        raise RuntimeError("Hermes web agent returned an empty response.")
+    return output
+
+
+def hermes_prompt_from_messages(messages: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "user").strip()
+        content = message.get("content")
+        prefix = "System" if role == "system" else "User"
+        if isinstance(content, str):
+            if content.strip():
+                lines.append(f"{prefix}:\n{content.strip()}")
+            continue
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    text_parts.append(item.strip())
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and text.strip():
+                        text_parts.append(text.strip())
+            if text_parts:
+                lines.append(f"{prefix}:\n" + "\n\n".join(text_parts))
+    return "\n\n".join(lines).strip()
+
+
+def call_hermes_messages(
+    messages: list[dict[str, Any]],
+    *,
+    image_file: Optional[Path] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    prompt = hermes_prompt_from_messages(messages)
+    if not prompt:
+        prompt = "請分析這張圖片並用繁體中文簡短回答。"
+    return call_hermes_no_tools(prompt, image_file=image_file, max_tokens=max_tokens)
 
 
 def chunk_text(text: str, size: int = 80):
@@ -398,7 +675,7 @@ def start_llama_server() -> None:
         "--reasoning",
         "off",
         "--flash-attn",
-        "on",
+        LLAMA_FLASH_ATTN,
         ]
     )
     if LLAMA_IMAGE_MIN_TOKENS:
@@ -574,7 +851,7 @@ def make_overlay_grid_image(img: Image.Image) -> Image.Image:
     width, height = base.size
     draw = ImageDraw.Draw(base, "RGBA")
     line_width = max(2, min(6, int(min(width, height) / 420)))
-    line_fill = (255, 45, 45, 210)
+    line_fill = (0, 210, 255, 210)
     label_font = overlay_grid_font(width, height)
     label_pad = max(5, line_width * 2)
 
@@ -1096,7 +1373,15 @@ def analyze_task_sync(request: TaskAnalyzeRequest) -> dict[str, Any]:
     )
 
     try:
-        output = call_llama_once(messages, int(os.environ.get("LLAMA_TASK_RESPONSE_TOKENS", "360")))
+        task_tokens = int(os.environ.get("LLAMA_TASK_RESPONSE_TOKENS", "360"))
+        if CHAT_BACKEND == "hermes" and HERMES_USE_CONFIG_MODEL:
+            output = call_hermes_messages(
+                messages,
+                image_file=LATEST_VISION_INPUT if image_base64 else None,
+                max_tokens=task_tokens,
+            )
+        else:
+            output = call_llama_once(messages, task_tokens)
         raw = extract_json_object(output)
         result = sanitize_task_analysis(raw, message, request.game_id)
         result["raw_response"] = output[:1200]
@@ -1343,7 +1628,299 @@ def list_guide_games_sync() -> list[str]:
         with guide_connection() as conn:
             rows = conn.execute("SELECT DISTINCT game_id FROM guide_fts WHERE game_id != ''").fetchall()
             games.update(str(row["game_id"]) for row in rows if row["game_id"])
+    games.update(load_game_profiles_sync().get("profiles", {}).keys())
     return sorted(games)
+
+
+def game_display_name(game_id: str) -> str:
+    clean = str(game_id or "").strip()
+    if not clean:
+        return "Unknown Game"
+    return re.sub(r"[_-]+", " ", clean).strip().title()
+
+
+def normalize_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = re.sub(r"\s+", " ", str(item or "").strip())
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text[:260])
+    return result
+
+
+def normalize_game_profiles(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    raw_profiles = raw.get("profiles") if isinstance(raw.get("profiles"), dict) else {}
+    profiles: dict[str, dict[str, Any]] = {}
+    for raw_game_id, value in raw_profiles.items():
+        game_id = normalize_game_id(str(raw_game_id))
+        if not game_id or not isinstance(value, dict):
+            continue
+        profiles[game_id] = {
+            "name": str(value.get("name") or game_display_name(game_id)).strip()[:120],
+            "aliases": normalize_list(value.get("aliases")),
+            "processes": [item.lower() for item in normalize_list(value.get("processes"))],
+            "window_titles": normalize_list(value.get("window_titles")),
+            "process_paths": normalize_list(value.get("process_paths")),
+            "learned": bool(value.get("learned")),
+            "updated_at": str(value.get("updated_at") or ""),
+        }
+    mappings_raw = raw.get("process_mappings") if isinstance(raw.get("process_mappings"), dict) else {}
+    process_mappings: dict[str, str] = {}
+    for process_name, mapped_game_id in mappings_raw.items():
+        game_id = normalize_game_id(str(mapped_game_id))
+        process_key = Path(str(process_name or "").strip()).name.lower()
+        if game_id and process_key:
+            process_mappings[process_key] = game_id
+    return {"profiles": profiles, "process_mappings": process_mappings}
+
+
+def load_game_profiles_sync() -> dict[str, Any]:
+    try:
+        raw = json.loads(GAME_PROFILES_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raw = {}
+    except Exception as exc:
+        print(f"Game profile load failed: {exc}")
+        raw = {}
+    return normalize_game_profiles(raw)
+
+
+def save_game_profiles_sync(data: dict[str, Any]) -> None:
+    normalized = normalize_game_profiles(data)
+    GAME_PROFILES_FILE.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def add_unique_text(items: list[str], value: Optional[str], *, lower: bool = False, max_items: int = 20) -> None:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return
+    if lower:
+        text = text.lower()
+    seen = {item.lower() for item in items}
+    if text.lower() not in seen:
+        items.append(text[:260])
+    del items[max_items:]
+
+
+def title_matches(title: str, needles: list[str]) -> Optional[str]:
+    title_lower = title.lower()
+    for needle in needles:
+        clean = str(needle or "").strip()
+        if len(clean) >= 3 and clean.lower() in title_lower:
+            return clean
+    return None
+
+
+def path_matches(process_path: str, needles: list[str]) -> Optional[str]:
+    path_lower = process_path.lower()
+    for needle in needles:
+        clean = str(needle or "").strip()
+        if len(clean) >= 4 and clean.lower() in path_lower:
+            return clean
+    return None
+
+
+def game_platform_marker(process_path: str) -> Optional[str]:
+    path_lower = process_path.lower().replace("/", "\\")
+    markers = [
+        "\\steamapps\\common\\",
+        "\\xboxgames\\",
+        "\\epic games\\",
+        "\\gog galaxy\\games\\",
+        "\\riot games\\",
+        "\\battle.net\\",
+        "\\ubisoft\\",
+        "\\ea games\\",
+    ]
+    return next((marker for marker in markers if marker in path_lower), None)
+
+
+def candidate_from_profile(
+    game_id: str,
+    profile: dict[str, Any],
+    *,
+    confidence: float,
+    source: str,
+    match: str,
+) -> dict[str, Any]:
+    return {
+        "game_id": game_id,
+        "name": profile.get("name") or game_display_name(game_id),
+        "confidence": confidence,
+        "source": source,
+        "match": match,
+        "learned": bool(profile.get("learned")),
+    }
+
+
+def resolve_game_from_window(window: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not window:
+        if last_active_game_detection:
+            stale = dict(last_active_game_detection)
+            stale["stale"] = True
+            stale["source"] = f"{stale.get('source', 'unknown')}_cached"
+            return stale
+        return {"active": False, "game_id": None, "name": "", "confidence": 0.0, "source": "no_window"}
+
+    process_name = Path(str(window.get("process_name") or "")).name.lower()
+    process_path = str(window.get("process_path") or "")
+    title = str(window.get("title") or "")
+    profiles_data = load_game_profiles_sync()
+    profiles = dict(profiles_data.get("profiles") or {})
+
+    for guide_game in list_guide_games_sync():
+        profiles.setdefault(
+            guide_game,
+            {
+                "name": game_display_name(guide_game),
+                "aliases": [game_display_name(guide_game), guide_game],
+                "processes": [],
+                "window_titles": [],
+                "process_paths": [],
+                "learned": False,
+            },
+        )
+
+    candidates: list[dict[str, Any]] = []
+    mapped_game_id = (profiles_data.get("process_mappings") or {}).get(process_name)
+    if mapped_game_id and mapped_game_id in profiles:
+        candidates.append(
+            candidate_from_profile(
+                mapped_game_id,
+                profiles[mapped_game_id],
+                confidence=0.98,
+                source="learned_process",
+                match=process_name,
+            )
+        )
+
+    for game_id, profile in profiles.items():
+        processes = [Path(item).name.lower() for item in profile.get("processes") or []]
+        if process_name and process_name in processes:
+            candidates.append(
+                candidate_from_profile(game_id, profile, confidence=0.96, source="process_exact", match=process_name)
+            )
+        path_match = path_matches(process_path, profile.get("process_paths") or [])
+        if path_match:
+            candidates.append(
+                candidate_from_profile(game_id, profile, confidence=0.88, source="path_match", match=path_match)
+            )
+        title_match = title_matches(title, profile.get("window_titles") or [])
+        if title_match:
+            candidates.append(
+                candidate_from_profile(game_id, profile, confidence=0.84, source="title_match", match=title_match)
+            )
+        alias_match = title_matches(title, [profile.get("name") or "", *(profile.get("aliases") or []), game_id])
+        if alias_match:
+            candidates.append(
+                candidate_from_profile(game_id, profile, confidence=0.68, source="alias_title", match=alias_match)
+            )
+
+    if not candidates and title:
+        fallback_id = normalize_game_id(title)
+        if fallback_id:
+            platform_marker = game_platform_marker(process_path)
+            candidates.append(
+                {
+                    "game_id": fallback_id,
+                    "name": title[:120],
+                    "confidence": 0.58 if platform_marker else 0.42,
+                    "source": "game_path_guess" if platform_marker else "window_title_guess",
+                    "match": platform_marker or title[:120],
+                    "learned": False,
+                }
+            )
+
+    best = max(candidates, key=lambda item: float(item.get("confidence") or 0.0), default=None)
+    if not best:
+        best = {"game_id": None, "name": "", "confidence": 0.0, "source": "unknown", "match": ""}
+
+    return {
+        "active": bool(best.get("game_id")),
+        **best,
+        "process_name": process_name,
+        "process_path": process_path,
+        "window_title": title,
+        "window": {
+            "title": title,
+            "process_name": process_name,
+            "process_path": process_path,
+            "width": int(window.get("width") or 0),
+            "height": int(window.get("height") or 0),
+        },
+        "stale": False,
+    }
+
+
+def detect_active_game_sync() -> dict[str, Any]:
+    global last_active_game_window, last_active_game_detection
+    window = get_foreground_window_info()
+    if window:
+        last_active_game_window = window
+    elif last_active_game_window:
+        window = last_active_game_window
+    detection = resolve_game_from_window(window)
+    if detection.get("active"):
+        last_active_game_detection = detection
+    return detection
+
+
+def learn_active_game_sync(request: GameProfileLearnRequest) -> dict[str, Any]:
+    game_id = normalize_game_id(request.game_id)
+    if not game_id:
+        raise ValueError("game_id is required.")
+
+    window = get_foreground_window_info() or last_active_game_window or {}
+    process_name = Path(str(request.process_name or window.get("process_name") or "")).name.lower()
+    process_path = str(request.process_path or window.get("process_path") or "").strip()
+    window_title = str(request.window_title or window.get("title") or "").strip()
+
+    data = load_game_profiles_sync()
+    profiles = data.setdefault("profiles", {})
+    profile = profiles.setdefault(
+        game_id,
+        {
+            "name": request.name or game_display_name(game_id),
+            "aliases": [],
+            "processes": [],
+            "window_titles": [],
+            "process_paths": [],
+            "learned": True,
+            "updated_at": "",
+        },
+    )
+    profile["name"] = str(request.name or profile.get("name") or game_display_name(game_id)).strip()[:120]
+    profile["learned"] = True
+    profile["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    add_unique_text(profile.setdefault("aliases", []), game_display_name(game_id))
+    add_unique_text(profile.setdefault("processes", []), process_name, lower=True)
+    if window_title and window_title.lower() not in {"game companion", "overlay-chat"}:
+        add_unique_text(profile.setdefault("window_titles", []), window_title)
+    if process_path:
+        add_unique_text(profile.setdefault("process_paths", []), process_path)
+    if process_name:
+        data.setdefault("process_mappings", {})[process_name] = game_id
+
+    save_game_profiles_sync(data)
+    detection = resolve_game_from_window(window if window else None)
+    return {"profile": normalize_game_profiles(data)["profiles"][game_id], "detection": detection}
 
 
 def search_guides_sync(query: str, game_id: Optional[str], limit: int = 5) -> list[dict[str, Any]]:
@@ -1644,7 +2221,7 @@ def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> 
         if rag_context:
             user_text += "\n\nLocal context:\n" + rag_context
         user_text += (
-            f"\n\nThe screenshot has a red planning grid with cells {grid_span}. "
+            f"\n\nThe screenshot has a cyan planning grid with cells {grid_span}. "
             f"Valid cells are {valid_cells_text}. "
             "Pick the single cell that contains the requested visible object or the best visible target. "
             "If the object spans multiple cells, choose the cell containing its center. "
@@ -1670,7 +2247,7 @@ def build_overlay_messages(prompt: str, image_base64: str, rag_context: str) -> 
     system = (
         "You are a game companion HUD planner. Return one compact ASCII JSON object only, no Markdown. "
         "Use Traditional Chinese for answer and labels. "
-        f"The screenshot has a red planning grid with cells {grid_span}. The grid is not part of the game. "
+        f"The screenshot has a cyan planning grid with cells {grid_span}. The grid is not part of the game. "
         f"Valid cells are {valid_cells_text}. "
         "For every visual HUD item, prefer the cell key instead of numeric x/y. "
         "If you are not visually confident about the requested object or cell, return an empty overlay items array. "
@@ -2053,10 +2630,19 @@ def create_overlay_response(prompt: str, image_base64: str, rag_context: str) ->
         return {"answer": "我已依照你指定的位置畫上紅圈。", "overlay": overlay}
 
     circle_marker_request = wants_circle_marker(prompt)
-    output = call_llama_once(
-        build_overlay_messages(prompt, image_base64, rag_context),
-        max_tokens=8 if circle_marker_request else int(os.environ.get("LLAMA_OVERLAY_RESPONSE_TOKENS", "128")),
-    )
+    overlay_messages = build_overlay_messages(prompt, image_base64, rag_context)
+    overlay_tokens = 32 if circle_marker_request else int(os.environ.get("LLAMA_OVERLAY_RESPONSE_TOKENS", "128"))
+    if CHAT_BACKEND == "hermes" and HERMES_USE_CONFIG_MODEL:
+        output = call_hermes_messages(
+            overlay_messages,
+            image_file=LATEST_OVERLAY_GRID_INPUT,
+            max_tokens=overlay_tokens,
+        )
+    else:
+        output = call_llama_once(
+            overlay_messages,
+            max_tokens=overlay_tokens,
+        )
     try:
         (LOG_DIR / "latest-overlay-raw.txt").write_text(output, encoding="utf-8")
     except Exception:
@@ -2101,7 +2687,10 @@ def create_overlay_response(prompt: str, image_base64: str, rag_context: str) ->
 
 @app.on_event("startup")
 async def startup_event():
-    await asyncio.to_thread(start_llama_server)
+    if LLAMA_AUTO_START:
+        await asyncio.to_thread(start_llama_server)
+    else:
+        print("llama auto-start disabled; backend will use configured non-llama chat route.")
 
 
 @app.on_event("shutdown")
@@ -2112,13 +2701,16 @@ async def shutdown_event():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok" if llama_ready() else "loading",
+        "status": "ok" if (not LLAMA_AUTO_START or llama_ready()) else "loading",
         "model": MODEL_ALIAS,
         "llama_url": llama_base_url(),
+        "llama_auto_start": LLAMA_AUTO_START,
         "vulkan_device": VULKAN_DEVICE,
         "resource_policy": "game",
         "llama_ctx_size": LLAMA_CTX_SIZE,
         "llama_gpu_layers": LLAMA_GPU_LAYERS,
+        "llama_flash_attn": LLAMA_FLASH_ATTN,
+        "llama_skip_chat_parsing": LLAMA_SKIP_CHAT_PARSING,
         "llama_image_min_tokens": LLAMA_IMAGE_MIN_TOKENS or "default",
         "llama_image_max_tokens": LLAMA_IMAGE_MAX_TOKENS_SERVER or "default",
         "image_response_tokens": os.environ.get(
@@ -2136,6 +2728,16 @@ async def health():
         "llama_cache_ram_mib": LLAMA_CACHE_RAM or "default",
         "chat_backend": CHAT_BACKEND,
         "hermes_wsl_distro": HERMES_WSL_DISTRO if CHAT_BACKEND == "hermes" else None,
+        "hermes_base_url": HERMES_BASE_URL if CHAT_BACKEND == "hermes" else None,
+        "hermes_use_config_model": HERMES_USE_CONFIG_MODEL if CHAT_BACKEND == "hermes" else False,
+        "hermes_agent_web_enabled": HERMES_AGENT_WEB_ENABLED if CHAT_BACKEND == "hermes" else False,
+        "hermes_agent_toolsets": HERMES_AGENT_TOOLSETS if CHAT_BACKEND == "hermes" else None,
+        "hermes_agent_max_tokens": HERMES_AGENT_MAX_TOKENS if CHAT_BACKEND == "hermes" else None,
+        "cloud_vision": bool(CHAT_BACKEND == "hermes" and HERMES_USE_CONFIG_MODEL),
+        "hermes_timeout_seconds": HERMES_TIMEOUT_SECONDS,
+        "hermes_max_tokens": HERMES_MAX_TOKENS,
+        "hermes_context_length": HERMES_CONTEXT_LENGTH,
+        "openai_max_tokens_cap": OPENAI_MAX_TOKENS_CAP or None,
         "local_tools": ENABLE_LOCAL_TOOLS,
         "rag_backend": "cpu_sqlite_fts5",
     }
@@ -2145,6 +2747,31 @@ async def health():
 async def guide_games():
     games = await asyncio.to_thread(list_guide_games_sync)
     return {"games": games}
+
+
+@app.get("/game-profiles")
+async def game_profiles():
+    profiles = await asyncio.to_thread(load_game_profiles_sync)
+    games = await asyncio.to_thread(list_guide_games_sync)
+    return {
+        "profiles": profiles.get("profiles", {}),
+        "process_mappings": profiles.get("process_mappings", {}),
+        "games": games,
+    }
+
+
+@app.get("/active-game")
+async def active_game():
+    return await asyncio.to_thread(detect_active_game_sync)
+
+
+@app.post("/game-profiles/learn")
+async def learn_game_profile(request: GameProfileLearnRequest):
+    try:
+        result = await asyncio.to_thread(learn_active_game_sync, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", **result}
 
 
 @app.post("/guides/search")
@@ -2225,6 +2852,11 @@ async def openai_chat_completions(request: Request):
 
     body.setdefault("model", MODEL_ALIAS)
     body.setdefault("max_tokens", int(os.environ.get("LLAMA_MAX_TOKENS", "512")))
+    if OPENAI_MAX_TOKENS_CAP > 0:
+        try:
+            body["max_tokens"] = min(int(body.get("max_tokens") or OPENAI_MAX_TOKENS_CAP), OPENAI_MAX_TOKENS_CAP)
+        except (TypeError, ValueError):
+            body["max_tokens"] = OPENAI_MAX_TOKENS_CAP
     proxied_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
     target_url = f"{llama_base_url()}/v1/chat/completions"
 
@@ -2640,9 +3272,17 @@ def intersection_area(
 def select_capture_monitor(
     monitors: list[dict[str, int]],
     window: Optional[dict[str, Any]] = None,
+    preferred_monitor: Optional[int] = None,
 ) -> tuple[dict[str, int], int]:
     if not monitors:
         raise RuntimeError("No monitor found for screenshot capture.")
+
+    if preferred_monitor is not None:
+        if 0 <= preferred_monitor < len(monitors):
+            return monitors[preferred_monitor], preferred_monitor
+        raise RuntimeError(
+            f"Requested monitor {preferred_monitor} is unavailable; found {max(0, len(monitors) - 1)} display(s)."
+        )
 
     if not window:
         index = 1 if len(monitors) > 1 else 0
@@ -2676,6 +3316,36 @@ def select_capture_monitor(
             best_index = actual_index
 
     return monitors[best_index], best_index
+
+
+@app.get("/monitors")
+async def monitors_endpoint():
+    try:
+        with mss.mss() as sct:
+            monitors = []
+            for index, monitor in enumerate(sct.monitors):
+                width = int(monitor["width"])
+                height = int(monitor["height"])
+                left = int(monitor.get("left", 0))
+                top = int(monitor.get("top", 0))
+                monitors.append(
+                    {
+                        "index": index,
+                        "label": (
+                            f"All displays {width}x{height}"
+                            if index == 0
+                            else f"Screen {index} {width}x{height}"
+                        ),
+                        "left": left,
+                        "top": top,
+                        "width": width,
+                        "height": height,
+                        "aggregate": index == 0,
+                    }
+                )
+            return {"monitors": monitors}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def redact_ignored_windows(
@@ -2939,7 +3609,12 @@ def make_screenshot_response(img: Image.Image, source: dict[str, Any], profile: 
 
 
 @app.get("/screenshot")
-async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] = None, profile: str = "fast"):
+async def screenshot_endpoint(
+    mode: str = "foreground",
+    redact: Optional[bool] = None,
+    profile: str = "fast",
+    monitor: Optional[int] = None,
+):
     try:
         mode_name = mode.lower()
         window = None
@@ -2978,25 +3653,25 @@ async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] =
                     print("No target window found; falling back to monitor capture.")
 
             with mss.mss() as sct:
-                monitor, monitor_index = select_capture_monitor(sct.monitors, window)
-                sct_img = sct.grab(monitor)
+                selected_monitor, monitor_index = select_capture_monitor(sct.monitors, window, monitor)
+                sct_img = sct.grab(selected_monitor)
                 img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                capture_bounds = get_capture_bounds(monitor)
+                capture_bounds = get_capture_bounds(selected_monitor)
                 source: dict[str, Any] = make_capture_source(
                     mode="screen",
                     capture_method="mss_monitor",
                     img=img,
                     capture_left=int(capture_bounds[0]),
                     capture_top=int(capture_bounds[1]),
-                    monitor={**monitor, "index": monitor_index},
+                    monitor={**selected_monitor, "index": monitor_index},
                 )
 
                 if mode_name in {"foreground", "window"}:
                     if window:
-                        cropped = crop_to_foreground_window(img, monitor, window)
+                        cropped = crop_to_foreground_window(img, selected_monitor, window)
                         if cropped:
                             img = cropped
-                            capture_bounds = get_capture_bounds(monitor, window)
+                            capture_bounds = get_capture_bounds(selected_monitor, window)
                             source = make_capture_source(
                                 mode=mode_name,
                                 capture_method=(
@@ -3006,7 +3681,7 @@ async def screenshot_endpoint(mode: str = "foreground", redact: Optional[bool] =
                                 capture_left=int(capture_bounds[0]),
                                 capture_top=int(capture_bounds[1]),
                                 window=window,
-                                monitor={**monitor, "index": monitor_index},
+                                monitor={**selected_monitor, "index": monitor_index},
                             )
                             if mode_name == "window":
                                 source["direct_capture_failed"] = True
@@ -3081,7 +3756,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(fact_answer_event_generator(), media_type="text/event-stream")
 
-    if guide_was_requested and not guide_results and not chat_request.image_base64:
+    if (
+        guide_was_requested
+        and not guide_results
+        and not chat_request.image_base64
+        and not (CHAT_BACKEND == "hermes" and HERMES_AGENT_WEB_ENABLED)
+    ):
         async def no_guide_event_generator():
             game_label = game_id or "目前遊戲"
             message = f"本機攻略庫沒有找到「{game_label}」相關條目。你可以把攻略 .md/.txt/.html 放進 game_guides/{game_label}/ 後重建索引。"
@@ -3109,13 +3789,29 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         return StreamingResponse(tool_event_generator(), media_type="text/event-stream")
 
     if CHAT_BACKEND == "hermes" and not chat_request.image_base64:
-        hermes_prompt = build_hermes_prompt(augmented_prompt)
+        active_game_context = None
+        if HERMES_AGENT_WEB_ENABLED:
+            try:
+                active_game_context = await asyncio.to_thread(detect_active_game_sync)
+            except Exception as exc:
+                print(f"Active game context for Hermes web agent failed: {exc}")
+        hermes_prompt = (
+            build_hermes_agent_web_prompt(
+                prompt,
+                game_id=game_id,
+                rag_context=rag_context,
+                active_game=active_game_context,
+            )
+            if HERMES_AGENT_WEB_ENABLED
+            else build_hermes_prompt(augmented_prompt)
+        )
+        hermes_call = call_hermes_web_agent if HERMES_AGENT_WEB_ENABLED else call_hermes_no_tools
 
         async def hermes_event_generator():
             collected = ""
             async with generate_lock:
                 try:
-                    collected = await asyncio.to_thread(call_hermes_no_tools, hermes_prompt)
+                    collected = await asyncio.to_thread(hermes_call, hermes_prompt)
                 except subprocess.TimeoutExpired:
                     error = "Hermes 回應逾時。請稍後再試，或把 IGPU_CHAT_BACKEND 改成 llama 先走直接模型。"
                     yield f"data: {json.dumps({'content': error}, ensure_ascii=False)}\n\n"
@@ -3126,6 +3822,8 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                     return
 
             if collected:
+                if HERMES_AGENT_WEB_ENABLED:
+                    collected = condense_agent_answer(collected, prompt)
                 append_history("user", prompt)
                 append_history("assistant", collected)
                 for chunk in chunk_text(collected):
@@ -3173,6 +3871,34 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             ocr_text = ""
             if ENABLE_OCR_CONTEXT:
                 ocr_text = await asyncio.to_thread(extract_ocr_text, chat_request.image_base64)
+            if CHAT_BACKEND == "hermes" and HERMES_AGENT_WEB_ENABLED:
+                try:
+                    await asyncio.to_thread(image_to_data_url, chat_request.image_base64)
+                    active_game_context = await asyncio.to_thread(detect_active_game_sync)
+                    agent_prompt = build_hermes_agent_web_prompt(
+                        prompt,
+                        game_id=game_id,
+                        rag_context=rag_context,
+                        active_game=active_game_context,
+                    )
+                    answer = await asyncio.to_thread(
+                        call_hermes_web_agent,
+                        agent_prompt,
+                        image_file=LATEST_VISION_INPUT,
+                        max_tokens=HERMES_AGENT_MAX_TOKENS,
+                    )
+                except Exception as exc:
+                    yield f"data: {json.dumps({'content': f'Agent vision/search failed: {exc}'}, ensure_ascii=False)}\n\n"
+                    return
+
+                answer = condense_agent_answer(answer, prompt)
+                if not answer:
+                    answer = "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
+                append_history("user", prompt)
+                append_history("assistant", answer)
+                yield f"data: {json.dumps({'content': answer}, ensure_ascii=False)}\n\n"
+                return
+
             visual_scene_request = should_use_visual_scene(prompt)
             if visual_scene_request:
                 visual_prompt = (
@@ -3186,16 +3912,25 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 messages = build_messages(augmented_prompt, chat_request.image_base64, ocr_text)
             async with generate_lock:
                 try:
-                    answer = await asyncio.to_thread(
-                        call_llama_once,
-                        messages,
-                        int(
-                            os.environ.get(
-                                "LLAMA_IMAGE_RESPONSE_TOKENS",
-                                os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "64"),
-                            )
-                        ),
+                    image_tokens = int(
+                        os.environ.get(
+                            "LLAMA_IMAGE_RESPONSE_TOKENS",
+                            os.environ.get("LLAMA_IMAGE_MAX_TOKENS", "64"),
+                        )
                     )
+                    if CHAT_BACKEND == "hermes" and HERMES_USE_CONFIG_MODEL:
+                        answer = await asyncio.to_thread(
+                            call_hermes_messages,
+                            messages,
+                            image_file=LATEST_VISION_INPUT,
+                            max_tokens=max(image_tokens, 96),
+                        )
+                    else:
+                        answer = await asyncio.to_thread(
+                            call_llama_once,
+                            messages,
+                            image_tokens,
+                        )
                 except Exception as exc:
                     yield f"data: {json.dumps({'content': f'截圖分析失敗：{exc}'}, ensure_ascii=False)}\n\n"
                     return

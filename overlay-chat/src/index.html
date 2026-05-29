@@ -6,10 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Game Companion</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="virtualCursor.css" />
 </head>
 
 <body>
-  <div class="drag-bar" data-tauri-drag-region>
+  <div class="drag-bar" data-tauri-drag-region data-cursor-action="window-move" data-cursor-label="Move window">
     <div class="title" data-tauri-drag-region>Game Companion Beta</div>
     <div class="drag-bar-actions">
       <button id="minBtn" class="window-btn min-btn" title="Minimize" aria-label="Minimize">
@@ -28,6 +29,10 @@
     <select id="gameSelect" class="game-select" title="Game">
       <option value="">Game</option>
     </select>
+    <button id="gameAutoBtn" class="hud-btn game-auto-btn active" title="Auto detect game">
+      <span class="icon" data-icon="radio"></span>
+      <span class="button-label">Auto</span>
+    </button>
     <button id="searchBtn" class="hud-btn utility-window-btn" title="Game search">
       <span class="icon" data-icon="search"></span>
       <span class="button-label">Search</span>
@@ -48,6 +53,10 @@
       <span class="icon" data-icon="shield"></span>
       <span class="button-label">Protect</span>
     </button>
+    <button id="virtualCursorBtn" class="hud-btn" title="Companion virtual cursor (F11)">
+      <span class="icon" data-icon="cursor"></span>
+      <span class="button-label">Cursor</span>
+    </button>
     <button id="perfBtn" class="perf-btn" title="Performance mode">
       <span class="icon" data-icon="gauge"></span>
       <span class="button-label">Perf</span>
@@ -59,11 +68,11 @@
     </div>
   </div>
 
-  <div id="chatWindow" class="chat-window">
+  <div id="chatWindow" class="chat-window" data-cursor-action="scroll-drag" data-cursor-scroll data-cursor-label="Scroll chat">
     <div class="message bot-message">
       Ready. I can watch the screen, answer questions, and help during play.
       <br>
-      <small style="opacity:0.72">F4 protect, F5 search, F6 tasks, F7 task capture, F8 voice, F9 screenshot.</small>
+      <small style="opacity:0.72">F4 protect, F5 search, F6 tasks, F7 task capture, F8 voice, F9 screenshot, F11 cursor.</small>
     </div>
   </div>
 
@@ -77,10 +86,13 @@
   </div>
 
   <div class="input-area">
-    <button id="voiceBtn" class="voice-btn" title="Voice mode">
+    <button id="voiceBtn" class="voice-btn" title="Voice mode" data-cursor-action="voice-toggle">
       <span class="icon" data-icon="mic"></span>
       <span class="button-label">Mic</span>
     </button>
+    <select id="captureDisplaySelect" class="screen-select" title="Screenshot source" aria-label="Screenshot source">
+      <option value="auto">Auto</option>
+    </select>
     <button id="screenshotBtn" class="screenshot-btn" title="Screenshot (F9)">
       <span class="icon" data-icon="camera"></span>
       <span class="button-label">Shot</span>

@@ -4,11 +4,12 @@ param(
     [string]$ApiUrl = "http://127.0.0.1:8000",
     [string]$ApiHost = "127.0.0.1",
     [int]$LlamaPort = 18080,
-    [int]$LlamaCtxSize = 8192,
+    [int]$LlamaCtxSize = 32768,
     [int]$LlamaGpuLayers = 99,
     [int]$LlamaParallel = 0,
     [int]$LlamaCacheRamMiB = -1,
-    [string]$VulkanDevice = "0",
+    [bool]$LlamaSkipChatParsing = $true,
+    [string]$VulkanDevice = "1",
     [string]$ChatBackend = "llama",
     [string]$LlamaHfRepo = "unsloth/Qwen3-VL-8B-Instruct-GGUF",
     [string]$LlamaHfFile = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",
@@ -16,6 +17,8 @@ param(
     [int]$LlamaImageMinTokens = 256,
     [int]$LlamaImageMaxTokens = 512,
     [string]$HermesWslDistro = "Ubuntu-24.04",
+    [int]$HermesTimeoutSeconds = 600,
+    [int]$HermesMaxTokens = 160,
     [int]$TimeoutSeconds = 360
 )
 
@@ -119,9 +122,13 @@ $env:LLAMA_PORT = "$LlamaPort"
 $env:LLAMA_STARTUP_TIMEOUT = "$TimeoutSeconds"
 $env:LLAMA_CTX_SIZE = "$LlamaCtxSize"
 $env:LLAMA_GPU_LAYERS = "$LlamaGpuLayers"
-$env:LLAMA_ARG_FLASH_ATTN = "1"
+$env:LLAMA_FLASH_ATTN = "off"
+$env:LLAMA_ARG_FLASH_ATTN = "0"
 $env:IGPU_API_HOST = $ApiHost
 $env:IGPU_CHAT_BACKEND = $ChatBackend
+$env:LLAMA_AUTO_START = "1"
+$env:HERMES_USE_CONFIG_MODEL = "0"
+$env:HERMES_AGENT_WEB_ENABLED = "0"
 $env:LLAMA_MODEL_ALIAS = $LlamaModelAlias
 $env:LLAMA_HF_REPO = $LlamaHfRepo
 $env:LLAMA_HF_FILE = $LlamaHfFile
@@ -138,8 +145,20 @@ $env:LLAMA_IMAGE_RESPONSE_TOKENS = "64"
 $env:LLAMA_OVERLAY_GRID_LONG_EDGE = "960"
 $env:LLAMA_OVERLAY_GRID_IMAGE_QUALITY = "68"
 $env:LLAMA_OVERLAY_RESPONSE_TOKENS = "128"
-$env:LLAMA_SKIP_CHAT_PARSING = "1"
+$env:LLAMA_SKIP_CHAT_PARSING = if ($LlamaSkipChatParsing) { "1" } else { "0" }
 $env:HERMES_WSL_DISTRO = $HermesWslDistro
+$env:HERMES_BASE_URL = "$ApiUrl/v1"
+$env:HERMES_TIMEOUT_SECONDS = "$HermesTimeoutSeconds"
+$env:HERMES_API_TIMEOUT = "$HermesTimeoutSeconds"
+$env:HERMES_API_CALL_STALE_TIMEOUT = "$HermesTimeoutSeconds"
+$env:HERMES_MAX_TOKENS = "$HermesMaxTokens"
+$env:HERMES_CONTEXT_LENGTH = "$LlamaCtxSize"
+if ($ChatBackend -eq "hermes") {
+    $env:LLAMA_OPENAI_MAX_TOKENS_CAP = "$HermesMaxTokens"
+}
+else {
+    Remove-Item Env:\LLAMA_OPENAI_MAX_TOKENS_CAP -ErrorAction SilentlyContinue
+}
 if ($LlamaParallel -gt 0) {
     $env:LLAMA_PARALLEL = "$LlamaParallel"
 }
@@ -166,6 +185,26 @@ elseif ($runningModelIds.Count -gt 0) {
         Stop-ListenerOnPort -Port $LlamaPort
         Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
     }
+    elseif ($llamaCommandLine -and $llamaCommandLine -notmatch "--ctx-size\s+$LlamaCtxSize(\s|$)") {
+        Write-Host "Stopping llama-server on port $LlamaPort to switch context size to $LlamaCtxSize."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($llamaCommandLine -and $llamaCommandLine -notmatch "--flash-attn\s+off(\s|$)") {
+        Write-Host "Stopping llama-server on port $LlamaPort to disable flash attention for Qwen3.5 Vulkan output stability."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($llamaCommandLine -and $llamaCommandLine -notmatch "--image-min-tokens\s+$LlamaImageMinTokens(\s|$)") {
+        Write-Host "Stopping llama-server on port $LlamaPort to switch image min tokens to $LlamaImageMinTokens."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($llamaCommandLine -and $llamaCommandLine -notmatch "--image-max-tokens\s+$LlamaImageMaxTokens(\s|$)") {
+        Write-Host "Stopping llama-server on port $LlamaPort to switch image max tokens to $LlamaImageMaxTokens."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
 }
 
 try {
@@ -174,8 +213,28 @@ try {
         Write-Host "Stopping backend to switch model alias from $($health.model) to $LlamaModelAlias."
         Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
     }
+    elseif ($health.vulkan_device -and "$($health.vulkan_device)" -ne "$VulkanDevice") {
+        Write-Host "Stopping backend and llama-server to switch Vulkan device from $($health.vulkan_device) to $VulkanDevice."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
     elseif ($health.llama_gpu_layers -and "$($health.llama_gpu_layers)" -ne "$LlamaGpuLayers") {
         Write-Host "Stopping backend to switch GPU layers from $($health.llama_gpu_layers) to $LlamaGpuLayers."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.llama_ctx_size -and "$($health.llama_ctx_size)" -ne "$LlamaCtxSize") {
+        Write-Host "Stopping backend and llama-server to switch context size from $($health.llama_ctx_size) to $LlamaCtxSize."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.llama_flash_attn -and "$($health.llama_flash_attn)" -ne "off") {
+        Write-Host "Stopping backend and llama-server to disable flash attention for Qwen3.5 Vulkan output stability."
+        Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($null -ne $health.llama_skip_chat_parsing -and "$($health.llama_skip_chat_parsing)".ToLowerInvariant() -ne "$LlamaSkipChatParsing".ToLowerInvariant()) {
+        Write-Host "Stopping backend and llama-server to switch skip chat parsing from $($health.llama_skip_chat_parsing) to $LlamaSkipChatParsing."
+        Stop-ListenerOnPort -Port $LlamaPort
         Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
     }
     elseif ($health.llama_image_min_tokens -and "$($health.llama_image_min_tokens)" -ne "$LlamaImageMinTokens") {
@@ -186,6 +245,30 @@ try {
     elseif ($health.llama_image_max_tokens -and "$($health.llama_image_max_tokens)" -ne "$LlamaImageMaxTokens") {
         Write-Host "Stopping backend and llama-server to switch image max tokens from $($health.llama_image_max_tokens) to $LlamaImageMaxTokens."
         Stop-ListenerOnPort -Port $LlamaPort
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.chat_backend -and "$($health.chat_backend)" -ne $ChatBackend) {
+        Write-Host "Stopping backend to switch chat backend from $($health.chat_backend) to $ChatBackend."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.hermes_timeout_seconds -and "$($health.hermes_timeout_seconds)" -ne "$HermesTimeoutSeconds") {
+        Write-Host "Stopping backend to switch Hermes timeout from $($health.hermes_timeout_seconds) to $HermesTimeoutSeconds."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($health.hermes_max_tokens -and "$($health.hermes_max_tokens)" -ne "$HermesMaxTokens") {
+        Write-Host "Stopping backend to switch Hermes max tokens from $($health.hermes_max_tokens) to $HermesMaxTokens."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($ChatBackend -eq "hermes" -and "$($health.hermes_context_length)" -ne "$LlamaCtxSize") {
+        Write-Host "Stopping backend to switch Hermes context length from $($health.hermes_context_length) to $LlamaCtxSize."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($ChatBackend -eq "hermes" -and "$($health.openai_max_tokens_cap)" -ne "$HermesMaxTokens") {
+        Write-Host "Stopping backend to switch OpenAI token cap from $($health.openai_max_tokens_cap) to $HermesMaxTokens."
+        Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
+    }
+    elseif ($ChatBackend -ne "hermes" -and $null -ne $health.openai_max_tokens_cap) {
+        Write-Host "Stopping backend to disable OpenAI token cap."
         Stop-ListenerOnPort -Port ([uri]$ApiUrl).Port
     }
     elseif ($health.vision_long_edge -and "$($health.vision_long_edge)" -ne "960") {

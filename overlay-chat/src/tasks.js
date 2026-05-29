@@ -1,8 +1,11 @@
+import { initVirtualCursor } from "./virtualCursor.js";
+
 document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.();
   const events = tauri.event || {};
   const invoke = tauri.core?.invoke;
+  initVirtualCursor({ events, invoke, windowLabel: "tasks" });
 
   const TASK_STORAGE_KEY = "igpu-task-log-v1";
   const taskList = document.getElementById("taskList");
@@ -232,6 +235,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   closeBtn?.addEventListener("click", async () => {
+    localStorage.setItem("igpu-virtual-cursor-active-window", "main");
+    await events.emit?.("virtual-cursor-active-window", { window: "main", source: "tasks" }).catch(() => {});
     if (invoke) {
       await invoke("hide_tasks_window").catch(() => appWindow?.hide?.().catch(() => {}));
     } else {

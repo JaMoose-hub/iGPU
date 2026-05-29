@@ -19,6 +19,10 @@ game_guides/
 tmp/
 temp/
 
+# --- Local smoke/test helpers ---
+scripts/hermes_agent_task.py
+scripts/hermes_file_tool_smoke.py
+
 # --- Python / Environments ---
 __pycache__/
 *.py[cod]

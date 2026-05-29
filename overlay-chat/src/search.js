@@ -1,3 +1,5 @@
+import { initVirtualCursor } from "./virtualCursor.js";
+
 document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.() || tauri.window?.Window?.getCurrent?.();
@@ -5,6 +7,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const invoke = tauri.core?.invoke;
   const opener = tauri.opener || {};
   const Webview = tauri.webview?.Webview;
+  const virtualCursor = initVirtualCursor({ events, invoke, windowLabel: "search" });
 
   const gameInput = document.getElementById("gameInput");
   const keywordInput = document.getElementById("keywordInput");
@@ -26,6 +29,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   const browserNavButtons = [browserBackBtn, browserForwardBtn, browserReloadBtn, browserHomeBtn].filter(Boolean);
   let embeddedBrowser = null;
   let lastEmbeddedUrl = "";
+
+  const keepVirtualCursorInSearch = async () => {
+    const position = virtualCursor.getPosition?.();
+    await appWindow?.setFocus?.().catch(() => {});
+    await events.emit?.("virtual-cursor-exit-text-entry", { source: "search-submit" }).catch(() => {});
+    if (position?.enabled && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+      await invoke?.("set_virtual_cursor_window_position", {
+        label: "search",
+        x: position.x,
+        y: position.y
+      }).catch((err) => console.warn("Could not preserve search virtual cursor:", err));
+    } else {
+      await invoke?.("set_virtual_cursor_active_window", { label: "search" })
+        .catch((err) => console.warn("Could not keep search virtual cursor active:", err));
+    }
+  };
+
+  const settleVirtualCursorInSearch = () => {
+    keepVirtualCursorInSearch();
+    window.setTimeout(keepVirtualCursorInSearch, 120);
+    window.setTimeout(keepVirtualCursorInSearch, 360);
+  };
 
   const iconSvg = {
     back: '<path d="m15 18-6-6 6-6"/><path d="M21 12H9"/>',
@@ -148,12 +173,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      focus: true
+      focus: false
     });
     embeddedBrowser.once?.("tauri://created", async () => {
       await positionEmbeddedBrowser();
-      await embeddedBrowser.setFocus?.().catch(() => {});
       setBrowserControls(true);
+      settleVirtualCursorInSearch();
     });
     embeddedBrowser.once?.("tauri://error", async () => {
       embeddedBrowser = null;
@@ -213,6 +238,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setGame(localStorage.getItem("currentGameId") || "");
   keywordInput.value = localStorage.getItem("igpu-game-search-pending-keyword") || "";
   localStorage.removeItem("igpu-game-search-pending-keyword");
+  const pendingAutoSearch = localStorage.getItem("igpu-game-search-auto-run") === "true";
+  localStorage.removeItem("igpu-game-search-auto-run");
   renderChips();
 
   engineBtns.forEach((button) => {
@@ -225,6 +252,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.warn("Search open failed:", err);
       setBrowserMessage("Search failed inside Game Search.");
     });
+    settleVirtualCursorInSearch();
   });
 
   externalBtn?.addEventListener("click", async () => {
@@ -252,6 +280,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   closeBtn?.addEventListener("click", async () => {
+    localStorage.setItem("igpu-virtual-cursor-active-window", "main");
+    await events.emit?.("virtual-cursor-active-window", { window: "main", source: "search" }).catch(() => {});
     await closeEmbeddedBrowser();
     if (invoke) {
       await invoke("hide_search_window").catch(() => appWindow?.hide?.().catch(() => {}));
@@ -272,6 +302,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     localStorage.removeItem("igpu-game-search-pending-keyword");
     keywordInput?.focus();
     positionEmbeddedBrowser();
+    if (event.payload?.autoSearch && keywordInput?.value?.trim()) {
+      openSearch().catch((err) => {
+        console.warn("Auto search failed:", err);
+        setBrowserMessage("Search failed inside Game Search.");
+      });
+    }
   }).catch(() => {});
 
   await events.listen?.("companion-window-shown", async () => {
@@ -291,4 +327,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   keywordInput?.focus();
+  if (pendingAutoSearch && keywordInput?.value?.trim()) {
+    await openSearch().catch((err) => {
+      console.warn("Pending auto search failed:", err);
+      setBrowserMessage("Search failed inside Game Search.");
+    });
+  }
 });

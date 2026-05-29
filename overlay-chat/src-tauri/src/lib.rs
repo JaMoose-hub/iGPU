@@ -1,9 +1,75 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
+use serde::Serialize;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
+
+#[cfg(windows)]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+#[cfg(windows)]
+use windows_sys::Win32::UI::Input::XboxController::{
+    XInputGetState, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
+    XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
+    XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
+};
 
 const GAME_SEARCH_BROWSER_LABEL: &str = "game-search-results";
 static CAPTURE_PROTECTION_ENABLED: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_CURSOR_STATE: OnceLock<Mutex<VirtualCursorState>> = OnceLock::new();
+const VIRTUAL_CURSOR_STEP: f64 = 16.0;
+const VIRTUAL_CURSOR_GAMEPAD_STEP: f64 = 20.0;
+const VIRTUAL_CURSOR_SCREEN_MARGIN: f64 = 12.0;
+
+#[derive(Clone, Serialize)]
+struct VirtualCursorWindowFrame {
+    label: &'static str,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+    visible: bool,
+}
+
+struct VirtualCursorState {
+    enabled: bool,
+    initialized: bool,
+    screen_x: f64,
+    screen_y: f64,
+    local_x: f64,
+    local_y: f64,
+    active_window: String,
+    moving_window: Option<String>,
+}
+
+impl Default for VirtualCursorState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initialized: false,
+            screen_x: 0.0,
+            screen_y: 0.0,
+            local_x: 0.0,
+            local_y: 0.0,
+            active_window: "main".to_string(),
+            moving_window: None,
+        }
+    }
+}
+
+fn virtual_cursor_state() -> &'static Mutex<VirtualCursorState> {
+    VIRTUAL_CURSOR_STATE.get_or_init(|| Mutex::new(VirtualCursorState::default()))
+}
 
 #[cfg(windows)]
 const WDA_NONE: u32 = 0x00000000;
@@ -86,6 +152,674 @@ fn toggle_capture_protection_state(app: tauri::AppHandle) {
     let enabled = !CAPTURE_PROTECTION_ENABLED.load(Ordering::Relaxed);
     let _ = set_capture_protection_state(&app, enabled);
 }
+
+#[cfg(not(windows))]
+fn virtual_cursor_control_codes() -> Vec<Code> {
+    vec![
+        Code::KeyW,
+        Code::KeyA,
+        Code::KeyS,
+        Code::KeyD,
+        Code::ArrowUp,
+        Code::ArrowLeft,
+        Code::ArrowDown,
+        Code::ArrowRight,
+        Code::Numpad8,
+        Code::Numpad4,
+        Code::Numpad2,
+        Code::Numpad6,
+        Code::Numpad5,
+        Code::Tab,
+        Code::Enter,
+        Code::NumpadEnter,
+        Code::Space,
+        Code::Escape,
+    ]
+}
+
+fn virtual_cursor_control_payload(code: Code) -> Option<serde_json::Value> {
+    match code {
+        Code::KeyW | Code::ArrowUp | Code::Numpad8 => {
+            Some(serde_json::json!({ "type": "move", "dx": 0, "dy": -1 }))
+        }
+        Code::KeyA | Code::ArrowLeft | Code::Numpad4 => {
+            Some(serde_json::json!({ "type": "move", "dx": -1, "dy": 0 }))
+        }
+        Code::KeyS | Code::ArrowDown | Code::Numpad2 => {
+            Some(serde_json::json!({ "type": "move", "dx": 0, "dy": 1 }))
+        }
+        Code::KeyD | Code::ArrowRight | Code::Numpad6 => {
+            Some(serde_json::json!({ "type": "move", "dx": 1, "dy": 0 }))
+        }
+        Code::Tab => Some(serde_json::json!({ "type": "target_next" })),
+        Code::Enter | Code::NumpadEnter | Code::Space | Code::Numpad5 => {
+            Some(serde_json::json!({ "type": "activate" }))
+        }
+        Code::Escape => Some(serde_json::json!({ "type": "disable" })),
+        _ => None,
+    }
+}
+
+fn frame_contains_screen_point(frame: &VirtualCursorWindowFrame, x: f64, y: f64) -> bool {
+    let left = frame.x as f64;
+    let top = frame.y as f64;
+    x >= left && x <= left + frame.width as f64 && y >= top && y <= top + frame.height as f64
+}
+
+fn frame_distance_to_point(frame: &VirtualCursorWindowFrame, x: f64, y: f64) -> f64 {
+    let left = frame.x as f64;
+    let top = frame.y as f64;
+    let right = left + frame.width as f64;
+    let bottom = top + frame.height as f64;
+    let dx = if x < left {
+        left - x
+    } else if x > right {
+        x - right
+    } else {
+        0.0
+    };
+    let dy = if y < top {
+        top - y
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    };
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn frame_center(frame: &VirtualCursorWindowFrame) -> (f64, f64) {
+    (
+        frame.x as f64 + frame.width as f64 / 2.0,
+        frame.y as f64 + frame.height as f64 / 2.0,
+    )
+}
+
+fn frame_local_size(frame: &VirtualCursorWindowFrame) -> (f64, f64) {
+    let scale = if frame.scale_factor > 0.0 {
+        frame.scale_factor
+    } else {
+        1.0
+    };
+    (
+        (frame.width as f64 / scale).max(24.0),
+        (frame.height as f64 / scale).max(24.0),
+    )
+}
+
+fn screen_to_frame_local(frame: &VirtualCursorWindowFrame, x: f64, y: f64) -> (f64, f64) {
+    let scale = if frame.scale_factor > 0.0 {
+        frame.scale_factor
+    } else {
+        1.0
+    };
+    let (width, height) = frame_local_size(frame);
+    (
+        ((x - frame.x as f64) / scale).clamp(12.0, width - 12.0),
+        ((y - frame.y as f64) / scale).clamp(12.0, height - 12.0),
+    )
+}
+
+fn select_virtual_cursor_frame<'a>(
+    frames: &'a [VirtualCursorWindowFrame],
+    active_window: &str,
+    screen_x: f64,
+    screen_y: f64,
+) -> Option<&'a VirtualCursorWindowFrame> {
+    if let Some(frame) = frames.iter().find(|frame| {
+        frame.label == active_window && frame_contains_screen_point(frame, screen_x, screen_y)
+    }) {
+        return Some(frame);
+    }
+
+    if let Some(frame) = frames
+        .iter()
+        .rev()
+        .find(|frame| frame_contains_screen_point(frame, screen_x, screen_y))
+    {
+        return Some(frame);
+    }
+
+    frames
+        .iter()
+        .map(|frame| {
+            let active_bias = if frame.label == active_window {
+                -1.0
+            } else {
+                0.0
+            };
+            (
+                frame_distance_to_point(frame, screen_x, screen_y) + active_bias,
+                frame,
+            )
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, frame)| frame)
+}
+
+fn initialize_virtual_cursor_position(
+    state: &mut VirtualCursorState,
+    frames: &[VirtualCursorWindowFrame],
+) {
+    if state.initialized {
+        return;
+    }
+    let frame = frames
+        .iter()
+        .find(|frame| frame.label == state.active_window)
+        .or_else(|| frames.iter().find(|frame| frame.label == "main"))
+        .or_else(|| frames.first());
+    if let Some(frame) = frame {
+        let (x, y) = frame_center(frame);
+        state.screen_x = x;
+        state.screen_y = y;
+        state.active_window = frame.label.to_string();
+        state.initialized = true;
+    }
+}
+
+fn clamp_virtual_cursor_to_world(
+    state: &mut VirtualCursorState,
+    frames: &[VirtualCursorWindowFrame],
+) {
+    initialize_virtual_cursor_position(state, frames);
+    if frames.is_empty() {
+        return;
+    }
+
+    let left = frames
+        .iter()
+        .map(|frame| frame.x as f64)
+        .fold(f64::INFINITY, f64::min);
+    let top = frames
+        .iter()
+        .map(|frame| frame.y as f64)
+        .fold(f64::INFINITY, f64::min);
+    let right = frames
+        .iter()
+        .map(|frame| frame.x as f64 + frame.width as f64)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = frames
+        .iter()
+        .map(|frame| frame.y as f64 + frame.height as f64)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let min_x = left + VIRTUAL_CURSOR_SCREEN_MARGIN;
+    let max_x = right - VIRTUAL_CURSOR_SCREEN_MARGIN;
+    let min_y = top + VIRTUAL_CURSOR_SCREEN_MARGIN;
+    let max_y = bottom - VIRTUAL_CURSOR_SCREEN_MARGIN;
+    if min_x <= max_x {
+        state.screen_x = state.screen_x.clamp(min_x, max_x);
+    } else {
+        state.screen_x = (left + right) / 2.0;
+    }
+    if min_y <= max_y {
+        state.screen_y = state.screen_y.clamp(min_y, max_y);
+    } else {
+        state.screen_y = (top + bottom) / 2.0;
+    }
+}
+
+fn anchor_virtual_cursor_to_active_frame(
+    state: &mut VirtualCursorState,
+    frames: &[VirtualCursorWindowFrame],
+) {
+    if !state.enabled || !state.initialized {
+        clamp_virtual_cursor_to_world(state, frames);
+        return;
+    }
+
+    let Some(frame) = frames
+        .iter()
+        .find(|frame| frame.label == state.active_window.as_str())
+    else {
+        state.moving_window = None;
+        clamp_virtual_cursor_to_world(state, frames);
+        return;
+    };
+
+    let scale = if frame.scale_factor > 0.0 {
+        frame.scale_factor
+    } else {
+        1.0
+    };
+    let (width, height) = frame_local_size(frame);
+    let local_x = state.local_x.clamp(
+        VIRTUAL_CURSOR_SCREEN_MARGIN,
+        width - VIRTUAL_CURSOR_SCREEN_MARGIN,
+    );
+    let local_y = state.local_y.clamp(
+        VIRTUAL_CURSOR_SCREEN_MARGIN,
+        height - VIRTUAL_CURSOR_SCREEN_MARGIN,
+    );
+    state.screen_x = frame.x as f64 + local_x * scale;
+    state.screen_y = frame.y as f64 + local_y * scale;
+    clamp_virtual_cursor_to_world(state, frames);
+}
+
+fn emit_virtual_cursor_render(app: &tauri::AppHandle) -> Result<(), String> {
+    let frames = collect_virtual_cursor_window_frames(app)?;
+    let mut state = virtual_cursor_state()
+        .lock()
+        .map_err(|_| "virtual cursor state poisoned".to_string())?;
+
+    if !state.enabled || frames.is_empty() {
+        app.emit(
+            "virtual-cursor-render",
+            serde_json::json!({
+                "enabled": false,
+                "activeWindow": state.active_window,
+                "movingWindow": serde_json::Value::Null,
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    clamp_virtual_cursor_to_world(&mut state, &frames);
+    let Some(frame) = select_virtual_cursor_frame(
+        &frames,
+        &state.active_window,
+        state.screen_x,
+        state.screen_y,
+    ) else {
+        return Ok(());
+    };
+    state.active_window = frame.label.to_string();
+    let (local_x, local_y) = screen_to_frame_local(frame, state.screen_x, state.screen_y);
+    state.local_x = local_x;
+    state.local_y = local_y;
+    let active_window = state.active_window.clone();
+    let moving_window = state.moving_window.clone();
+    let screen_x = state.screen_x;
+    let screen_y = state.screen_y;
+    drop(state);
+
+    app.emit(
+        "virtual-cursor-render",
+        serde_json::json!({
+            "enabled": true,
+            "activeWindow": active_window,
+            "x": local_x,
+            "y": local_y,
+            "screenX": screen_x,
+            "screenY": screen_y,
+            "movingWindow": moving_window,
+        }),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn set_virtual_cursor_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.store(enabled, Ordering::Relaxed);
+    VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.store(false, Ordering::Relaxed);
+    {
+        let frames = collect_virtual_cursor_window_frames(app)?;
+        let mut state = virtual_cursor_state()
+            .lock()
+            .map_err(|_| "virtual cursor state poisoned".to_string())?;
+        state.enabled = enabled;
+        if !enabled {
+            state.moving_window = None;
+        }
+        if enabled {
+            clamp_virtual_cursor_to_world(&mut state, &frames);
+        }
+    }
+    emit_virtual_cursor_render(app)
+}
+
+fn move_virtual_cursor_window(app: &tauri::AppHandle, label: &str, delta_x: f64, delta_y: f64) {
+    let Some(window) = app.get_webview_window(label) else {
+        if let Ok(mut state) = virtual_cursor_state().lock() {
+            state.moving_window = None;
+        }
+        let _ = emit_virtual_cursor_render(app);
+        return;
+    };
+
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+
+    let next_x = position.x.saturating_add(delta_x.round() as i32);
+    let next_y = position.y.saturating_add(delta_y.round() as i32);
+    let _ = window.set_position(PhysicalPosition::new(next_x, next_y));
+
+    if let Ok(frames) = collect_virtual_cursor_window_frames(app) {
+        if let Ok(mut state) = virtual_cursor_state().lock() {
+            anchor_virtual_cursor_to_active_frame(&mut state, &frames);
+        }
+    }
+    let _ = emit_virtual_cursor_render(app);
+}
+
+fn move_virtual_cursor_by(app: &tauri::AppHandle, delta_x: f64, delta_y: f64) {
+    if delta_x.abs() < 0.05 && delta_y.abs() < 0.05 {
+        return;
+    }
+    let moving_window = virtual_cursor_state().lock().ok().and_then(|state| {
+        if state.enabled {
+            state.moving_window.clone()
+        } else {
+            None
+        }
+    });
+    if let Some(label) = moving_window {
+        move_virtual_cursor_window(app, &label, delta_x, delta_y);
+        return;
+    }
+
+    let mut moved = false;
+    if let Ok(frames) = collect_virtual_cursor_window_frames(app) {
+        if let Ok(mut state) = virtual_cursor_state().lock() {
+            if !state.enabled {
+                return;
+            }
+            clamp_virtual_cursor_to_world(&mut state, &frames);
+            state.screen_x += delta_x;
+            state.screen_y += delta_y;
+            clamp_virtual_cursor_to_world(&mut state, &frames);
+            moved = true;
+        }
+    }
+    if moved {
+        let _ = emit_virtual_cursor_render(app);
+    }
+}
+
+fn move_virtual_cursor(app: &tauri::AppHandle, dx: i32, dy: i32) {
+    move_virtual_cursor_by(
+        app,
+        dx as f64 * VIRTUAL_CURSOR_STEP,
+        dy as f64 * VIRTUAL_CURSOR_STEP,
+    );
+}
+
+fn emit_virtual_cursor_action(app: &tauri::AppHandle, action: &str) {
+    let active_window = virtual_cursor_state()
+        .lock()
+        .ok()
+        .map(|state| state.active_window.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let payload = serde_json::json!({ "type": action, "activeWindow": active_window });
+    let _ = app.emit("virtual-cursor-action", payload.clone());
+    let _ = app.emit_to(active_window.as_str(), "virtual-cursor-action", payload);
+}
+
+fn set_virtual_cursor_global_controls_state(
+    app: &tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return set_virtual_cursor_enabled(app, enabled);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let was_enabled = VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.swap(enabled, Ordering::Relaxed);
+        if was_enabled == enabled {
+            return Ok(());
+        }
+
+        for code in virtual_cursor_control_codes() {
+            let shortcut = Shortcut::new(None, code);
+            let result = if enabled {
+                app.global_shortcut().register(shortcut)
+            } else {
+                app.global_shortcut().unregister(shortcut)
+            };
+            if let Err(err) = result {
+                eprintln!("virtual cursor shortcut {:?} failed: {}", code, err);
+            }
+        }
+        set_virtual_cursor_enabled(app, enabled)
+    }
+}
+
+#[cfg(windows)]
+fn virtual_key_down(vkey: i32) -> bool {
+    unsafe { (GetAsyncKeyState(vkey) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(windows)]
+fn start_virtual_cursor_keyboard_poll(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut was_tab = false;
+        let mut was_activate = false;
+        let mut pending_activate = false;
+        let mut controls_clear_since: Option<Instant> = None;
+        let mut was_escape = false;
+
+        loop {
+            if !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed) {
+                was_tab = false;
+                was_activate = false;
+                pending_activate = false;
+                controls_clear_since = None;
+                was_escape = false;
+                thread::sleep(Duration::from_millis(45));
+                continue;
+            }
+
+            if VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.load(Ordering::Relaxed) {
+                was_tab = false;
+                was_activate = false;
+                pending_activate = false;
+                controls_clear_since = None;
+                was_escape = false;
+                thread::sleep(Duration::from_millis(55));
+                continue;
+            }
+
+            let up = virtual_key_down(0x57) || virtual_key_down(0x26) || virtual_key_down(0x68);
+            let left = virtual_key_down(0x41) || virtual_key_down(0x25) || virtual_key_down(0x64);
+            let down = virtual_key_down(0x53) || virtual_key_down(0x28) || virtual_key_down(0x62);
+            let right = virtual_key_down(0x44) || virtual_key_down(0x27) || virtual_key_down(0x66);
+
+            let dx = i32::from(right) - i32::from(left);
+            let dy = i32::from(down) - i32::from(up);
+            if dx != 0 || dy != 0 {
+                move_virtual_cursor(&app, dx, dy);
+            }
+
+            let tab = virtual_key_down(0x09);
+            if tab && !was_tab {
+                emit_virtual_cursor_action(&app, "target_next");
+            }
+            was_tab = tab;
+
+            let activate =
+                virtual_key_down(0x0D) || virtual_key_down(0x20) || virtual_key_down(0x65);
+            if activate && !was_activate {
+                pending_activate = true;
+                controls_clear_since = None;
+            }
+            was_activate = activate;
+
+            let controls_down = up || left || down || right || tab || activate;
+            if pending_activate {
+                if controls_down {
+                    controls_clear_since = None;
+                } else {
+                    let now = Instant::now();
+                    let clear_since = controls_clear_since.get_or_insert(now);
+                    if now.duration_since(*clear_since) >= Duration::from_millis(90) {
+                        emit_virtual_cursor_action(&app, "activate");
+                        pending_activate = false;
+                        controls_clear_since = None;
+                    }
+                }
+            }
+
+            let escape = virtual_key_down(0x1B);
+            if escape && !was_escape {
+                if !clear_virtual_cursor_window_move(&app) {
+                    let _ = set_virtual_cursor_enabled(&app, false);
+                }
+                pending_activate = false;
+                controls_clear_since = None;
+            }
+            was_escape = escape;
+
+            thread::sleep(Duration::from_millis(55));
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn start_virtual_cursor_keyboard_poll(_app: tauri::AppHandle) {}
+
+#[cfg(windows)]
+fn xinput_button_down(buttons: u16, button: u16) -> bool {
+    buttons & button != 0
+}
+
+#[cfg(windows)]
+fn normalized_gamepad_axis(value: i16) -> f64 {
+    let deadzone = XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE as f64;
+    let raw = value as i32;
+    let magnitude = raw.abs() as f64;
+    if magnitude <= deadzone {
+        return 0.0;
+    }
+    let sign = if raw < 0 { -1.0 } else { 1.0 };
+    let normalized = ((magnitude - deadzone) / (32767.0 - deadzone)).clamp(0.0, 1.0);
+    sign * normalized.powf(1.25)
+}
+
+#[cfg(windows)]
+fn first_connected_xinput_state() -> Option<XINPUT_STATE> {
+    for index in 0..4 {
+        let mut state: XINPUT_STATE = unsafe { std::mem::zeroed() };
+        let result = unsafe { XInputGetState(index, &mut state) };
+        if result == 0 {
+            return Some(state);
+        }
+    }
+    None
+}
+
+fn exit_virtual_cursor_text_entry(app: &tauri::AppHandle, source: &str) {
+    VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.store(false, Ordering::Relaxed);
+    let _ = app.emit(
+        "virtual-cursor-exit-text-entry",
+        serde_json::json!({ "source": source }),
+    );
+}
+
+fn clear_virtual_cursor_window_move(app: &tauri::AppHandle) -> bool {
+    let mut was_moving = false;
+    if let Ok(mut state) = virtual_cursor_state().lock() {
+        was_moving = state.moving_window.is_some();
+        state.moving_window = None;
+    }
+    if was_moving {
+        let _ = emit_virtual_cursor_render(app);
+    }
+    was_moving
+}
+
+#[cfg(windows)]
+fn start_virtual_cursor_gamepad_poll(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut was_modifier = false;
+        let mut was_a = false;
+        let mut was_b = false;
+        let mut was_x = false;
+        let mut was_y = false;
+
+        loop {
+            let Some(state) = first_connected_xinput_state() else {
+                was_modifier = false;
+                was_a = false;
+                was_b = false;
+                was_x = false;
+                was_y = false;
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            };
+
+            let gamepad = state.Gamepad;
+            let buttons = gamepad.wButtons;
+            let modifier = xinput_button_down(buttons, XINPUT_GAMEPAD_LEFT_SHOULDER)
+                && xinput_button_down(buttons, XINPUT_GAMEPAD_RIGHT_SHOULDER);
+
+            if !modifier {
+                was_modifier = false;
+                was_a = false;
+                was_b = false;
+                was_x = false;
+                was_y = false;
+                thread::sleep(Duration::from_millis(35));
+                continue;
+            }
+
+            if !was_modifier {
+                let _ = set_virtual_cursor_enabled(&app, true);
+            }
+            was_modifier = true;
+
+            let b = xinput_button_down(buttons, XINPUT_GAMEPAD_B);
+            if b && !was_b {
+                if VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.load(Ordering::Relaxed) {
+                    exit_virtual_cursor_text_entry(&app, "gamepad-b");
+                } else if !clear_virtual_cursor_window_move(&app) {
+                    let _ = set_virtual_cursor_enabled(&app, false);
+                }
+            }
+            was_b = b;
+
+            if VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(35));
+                continue;
+            }
+
+            let a = xinput_button_down(buttons, XINPUT_GAMEPAD_A);
+            if a && !was_a {
+                emit_virtual_cursor_action(&app, "activate");
+            }
+            was_a = a;
+
+            let x = xinput_button_down(buttons, XINPUT_GAMEPAD_X);
+            if x && !was_x {
+                let _ = show_tasks_window(app.clone());
+                let _ = set_virtual_cursor_active_window(app.clone(), "tasks".to_string());
+            }
+            was_x = x;
+
+            let y = xinput_button_down(buttons, XINPUT_GAMEPAD_Y);
+            if y && !was_y {
+                let _ = show_search_window(app.clone());
+                let _ = set_virtual_cursor_active_window(app.clone(), "search".to_string());
+            }
+            was_y = y;
+
+            let mut dx = normalized_gamepad_axis(gamepad.sThumbLX) * VIRTUAL_CURSOR_GAMEPAD_STEP;
+            let mut dy = -normalized_gamepad_axis(gamepad.sThumbLY) * VIRTUAL_CURSOR_GAMEPAD_STEP;
+
+            if xinput_button_down(buttons, XINPUT_GAMEPAD_DPAD_LEFT) {
+                dx -= VIRTUAL_CURSOR_STEP;
+            }
+            if xinput_button_down(buttons, XINPUT_GAMEPAD_DPAD_RIGHT) {
+                dx += VIRTUAL_CURSOR_STEP;
+            }
+            if xinput_button_down(buttons, XINPUT_GAMEPAD_DPAD_UP) {
+                dy -= VIRTUAL_CURSOR_STEP;
+            }
+            if xinput_button_down(buttons, XINPUT_GAMEPAD_DPAD_DOWN) {
+                dy += VIRTUAL_CURSOR_STEP;
+            }
+
+            move_virtual_cursor_by(&app, dx, dy);
+            thread::sleep(Duration::from_millis(24));
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn start_virtual_cursor_gamepad_poll(_app: tauri::AppHandle) {}
 
 fn park_window_offscreen(window: &tauri::WebviewWindow) {
     let _ = window.set_position(PhysicalPosition::new(-32000, -32000));
@@ -204,6 +938,154 @@ fn force_companion_window_repaint(window: &tauri::WebviewWindow, x: i32, y: i32)
     );
     let _ = window.emit("companion-window-shown", ());
     dismiss_input_experience_windows();
+}
+
+#[cfg(windows)]
+fn force_companion_window_focus(window: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            let hwnd = hwnd.0 as _;
+            let current_thread = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+            let target_thread =
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                    hwnd,
+                    std::ptr::null_mut(),
+                );
+            let foreground = windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+            let foreground_thread = if foreground.is_null() {
+                0
+            } else {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                    foreground,
+                    std::ptr::null_mut(),
+                )
+            };
+
+            if foreground_thread != 0 && foreground_thread != current_thread {
+                windows_sys::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    foreground_thread,
+                    1,
+                );
+            }
+            if target_thread != 0 && target_thread != current_thread {
+                windows_sys::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    target_thread,
+                    1,
+                );
+            }
+
+            windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
+            );
+            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
+                    | windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                    | windows_sys::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
+            );
+            windows_sys::Win32::UI::WindowsAndMessaging::BringWindowToTop(hwnd);
+            windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+
+            if target_thread != 0 && target_thread != current_thread {
+                windows_sys::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    target_thread,
+                    0,
+                );
+            }
+            if foreground_thread != 0 && foreground_thread != current_thread {
+                windows_sys::Win32::System::Threading::AttachThreadInput(
+                    current_thread,
+                    foreground_thread,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn force_companion_window_focus(_window: &tauri::WebviewWindow) {}
+
+#[cfg(windows)]
+fn click_screen_point(screen_x: i32, screen_y: i32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEINPUT,
+    };
+
+    let mut previous = POINT { x: 0, y: 0 };
+    let has_previous =
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut previous) != 0 };
+
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(screen_x, screen_y);
+    }
+    thread::sleep(Duration::from_millis(18));
+
+    let inputs = [
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_LEFTDOWN,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_LEFTUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    thread::sleep(Duration::from_millis(18));
+
+    if has_previous {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(previous.x, previous.y);
+        }
+    }
+
+    if sent != inputs.len() as u32 {
+        return Err("SendInput did not deliver the virtual cursor click".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn click_screen_point(_screen_x: i32, _screen_y: i32) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -377,7 +1259,9 @@ fn show_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = tasks.set_always_on_top(true);
     tasks.show().map_err(|err| err.to_string())?;
     force_companion_window_repaint(&tasks, x, y);
-    tasks.set_focus().map_err(|err| err.to_string())
+    let result = tasks.set_focus().map_err(|err| err.to_string());
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
 }
 
 #[tauri::command]
@@ -391,7 +1275,9 @@ fn show_search_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = search.set_always_on_top(true);
     search.show().map_err(|err| err.to_string())?;
     force_companion_window_repaint(&search, x, y);
-    search.set_focus().map_err(|err| err.to_string())
+    let result = search.set_focus().map_err(|err| err.to_string());
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
 }
 
 #[tauri::command]
@@ -399,7 +1285,9 @@ fn hide_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
     let Some(tasks) = app.get_webview_window("tasks") else {
         return Ok(());
     };
-    hide_companion_window(&tasks)
+    let result = hide_companion_window(&tasks);
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
 }
 
 #[tauri::command]
@@ -407,7 +1295,33 @@ fn hide_search_window(app: tauri::AppHandle) -> Result<(), String> {
     let Some(search) = app.get_webview_window("search") else {
         return Ok(());
     };
-    hide_companion_window(&search)
+    let result = hide_companion_window(&search);
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
+}
+
+#[tauri::command]
+fn toggle_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
+    let tasks = ensure_tasks_window(&app)?;
+    if tasks.is_visible().unwrap_or(false) {
+        let result = hide_companion_window(&tasks);
+        let _ = emit_virtual_cursor_frames_changed(&app);
+        result
+    } else {
+        show_tasks_window(app)
+    }
+}
+
+#[tauri::command]
+fn toggle_search_window(app: tauri::AppHandle) -> Result<(), String> {
+    let search = ensure_search_window(&app)?;
+    if search.is_visible().unwrap_or(false) {
+        let result = hide_companion_window(&search);
+        let _ = emit_virtual_cursor_frames_changed(&app);
+        result
+    } else {
+        show_search_window(app)
+    }
 }
 
 #[tauri::command]
@@ -455,15 +1369,553 @@ fn set_main_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(
     set_capture_protection_state(&app, excluded)
 }
 
+#[tauri::command]
+fn set_virtual_cursor_global_controls(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    set_virtual_cursor_global_controls_state(&app, enabled)
+}
+
+#[tauri::command]
+fn set_virtual_cursor_text_entry(active: bool) -> Result<(), String> {
+    VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.store(active, Ordering::Relaxed);
+    if active {
+        if let Ok(mut state) = virtual_cursor_state().lock() {
+            state.moving_window = None;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_virtual_cursor_window_move(
+    app: tauri::AppHandle,
+    label: String,
+    active: bool,
+) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported virtual cursor window".to_string()),
+    };
+
+    if active {
+        let Some(window) = app.get_webview_window(safe_label) else {
+            return Err(format!("{safe_label} window not found"));
+        };
+        if !window.is_visible().unwrap_or(false) {
+            return Err(format!("{safe_label} window is hidden"));
+        }
+    }
+
+    {
+        let mut state = virtual_cursor_state()
+            .lock()
+            .map_err(|_| "virtual cursor state poisoned".to_string())?;
+        if active {
+            state.active_window = safe_label.to_string();
+            state.moving_window = Some(safe_label.to_string());
+            state.initialized = true;
+        } else if state.moving_window.as_deref() == Some(safe_label) {
+            state.moving_window = None;
+        }
+    }
+
+    emit_virtual_cursor_render(&app)
+}
+
+#[tauri::command]
+fn set_virtual_cursor_active_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported virtual cursor window".to_string()),
+    };
+    let frames = collect_virtual_cursor_window_frames(&app)?;
+    let Some(frame) = frames.iter().find(|frame| frame.label == safe_label) else {
+        return Ok(());
+    };
+
+    {
+        let mut state = virtual_cursor_state()
+            .lock()
+            .map_err(|_| "virtual cursor state poisoned".to_string())?;
+        state.active_window = safe_label.to_string();
+        if state.moving_window.as_deref() != Some(safe_label) {
+            state.moving_window = None;
+        }
+        state.initialized = true;
+        let (local_width, local_height) = frame_local_size(frame);
+        state.local_x = local_width / 2.0;
+        state.local_y = local_height / 2.0;
+        let scale = if frame.scale_factor > 0.0 {
+            frame.scale_factor
+        } else {
+            1.0
+        };
+        state.screen_x = frame.x as f64 + state.local_x * scale;
+        state.screen_y = frame.y as f64 + state.local_y * scale;
+        clamp_virtual_cursor_to_world(&mut state, &frames);
+    }
+
+    emit_virtual_cursor_render(&app)
+}
+
+#[tauri::command]
+fn set_virtual_cursor_window_position(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported virtual cursor window".to_string()),
+    };
+    let frames = collect_virtual_cursor_window_frames(&app)?;
+    let Some(frame) = frames.iter().find(|frame| frame.label == safe_label) else {
+        return Ok(());
+    };
+
+    {
+        let mut state = virtual_cursor_state()
+            .lock()
+            .map_err(|_| "virtual cursor state poisoned".to_string())?;
+        let (width, height) = frame_local_size(frame);
+        let local_x = x.clamp(
+            VIRTUAL_CURSOR_SCREEN_MARGIN,
+            width - VIRTUAL_CURSOR_SCREEN_MARGIN,
+        );
+        let local_y = y.clamp(
+            VIRTUAL_CURSOR_SCREEN_MARGIN,
+            height - VIRTUAL_CURSOR_SCREEN_MARGIN,
+        );
+        let scale = if frame.scale_factor > 0.0 {
+            frame.scale_factor
+        } else {
+            1.0
+        };
+        state.active_window = safe_label.to_string();
+        if state.moving_window.as_deref() != Some(safe_label) {
+            state.moving_window = None;
+        }
+        state.initialized = true;
+        state.local_x = local_x;
+        state.local_y = local_y;
+        state.screen_x = frame.x as f64 + local_x * scale;
+        state.screen_y = frame.y as f64 + local_y * scale;
+        clamp_virtual_cursor_to_world(&mut state, &frames);
+    }
+
+    emit_virtual_cursor_render(&app)
+}
+
+#[tauri::command]
+fn focus_virtual_cursor_text_entry(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported companion window".to_string()),
+    };
+
+    let Some(window) = app.get_webview_window(safe_label) else {
+        return Err(format!("{safe_label} window not found"));
+    };
+
+    VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE.store(true, Ordering::Relaxed);
+    if safe_label != "main" {
+        apply_current_capture_protection(&window);
+        let _ = window.set_always_on_top(true);
+    }
+    window.show().map_err(|err| err.to_string())?;
+    let _ = window.set_focus();
+    force_companion_window_focus(&window);
+
+    let position = window.outer_position().map_err(|err| err.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+    let screen_x = (position.x as f64 + x * scale).round() as i32;
+    let screen_y = (position.y as f64 + y * scale).round() as i32;
+    click_screen_point(screen_x, screen_y)?;
+
+    let _ = window.set_focus();
+    force_companion_window_focus(&window);
+    let _ = window.eval("window.focus();");
+    Ok(())
+}
+
+#[tauri::command]
+fn click_virtual_cursor_position(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported companion window".to_string()),
+    };
+
+    let Some(window) = app.get_webview_window(safe_label) else {
+        return Err(format!("{safe_label} window not found"));
+    };
+
+    if safe_label != "main" {
+        apply_current_capture_protection(&window);
+        let _ = window.set_always_on_top(true);
+    }
+    window.show().map_err(|err| err.to_string())?;
+
+    let position = window.outer_position().map_err(|err| err.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+    let screen_x = (position.x as f64 + x * scale).round() as i32;
+    let screen_y = (position.y as f64 + y * scale).round() as i32;
+    click_screen_point(screen_x, screen_y)
+}
+
+#[tauri::command]
+fn focus_companion_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    let safe_label = match label.as_str() {
+        "main" => "main",
+        "tasks" => "tasks",
+        "search" => "search",
+        _ => return Err("unsupported companion window".to_string()),
+    };
+
+    let Some(window) = app.get_webview_window(safe_label) else {
+        return Err(format!("{safe_label} window not found"));
+    };
+
+    if safe_label != "main" {
+        apply_current_capture_protection(&window);
+        let _ = window.set_always_on_top(true);
+    }
+
+    window.show().map_err(|err| err.to_string())?;
+    let result = window.set_focus().map_err(|err| err.to_string());
+    force_companion_window_focus(&window);
+    result
+}
+
+fn collect_virtual_cursor_window_frames(
+    app: &tauri::AppHandle,
+) -> Result<Vec<VirtualCursorWindowFrame>, String> {
+    let mut frames = Vec::new();
+    for label in ["main", "tasks", "search"] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        let visible = window.is_visible().unwrap_or(false);
+        if !visible {
+            continue;
+        }
+        let position = window.outer_position().map_err(|err| err.to_string())?;
+        let size = window.outer_size().map_err(|err| err.to_string())?;
+        if position.x < -10000 || position.y < -10000 || size.width == 0 || size.height == 0 {
+            continue;
+        }
+        frames.push(VirtualCursorWindowFrame {
+            label,
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            scale_factor: window.scale_factor().unwrap_or(1.0),
+            visible,
+        });
+    }
+    Ok(frames)
+}
+
+fn pick_virtual_cursor_transfer_target(
+    frames: &[VirtualCursorWindowFrame],
+    source: &VirtualCursorWindowFrame,
+    edge: &str,
+    screen_x: f64,
+    screen_y: f64,
+) -> Option<VirtualCursorWindowFrame> {
+    let source_left = source.x as f64;
+    let source_top = source.y as f64;
+    let source_right = source_left + source.width as f64;
+    let source_bottom = source_top + source.height as f64;
+    let source_center_x = source_left + source.width as f64 / 2.0;
+    let source_center_y = source_top + source.height as f64 / 2.0;
+
+    let candidates = frames.iter().filter(|frame| frame.label != source.label);
+    let containing = candidates.clone().find(|frame| {
+        let left = frame.x as f64;
+        let top = frame.y as f64;
+        screen_x >= left
+            && screen_x <= left + frame.width as f64
+            && screen_y >= top
+            && screen_y <= top + frame.height as f64
+    });
+    if let Some(frame) = containing {
+        return Some(frame.clone());
+    }
+
+    frames
+        .iter()
+        .filter(|frame| frame.label != source.label)
+        .map(|frame| {
+            let left = frame.x as f64;
+            let top = frame.y as f64;
+            let right = left + frame.width as f64;
+            let bottom = top + frame.height as f64;
+            let center_x = left + frame.width as f64 / 2.0;
+            let center_y = top + frame.height as f64 / 2.0;
+
+            let (wrong_direction, main_axis_gap, cross_axis_gap) = match edge {
+                "left" => (
+                    center_x > source_center_x + 24.0,
+                    (source_left - right).max(0.0),
+                    if screen_y < top {
+                        top - screen_y
+                    } else if screen_y > bottom {
+                        screen_y - bottom
+                    } else {
+                        0.0
+                    },
+                ),
+                "right" => (
+                    center_x < source_center_x - 24.0,
+                    (left - source_right).max(0.0),
+                    if screen_y < top {
+                        top - screen_y
+                    } else if screen_y > bottom {
+                        screen_y - bottom
+                    } else {
+                        0.0
+                    },
+                ),
+                "up" => (
+                    center_y > source_center_y + 24.0,
+                    (source_top - bottom).max(0.0),
+                    if screen_x < left {
+                        left - screen_x
+                    } else if screen_x > right {
+                        screen_x - right
+                    } else {
+                        0.0
+                    },
+                ),
+                "down" => (
+                    center_y < source_center_y - 24.0,
+                    (top - source_bottom).max(0.0),
+                    if screen_x < left {
+                        left - screen_x
+                    } else if screen_x > right {
+                        screen_x - right
+                    } else {
+                        0.0
+                    },
+                ),
+                _ => (true, 0.0, 0.0),
+            };
+
+            let center_distance = ((center_x - source_center_x).powi(2)
+                + (center_y - source_center_y).powi(2))
+            .sqrt();
+            let score = main_axis_gap * 2.0
+                + cross_axis_gap
+                + frame_distance_to_point(frame, screen_x, screen_y) * 0.25
+                + center_distance * 0.05
+                + if wrong_direction { 20_000.0 } else { 0.0 };
+            (score, frame.clone())
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, frame)| frame)
+}
+
+fn emit_virtual_cursor_frames_changed(app: &tauri::AppHandle) -> Result<(), String> {
+    let frames = collect_virtual_cursor_window_frames(app)?;
+    if let Ok(mut state) = virtual_cursor_state().lock() {
+        anchor_virtual_cursor_to_active_frame(&mut state, &frames);
+    }
+    let result = app
+        .emit(
+            "virtual-cursor-frames-changed",
+            serde_json::json!({ "frames": frames }),
+        )
+        .map_err(|err| err.to_string());
+    let _ = emit_virtual_cursor_render(app);
+    result
+}
+
+#[tauri::command]
+fn virtual_cursor_window_frames(
+    app: tauri::AppHandle,
+) -> Result<Vec<VirtualCursorWindowFrame>, String> {
+    collect_virtual_cursor_window_frames(&app)
+}
+
+#[tauri::command]
+fn virtual_cursor_transfer_window(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+    source: String,
+    id: String,
+) -> Result<(), String> {
+    match label.as_str() {
+        "main" | "tasks" | "search" => {}
+        _ => return Err("unsupported virtual cursor transfer target".to_string()),
+    }
+
+    let payload = serde_json::json!({
+        "window": label,
+        "x": x,
+        "y": y,
+        "source": source,
+        "id": id,
+    });
+    let _ = app.emit("virtual-cursor-transfer", payload.clone());
+    app.emit_to(label.as_str(), "virtual-cursor-transfer", payload)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn virtual_cursor_transfer_at_edge(
+    app: tauri::AppHandle,
+    source: String,
+    edge: String,
+    x_ratio: f64,
+    y_ratio: f64,
+    id: String,
+) -> Result<Option<String>, String> {
+    match source.as_str() {
+        "main" | "tasks" | "search" => {}
+        _ => return Err("unsupported virtual cursor source".to_string()),
+    }
+    match edge.as_str() {
+        "left" | "right" | "up" | "down" => {}
+        _ => return Err("unsupported virtual cursor edge".to_string()),
+    }
+
+    let frames = collect_virtual_cursor_window_frames(&app)?;
+    let Some(source_frame) = frames.iter().find(|frame| frame.label == source.as_str()) else {
+        return Ok(None);
+    };
+    if frames.len() <= 1 {
+        return Ok(None);
+    }
+
+    let source_left = source_frame.x as f64;
+    let source_top = source_frame.y as f64;
+    let source_width = source_frame.width as f64;
+    let source_height = source_frame.height as f64;
+    let cursor_screen_x = match edge.as_str() {
+        "left" => source_left - 1.0,
+        "right" => source_left + source_width + 1.0,
+        _ => source_left + x_ratio.clamp(0.0, 1.0) * source_width,
+    };
+    let cursor_screen_y = match edge.as_str() {
+        "up" => source_top - 1.0,
+        "down" => source_top + source_height + 1.0,
+        _ => source_top + y_ratio.clamp(0.0, 1.0) * source_height,
+    };
+
+    let Some(target) = pick_virtual_cursor_transfer_target(
+        &frames,
+        source_frame,
+        edge.as_str(),
+        cursor_screen_x,
+        cursor_screen_y,
+    ) else {
+        return Ok(None);
+    };
+
+    let target_scale = if target.scale_factor > 0.0 {
+        target.scale_factor
+    } else {
+        1.0
+    };
+    let target_width = (target.width as f64 / target_scale).max(24.0);
+    let target_height = (target.height as f64 / target_scale).max(24.0);
+    let local_x =
+        ((cursor_screen_x - target.x as f64) / target_scale).clamp(12.0, target_width - 12.0);
+    let local_y =
+        ((cursor_screen_y - target.y as f64) / target_scale).clamp(12.0, target_height - 12.0);
+    let target_label = target.label.to_string();
+
+    let active_payload = serde_json::json!({
+        "window": target_label.clone(),
+        "source": source.clone(),
+    });
+    let _ = app.emit("virtual-cursor-active-window", active_payload.clone());
+    let _ = app.emit_to(target.label, "virtual-cursor-active-window", active_payload);
+
+    let transfer_payload = serde_json::json!({
+        "window": target_label.clone(),
+        "x": local_x,
+        "y": local_y,
+        "source": source.clone(),
+        "id": id,
+    });
+    let _ = app.emit("virtual-cursor-transfer", transfer_payload.clone());
+    app.emit_to(target.label, "virtual-cursor-transfer", transfer_payload)
+        .map_err(|err| err.to_string())?;
+
+    Ok(Some(target_label))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .on_window_event(|window, event| match event {
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                if matches!(window.label(), "main" | "tasks" | "search") {
+                    let _ = emit_virtual_cursor_frames_changed(window.app_handle());
+                }
+            }
+            _ => {}
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
+                        if VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed) {
+                            if let Some(payload) = virtual_cursor_control_payload(shortcut.key) {
+                                match payload.get("type").and_then(|value| value.as_str()) {
+                                    Some("move") => {
+                                        let dx = payload
+                                            .get("dx")
+                                            .and_then(|value| value.as_i64())
+                                            .unwrap_or(0)
+                                            as i32;
+                                        let dy = payload
+                                            .get("dy")
+                                            .and_then(|value| value.as_i64())
+                                            .unwrap_or(0)
+                                            as i32;
+                                        move_virtual_cursor(app, dx, dy);
+                                    }
+                                    Some("target_next") => {
+                                        emit_virtual_cursor_action(app, "target_next");
+                                    }
+                                    Some("activate") => {
+                                        emit_virtual_cursor_action(app, "activate");
+                                    }
+                                    Some("disable") => {
+                                        let _ = set_virtual_cursor_enabled(app, false);
+                                    }
+                                    _ => {}
+                                }
+                                return;
+                            }
+                        }
                         match shortcut.key {
                             Code::F4 => {
                                 toggle_capture_protection_state(app.clone());
@@ -486,6 +1938,13 @@ pub fn run() {
                             Code::F10 => {
                                 let _ = app.emit("clear-hud-hotkey", ());
                             }
+                            Code::F11 => {
+                                if let Some(main) = app.get_webview_window("main") {
+                                    let _ = main.show();
+                                    let _ = main.set_focus();
+                                }
+                                let _ = app.emit("virtual-cursor-toggle-request", ());
+                            }
                             _ => {}
                         }
                     } else if event.state() == ShortcutState::Released && shortcut.key == Code::F8 {
@@ -496,6 +1955,8 @@ pub fn run() {
         )
         .setup(|app| {
             dismiss_input_experience_windows();
+            start_virtual_cursor_keyboard_poll(app.handle().clone());
+            start_virtual_cursor_gamepad_poll(app.handle().clone());
 
             // 註冊全域快捷鍵
             for key in [
@@ -506,6 +1967,7 @@ pub fn run() {
                 Code::F8,
                 Code::F9,
                 Code::F10,
+                Code::F11,
             ] {
                 let shortcut = Shortcut::new(None, key);
                 let _ = app.global_shortcut().register(shortcut);
@@ -541,11 +2003,24 @@ pub fn run() {
             show_search_window,
             hide_tasks_window,
             hide_search_window,
+            toggle_tasks_window,
+            toggle_search_window,
             game_search_browser_back,
             game_search_browser_forward,
             game_search_browser_reload,
             game_search_browser_navigate,
-            set_main_capture_exclusion
+            set_main_capture_exclusion,
+            set_virtual_cursor_global_controls,
+            set_virtual_cursor_text_entry,
+            set_virtual_cursor_window_move,
+            set_virtual_cursor_active_window,
+            set_virtual_cursor_window_position,
+            focus_virtual_cursor_text_entry,
+            click_virtual_cursor_position,
+            focus_companion_window,
+            virtual_cursor_window_frames,
+            virtual_cursor_transfer_window,
+            virtual_cursor_transfer_at_edge
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

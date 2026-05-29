@@ -6,10 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>任務紀錄</title>
   <link rel="stylesheet" href="tasks.css" />
+  <link rel="stylesheet" href="virtualCursor.css" />
 </head>
 
 <body>
-  <div class="task-drag" data-tauri-drag-region>
+  <div class="task-drag" data-tauri-drag-region data-cursor-action="window-move" data-cursor-label="Move window">
     <div class="task-title" data-tauri-drag-region>
       <span class="icon" data-icon="list"></span>
       <span>任務紀錄</span>
@@ -40,7 +41,7 @@
     <input id="searchInput" type="search" placeholder="搜尋任務..." />
   </div>
 
-  <main id="taskList" class="task-list"></main>
+  <main id="taskList" class="task-list" data-cursor-action="scroll-drag" data-cursor-scroll data-cursor-label="Scroll tasks"></main>
 
   <template id="emptyTemplate">
     <section class="empty-state">

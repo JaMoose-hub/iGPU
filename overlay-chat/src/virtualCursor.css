@@ -1,0 +1,137 @@
+.virtual-cursor-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 80ms ease-out, visibility 0s linear 80ms;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window .virtual-cursor-layer {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window::after {
+  content: "Companion Cursor";
+  position: fixed;
+  right: 12px;
+  top: 10px;
+  z-index: 2147482999;
+  padding: 5px 8px;
+  border: 1px solid rgba(111, 231, 255, 0.55);
+  border-radius: 8px;
+  color: #dffbff;
+  background: rgba(7, 16, 22, 0.82);
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0;
+  pointer-events: none;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-window-move::after {
+  content: "Move Window";
+  border-color: rgba(255, 213, 111, 0.68);
+  color: #fff3c7;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-scroll-drag::after {
+  content: "Scroll Drag";
+  border-color: rgba(139, 255, 178, 0.68);
+  color: #d8ffe5;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window {
+  box-shadow:
+    0 0 0 2px rgba(119, 241, 255, 0.56) inset,
+    0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-window-move {
+  box-shadow:
+    0 0 0 2px rgba(255, 213, 111, 0.7) inset,
+    0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-scroll-drag {
+  box-shadow:
+    0 0 0 2px rgba(139, 255, 178, 0.68) inset,
+    0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.virtual-cursor-pointer {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #77f1ff;
+  border-radius: 50%;
+  background: rgba(119, 241, 255, 0.18);
+  box-shadow:
+    0 0 0 4px rgba(119, 241, 255, 0.13),
+    0 0 18px rgba(119, 241, 255, 0.72);
+}
+
+.virtual-cursor-pointer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+.virtual-cursor-target-ring {
+  position: absolute;
+  display: none;
+  border: 2px solid rgba(119, 241, 255, 0.95);
+  border-radius: 9px;
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.32),
+    0 0 18px rgba(119, 241, 255, 0.55);
+  transform: translate(-2px, -2px);
+}
+
+.virtual-cursor-badge {
+  position: absolute;
+  display: none;
+  max-width: 220px;
+  padding: 5px 7px;
+  border: 1px solid rgba(119, 241, 255, 0.44);
+  border-radius: 7px;
+  color: #ecfdff;
+  background: rgba(6, 14, 20, 0.9);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window .virtual-cursor-target {
+  outline: 2px solid rgba(119, 241, 255, 0.92) !important;
+  outline-offset: 2px !important;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-window-move .virtual-cursor-target {
+  outline-color: rgba(255, 213, 111, 0.95) !important;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window.virtual-cursor-scroll-drag .virtual-cursor-target,
+body.virtual-cursor-mode.virtual-cursor-active-window .virtual-cursor-scroll-entry {
+  outline: 2px solid rgba(139, 255, 178, 0.95) !important;
+  outline-offset: 2px !important;
+}
+
+body.virtual-cursor-mode.virtual-cursor-active-window .virtual-cursor-text-entry {
+  outline: 2px solid rgba(255, 225, 132, 0.95) !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 3px rgba(255, 225, 132, 0.18) !important;
+  caret-color: auto !important;
+  user-select: text !important;
+}

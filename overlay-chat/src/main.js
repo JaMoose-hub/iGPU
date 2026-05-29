@@ -1,3 +1,5 @@
+import { initVirtualCursor } from "./virtualCursor.js";
+
 document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.();
@@ -18,13 +20,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   const chatWindow = document.getElementById("chatWindow");
   const dragBar = document.querySelector(".drag-bar");
   const screenshotBtn = document.getElementById("screenshotBtn");
+  const captureDisplaySelect = document.getElementById("captureDisplaySelect");
   const taskCaptureBtn = document.getElementById("taskCaptureBtn");
   const perfBtn = document.getElementById("perfBtn");
   const voiceBtn = document.getElementById("voiceBtn");
   const gameSelect = document.getElementById("gameSelect");
+  const gameAutoBtn = document.getElementById("gameAutoBtn");
   const hudBtn = document.getElementById("hudBtn");
   const hudTestBtn = document.getElementById("hudTestBtn");
   const protectBtn = document.getElementById("protectBtn");
+  const virtualCursorBtn = document.getElementById("virtualCursorBtn");
   const resizeGrip = document.getElementById("resizeGrip");
   const opacitySlider = document.getElementById("opacitySlider");
   const opacityValue = document.getElementById("opacityValue");
@@ -50,6 +55,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1Z"/>',
     "shield-off": '<path d="M2 2 22 22"/><path d="M18.7 18.7A13 13 0 0 1 12.34 22a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c1.2 0 2.6-.43 3.9-1.08"/><path d="M11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1v7a8.7 8.7 0 0 1-.56 3.14"/>',
     square: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
+    cursor: '<path d="m4 4 7.07 16.97 2.51-7.39 7.39-2.51Z"/><path d="m13.58 13.58 5.84 5.84"/>',
     target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
@@ -83,6 +89,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let pendingCaptureSource = null;
   let abortController = null;
   let isSending = false;
+  let isSendInFlight = false;
+  let isScreenshotInFlight = false;
   let isVoiceRecording = false;
   let isVoiceModeEnabled = false;
   let isVoiceBusy = false;
@@ -101,11 +109,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   let liveVoiceInterimText = "";
   let liveVoiceSent = false;
   let liveVoiceStopRequested = false;
+  let gameDetectMode = localStorage.getItem("game-detect-mode") === "manual" ? "manual" : "auto";
+  let lastDetectedGameKey = "";
   let skipVoiceBlobTranscription = false;
   let lastHudError = "";
   const voiceSendQueue = [];
   let isVoiceQueueRunning = false;
   let lastVoiceHotkeyToggleAt = 0;
+  let lastVoiceToggleAt = 0;
   let lastSentVoiceText = "";
   let lastSentVoiceAt = 0;
   const storedProtectMode = localStorage.getItem("protect-mode");
@@ -150,6 +161,32 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   updateProtectButton();
+
+  const virtualCursor = initVirtualCursor({
+    events,
+    invoke,
+    windowLabel: "main",
+    controller: true,
+    onStateChange: (enabled) => {
+      virtualCursorBtn?.classList.toggle("active", enabled);
+      if (virtualCursorBtn) {
+        setButtonContent(virtualCursorBtn, "cursor", enabled ? "Cursor" : "Cursor");
+        virtualCursorBtn.title = enabled
+          ? "Companion virtual cursor on (F11). WASD/arrows move, Tab targets, Enter clicks, Esc exits."
+          : "Companion virtual cursor (F11)";
+      }
+    }
+  });
+  virtualCursorBtn?.addEventListener("click", () => virtualCursor.toggle());
+
+  const setVirtualCursorActiveWindow = async (label) => {
+    virtualCursor.setActiveWindow(label);
+    await events.emit?.("virtual-cursor-active-window", { window: label, source: "main" }).catch(() => {});
+  };
+
+  const exitVirtualCursorTextEntry = async (source = "main") => {
+    await events.emit?.("virtual-cursor-exit-text-entry", { source }).catch(() => {});
+  };
 
   const toggleCaptureProtection = async () => {
     captureProtectionEnabled = !captureProtectionEnabled;
@@ -316,12 +353,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     appendMessage(ok ? "HUD test sent." : `HUD test failed. ${lastHudError}`, "bot");
   });
 
+  let chatScrollFrame = 0;
+  const scrollChatToBottom = () => {
+    if (!chatWindow) return;
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    if (chatScrollFrame) window.cancelAnimationFrame(chatScrollFrame);
+    chatScrollFrame = window.requestAnimationFrame(() => {
+      chatScrollFrame = 0;
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    });
+  };
+
+  if (chatWindow && typeof MutationObserver !== "undefined") {
+    const observer = new MutationObserver(scrollChatToBottom);
+    observer.observe(chatWindow, { childList: true, subtree: true, characterData: true });
+  }
+
   const appendMessage = (text, sender) => {
     const msgDiv = document.createElement("div");
     msgDiv.classList.add("message", sender === "user" ? "user-message" : "bot-message");
     msgDiv.textContent = text;
     chatWindow.appendChild(msgDiv);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
+    scrollChatToBottom();
     return msgDiv;
   };
 
@@ -355,9 +408,46 @@ document.addEventListener("DOMContentLoaded", async () => {
   const shouldAutoCapture = (text) => AUTO_CAPTURE_RE.test(text || "");
   const shouldTaskIntent = (text) => TASK_INTENT_RE.test(text || "") || VOICE_TASK_INTENT_RE.test(text || "");
 
+  const selectedCaptureMonitor = () => {
+    const value = captureDisplaySelect?.value || localStorage.getItem("capture-monitor") || "auto";
+    return value === "auto" ? null : value;
+  };
+
+  const loadCaptureMonitors = async () => {
+    if (!captureDisplaySelect) return;
+    const saved = localStorage.getItem("capture-monitor") || "auto";
+    captureDisplaySelect.innerHTML = '<option value="auto">Auto</option>';
+    try {
+      const response = await fetch(`${API_BASE}/monitors`);
+      if (!response.ok) throw new Error(`Monitor API returned ${response.status}`);
+      const data = await response.json();
+      const monitors = Array.isArray(data.monitors) ? data.monitors : [];
+      for (const monitor of monitors.filter((item) => !item.aggregate)) {
+        const option = document.createElement("option");
+        option.value = String(monitor.index);
+        option.textContent = `S${monitor.index}`;
+        option.title = `${monitor.label} @ ${monitor.left},${monitor.top}`;
+        captureDisplaySelect.appendChild(option);
+      }
+      if ([...captureDisplaySelect.options].some((option) => option.value === saved)) {
+        captureDisplaySelect.value = saved;
+      }
+    } catch (err) {
+      console.warn("Monitor list unavailable:", err);
+    }
+  };
+
   const captureScreen = async (profile = "turbo") => {
-    const redact = captureProtectionEnabled ? 1 : 0;
-    const res = await fetch(`${API_BASE}/screenshot?mode=screen&redact=${redact}&profile=${profile}`);
+    const monitor = selectedCaptureMonitor();
+    const params = new URLSearchParams({
+      mode: monitor ? "screen" : "foreground",
+      // App-initiated captures should always ignore the companion overlay,
+      // including the virtual cursor layer, so the model sees the game.
+      redact: "1",
+      profile
+    });
+    if (monitor) params.set("monitor", monitor);
+    const res = await fetch(`${API_BASE}/screenshot?${params.toString()}`);
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
@@ -374,11 +464,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (imageBase64) {
       const img = document.createElement("img");
       img.src = `data:${mimeType || "image/jpeg"};base64,${imageBase64}`;
+      img.addEventListener("load", scrollChatToBottom, { once: true });
       msgDiv.appendChild(document.createElement("br"));
       msgDiv.appendChild(img);
     }
     chatWindow.appendChild(msgDiv);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
+    scrollChatToBottom();
   };
 
   const TASK_STORAGE_KEY = "igpu-task-log-v1";
@@ -405,18 +496,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
     }
     await events.emit?.("tasks:updated", { tasks: loadTasks() }).catch(() => {});
+    await setVirtualCursorActiveWindow("tasks");
   };
 
-  const openSearchWindow = async (keyword = "") => {
+  const closeTasksWindow = async () => {
+    if (invoke) {
+      await invoke("hide_tasks_window").catch((err) => {
+        appendMessage(`Task close failed: ${err?.message || err}`, "bot");
+      });
+    }
+    await setVirtualCursorActiveWindow("main");
+  };
+
+  const openSearchWindow = async (keyword = "", options = {}) => {
     const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
     localStorage.setItem("currentGameId", game);
     localStorage.setItem("igpu-game-search-pending-keyword", keyword || "");
+    localStorage.setItem("igpu-game-search-auto-run", options.autoSearch ? "true" : "false");
     if (invoke) {
       await invoke("show_search_window").catch((err) => {
         appendMessage(`Search window failed: ${err?.message || err}`, "bot");
       });
     }
-    await events.emit?.("search:context", { game, keyword }).catch(() => {});
+    await events.emit?.("search:context", { game, keyword, autoSearch: Boolean(options.autoSearch) }).catch(() => {});
+    await setVirtualCursorActiveWindow("search");
+  };
+
+  const closeSearchWindow = async () => {
+    localStorage.removeItem("igpu-game-search-pending-keyword");
+    localStorage.removeItem("igpu-game-search-auto-run");
+    if (invoke) {
+      await invoke("hide_search_window").catch((err) => {
+        appendMessage(`Search close failed: ${err?.message || err}`, "bot");
+      });
+    }
+    await setVirtualCursorActiveWindow("main");
   };
 
   tasksBtn?.addEventListener("click", (event) => {
@@ -427,6 +541,216 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.preventDefault();
     openSearchWindow(messageInput?.value || "");
   });
+
+  const normalizeCommandText = (text) => (text || "")
+    .toLowerCase()
+    .replace(/[，。！？、,.!?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const compactCommandText = (text) => normalizeCommandText(text).replace(/\s+/g, "");
+
+  const includesAny = (text, patterns) => patterns.some((pattern) => (
+    pattern instanceof RegExp ? pattern.test(text) : text.includes(pattern)
+  ));
+
+  const hasUiActionPrefix = (text) => includesAny(text, [
+    "\u5e6b\u6211",
+    "\u8acb",
+    "\u53ef\u4ee5",
+    "\u958b",
+    "\u958b\u555f",
+    "\u6253\u958b",
+    "\u95dc",
+    "\u95dc\u9589",
+    "\u5207\u63db",
+    "\u8abf",
+    "\u8a2d",
+    "open",
+    "show",
+    "toggle",
+    "set",
+    "start",
+    "stop",
+    "turn"
+  ]);
+
+  const extractPercent = (text) => {
+    const match = text.match(/(\d{1,3})\s*%?/);
+    if (!match) return null;
+    const numeric = Number(match[1]);
+    if (!Number.isFinite(numeric)) return null;
+    return Math.max(10, Math.min(100, numeric));
+  };
+
+  const extractSearchKeyword = (rawText) => {
+    let keyword = normalizeCommandText(rawText);
+    const cleanup = [
+      /\b(game search|search|google|wiki|youtube)\b/gi,
+      /\b(open|show|find|look up|搜尋|查詢|查|找|攻略|資料|關鍵字)\b/gi,
+      /幫我|請|可以|一下|現在|直接|開啟|打開|用|在|裡面|裡|遊戲/gi
+    ];
+    cleanup.forEach((pattern) => {
+      keyword = keyword.replace(pattern, " ");
+    });
+    return keyword.replace(/\s+/g, " ").trim();
+  };
+
+  const requestedWindowAction = (compact, wantsOn, wantsOff) => {
+    if (wantsOff) return "close";
+    if (includesAny(compact, ["\u5207\u63db", "\u958b\u95dc", "toggle"])) return "toggle";
+    if (wantsOn || includesAny(compact, ["\u986f\u793a", "\u53eb\u51fa", "\u62c9\u51fa", "show"])) return "open";
+    return "open";
+  };
+
+  const setPerfMode = (enabled) => {
+    document.body.classList.toggle("perf-mode", enabled);
+    localStorage.setItem("perf-mode", enabled ? "true" : "false");
+  };
+
+  const handleUiCommand = async (rawText) => {
+    const text = normalizeCommandText(rawText);
+    const compact = compactCommandText(rawText);
+    const directUiTarget = includesAny(compact, [
+      "gamesearch",
+      "\u904a\u6232\u641c\u5c0b",
+      "\u641c\u5c0b\u8996\u7a97",
+      "\u95dc\u9589\u641c\u5c0b",
+      "\u95dc\u6389\u641c\u5c0b",
+      "\u4efb\u52d9\u8996\u7a97",
+      "\u95dc\u9589\u4efb\u52d9",
+      "\u95dc\u6389\u4efb\u52d9",
+      "\u5167\u5bb9\u4fdd\u8b77",
+      "\u4fdd\u8b77\u5167\u5bb9",
+      "\u622a\u5716\u4fdd\u8b77",
+      "\u8a9e\u97f3\u6a21\u5f0f",
+      "\u622a\u5716",
+      "taskwindow",
+      "voice mode",
+      "screenshot"
+    ]);
+    if (!text || (!hasUiActionPrefix(text) && !directUiTarget)) return false;
+
+    const wantsOff = includesAny(compact, ["\u95dc\u9589", "\u95dc\u6389", "\u95dc\u8d77", "\u96b1\u85cf", "\u6536\u8d77", "\u53d6\u6d88", "\u505c\u6b62", "close", "hide", "off", "stop", "disable"]);
+    const wantsOn = includesAny(compact, ["\u958b\u555f", "\u6253\u958b", "\u958b\u8d77", "\u958b", "\u555f\u52d5", "open", "on", "start", "enable"]);
+
+    if (includesAny(compact, ["task", "\u4efb\u52d9", "\u76ee\u6a19\u6e05\u55ae", "\u5f85\u8fa6"]) && includesAny(compact, ["\u8996\u7a97", "\u7a97\u53e3", "\u9762\u677f", "\u958b", "\u95dc", "\u96b1\u85cf", "\u6536\u8d77", "\u986f\u793a", "open", "show", "close", "hide", "toggle"])) {
+      const action = requestedWindowAction(compact, wantsOn, wantsOff);
+      appendUserMessage(rawText);
+      if (action === "close") {
+        await closeTasksWindow();
+        appendMessage("UI command: Task window closed.", "bot");
+      } else if (action === "toggle") {
+        if (invoke) {
+          await invoke("toggle_tasks_window").catch(async () => openTasksWindow());
+        } else {
+          await openTasksWindow();
+        }
+        appendMessage("UI command: Task window toggled.", "bot");
+      } else {
+        await openTasksWindow();
+        appendMessage("UI command: Task window opened.", "bot");
+      }
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["gamesearch", "\u904a\u6232\u641c\u5c0b", "\u653b\u7565", "\u641c\u5c0b", "\u67e5\u8a62", "\u641c\u5c0b\u8996\u7a97", "\u653b\u7565\u8996\u7a97"])) {
+      const keyword = extractSearchKeyword(rawText);
+      appendUserMessage(rawText);
+      if (wantsOff) {
+        await closeSearchWindow();
+        appendMessage("UI command: Game Search closed.", "bot");
+      } else if (includesAny(compact, ["\u5207\u63db", "\u958b\u95dc", "toggle"])) {
+        if (invoke) {
+          await invoke("toggle_search_window").catch(async () => openSearchWindow(keyword, { autoSearch: Boolean(keyword) }));
+        } else {
+          await openSearchWindow(keyword, { autoSearch: Boolean(keyword) });
+        }
+        appendMessage("UI command: Game Search toggled.", "bot");
+      } else {
+        await openSearchWindow(keyword, { autoSearch: Boolean(keyword) });
+        appendMessage(keyword ? `UI command: Searching "${keyword}".` : "UI command: Game Search opened.", "bot");
+      }
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["\u900f\u660e", "opacity"])) {
+      const percent = extractPercent(text);
+      if (percent) {
+        appendUserMessage(rawText);
+        applyOpacity(percent);
+        appendMessage(`UI command: Opacity set to ${percent}%.`, "bot");
+        if (messageInput) messageInput.value = "";
+        return true;
+      }
+    }
+
+    if (includesAny(compact, ["\u5167\u5bb9\u4fdd\u8b77", "\u4fdd\u8b77\u5167\u5bb9", "\u622a\u5716\u4fdd\u8b77", "protection", "protect"])) {
+      appendUserMessage(rawText);
+      if ((wantsOn && !captureProtectionEnabled) || (wantsOff && captureProtectionEnabled) || (!wantsOn && !wantsOff)) {
+        await toggleCaptureProtection();
+      } else {
+        appendMessage(captureProtectionEnabled ? "UI command: Content protection is already on." : "UI command: Content protection is already off.", "bot");
+      }
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["\u622a\u5716", "\u64f7\u53d6\u756b\u9762", "screenshot", "capture"]) && !includesAny(compact, ["\u4efb\u52d9", "task"])) {
+      appendUserMessage(rawText);
+      await takeScreenshot();
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["hud", "\u6a19\u8a18"]) && includesAny(compact, ["\u6e05\u9664", "\u95dc\u6389", "\u6d88\u6389", "clear", "hide"])) {
+      appendUserMessage(rawText);
+      await clearHudOverlay();
+      appendMessage("UI command: HUD cleared.", "bot");
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["hud"]) && includesAny(compact, ["test", "\u6e2c\u8a66"])) {
+      appendUserMessage(rawText);
+      const target = hudTargetFromSource(null);
+      target.imageWidth = Number(target.width);
+      target.imageHeight = Number(target.height);
+      const ok = await showHudOverlay(makeTestOverlay(target), null);
+      appendMessage(ok ? "UI command: HUD test sent." : `UI command: HUD test failed. ${lastHudError}`, "bot");
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["perf", "\u6027\u80fd", "\u6548\u80fd"])) {
+      appendUserMessage(rawText);
+      const enabled = wantsOff ? false : wantsOn ? true : !document.body.classList.contains("perf-mode");
+      setPerfMode(enabled);
+      appendMessage(enabled ? "UI command: Perf mode on." : "UI command: Perf mode off.", "bot");
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    if (includesAny(compact, ["\u8a9e\u97f3", "voice", "mic", "\u9ea5\u514b\u98a8"])) {
+      appendUserMessage(rawText);
+      if (wantsOff) {
+        stopVoiceMode();
+        appendMessage("UI command: Voice mode off.", "bot");
+      } else if (wantsOn) {
+        await startVoiceMode();
+        appendMessage("UI command: Voice mode on.", "bot");
+      } else {
+        toggleVoiceMode();
+        appendMessage("UI command: Voice mode toggled.", "bot");
+      }
+      if (messageInput) messageInput.value = "";
+      return true;
+    }
+
+    return false;
+  };
 
   const addTaskFromAnalysis = (analysis, note, captureSource = null) => {
     const now = new Date().toISOString();
@@ -522,34 +846,158 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       setButtonContent(screenshotBtn, "camera", "Shot");
       screenshotBtn.disabled = false;
-      chatWindow.scrollTop = chatWindow.scrollHeight;
+      scrollChatToBottom();
+    }
+  };
+
+  const GAME_AUTO_CONFIDENCE = 0.55;
+  const isGameAutoMode = () => gameDetectMode !== "manual";
+
+  const gameOptionLabel = (gameId, name = "") => {
+    const label = String(name || "").trim();
+    return label && label.toLowerCase() !== "game" ? label : String(gameId || "").trim();
+  };
+
+  const currentGameLabel = () => {
+    const selected = gameSelect?.selectedOptions?.[0]?.textContent?.trim() || "";
+    return selected && selected.toLowerCase() !== "game" ? selected : (gameSelect?.value || "");
+  };
+
+  const ensureGameOption = (gameId, name = "") => {
+    if (!gameSelect) return null;
+    const value = String(gameId || "").trim();
+    if (!value) return null;
+    let option = Array.from(gameSelect.options).find((item) => item.value === value);
+    if (!option) {
+      option = document.createElement("option");
+      option.value = value;
+      gameSelect.appendChild(option);
+    }
+    const label = gameOptionLabel(value, name);
+    if (label) option.textContent = label;
+    return option;
+  };
+
+  const updateGameAutoButton = (detection = null) => {
+    if (!gameAutoBtn) return;
+    const auto = isGameAutoMode();
+    setButtonContent(gameAutoBtn, auto ? "radio" : "square", auto ? "Auto" : "Manual");
+    gameAutoBtn.classList.toggle("active", auto);
+    if (auto && detection?.game_id) {
+      const confidence = Math.round(Number(detection.confidence || 0) * 100);
+      gameAutoBtn.title = `Auto detect game: ${detection.name || detection.game_id} (${confidence}%)`;
+    } else {
+      gameAutoBtn.title = auto
+        ? "Auto detect game from foreground window"
+        : "Manual game selection; selecting a game teaches auto detection";
+    }
+  };
+
+  const setGameDetectMode = (mode) => {
+    gameDetectMode = mode === "manual" ? "manual" : "auto";
+    localStorage.setItem("game-detect-mode", gameDetectMode);
+    updateGameAutoButton();
+  };
+
+  const applyGameSelection = (gameId, name = "", options = {}) => {
+    if (!gameSelect) return false;
+    const value = String(gameId || "").trim();
+    const previous = gameSelect.value || "";
+    if (value) ensureGameOption(value, name);
+    gameSelect.value = value;
+    localStorage.setItem("currentGameId", value);
+    if (options.emit !== false && (options.forceEmit || previous !== value)) {
+      events.emit?.("search:context", { game: value, source: options.source || "game-select" }).catch(() => {});
+    }
+    return previous !== value;
+  };
+
+  const learnCurrentGameMapping = async (gameId) => {
+    const value = String(gameId || "").trim();
+    if (!value) return null;
+    const resp = await fetch(`${API_BASE}/game-profiles/learn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game_id: value, name: currentGameLabel() || value })
+    });
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => "");
+      throw new Error(`Game learn failed: ${resp.status}${detail ? ` ${detail}` : ""}`);
+    }
+    const data = await resp.json();
+    if (data?.profile?.name) ensureGameOption(value, data.profile.name);
+    updateGameAutoButton(data?.detection || null);
+    return data;
+  };
+
+  const pollActiveGame = async (options = {}) => {
+    if (!gameSelect || !isGameAutoMode()) return null;
+    try {
+      const resp = await fetch(`${API_BASE}/active-game`, { cache: "no-store" });
+      if (!resp.ok) return null;
+      const detection = await resp.json();
+      updateGameAutoButton(detection);
+      const gameId = String(detection?.game_id || "").trim();
+      const confidence = Number(detection?.confidence || 0);
+      if (!gameId || confidence < GAME_AUTO_CONFIDENCE) return detection;
+      const changed = applyGameSelection(gameId, detection.name || gameId, { source: "auto-game" });
+      const key = `${gameId}:${detection.process_name || ""}:${detection.source || ""}`;
+      if (options.announce && (changed || key !== lastDetectedGameKey)) {
+        appendMessage(`Auto game: ${detection.name || gameId}`, "bot");
+      }
+      lastDetectedGameKey = key;
+      return detection;
+    } catch (err) {
+      console.warn("Active game detection unavailable:", err);
+      return null;
     }
   };
 
   const loadGuideGames = async () => {
     if (!gameSelect) return;
     try {
-      const resp = await fetch(`${API_BASE}/guides/games`);
+      const resp = await fetch(`${API_BASE}/game-profiles`);
       const data = await resp.json();
       const savedGameId = localStorage.getItem("currentGameId") || "";
+      const profiles = data.profiles || {};
       gameSelect.innerHTML = '<option value="">Game</option>';
       for (const game of data.games || []) {
-        const option = document.createElement("option");
-        option.value = game;
-        option.textContent = game;
-        gameSelect.appendChild(option);
+        ensureGameOption(game, profiles[game]?.name || game);
       }
+      if (savedGameId) ensureGameOption(savedGameId, profiles[savedGameId]?.name || savedGameId);
       gameSelect.value = savedGameId;
+      updateGameAutoButton();
     } catch (err) {
       console.warn("Guide list unavailable:", err);
+      updateGameAutoButton();
     }
   };
 
   gameSelect?.addEventListener("change", () => {
-    localStorage.setItem("currentGameId", gameSelect.value || "");
-    events.emit?.("search:context", { game: gameSelect.value || "" }).catch(() => {});
+    const gameId = gameSelect.value || "";
+    setGameDetectMode("manual");
+    applyGameSelection(gameId, currentGameLabel(), { source: "manual-game", forceEmit: true });
+    learnCurrentGameMapping(gameId).catch((err) => console.warn("Game profile learn unavailable:", err));
   });
+
+  gameAutoBtn?.addEventListener("click", async () => {
+    const nextMode = isGameAutoMode() ? "manual" : "auto";
+    setGameDetectMode(nextMode);
+    if (nextMode === "auto") {
+      const detection = await pollActiveGame({ announce: true });
+      if (!detection?.game_id) appendMessage("Auto game: no foreground game detected yet.", "bot");
+    } else if (gameSelect?.value) {
+      learnCurrentGameMapping(gameSelect.value).catch((err) => console.warn("Game profile learn unavailable:", err));
+    }
+  });
+
   await loadGuideGames();
+  await pollActiveGame();
+  window.setInterval(() => pollActiveGame(), 3000);
+  captureDisplaySelect?.addEventListener("change", () => {
+    localStorage.setItem("capture-monitor", captureDisplaySelect.value || "auto");
+  });
+  await loadCaptureMonitors();
 
   const setBusy = (busy) => {
     isSending = busy;
@@ -939,7 +1387,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   };
 
-  const toggleVoiceMode = () => {
+  const toggleVoiceMode = (options = {}) => {
+    const source = options?.source || "button";
+    const now = Date.now();
+    const debounceMs = source === "virtual-cursor" ? 900 : 350;
+    if (now - lastVoiceToggleAt < debounceMs) return;
+    lastVoiceToggleAt = now;
     if (isVoiceModeEnabled || isVoiceRecording) {
       stopVoiceMode();
     } else {
@@ -1068,7 +1521,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       const body = {
         message: text,
         game_id: gameSelect?.value || null,
-        use_guides: false,
         use_memory: true
       };
       if (imageBase64) body.image_base64 = imageBase64;
@@ -1119,7 +1571,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           ? "HUD 已標記。"
           : "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
       );
-      chatWindow.scrollTop = chatWindow.scrollHeight;
+      scrollChatToBottom();
     } catch (error) {
       if (error.name === "AbortError") {
         botMsgDiv.textContent += "\n\nStopped.";
@@ -1139,55 +1591,69 @@ document.addEventListener("DOMContentLoaded", async () => {
     let imageMimeType = pendingImageMimeType;
     let captureSource = pendingCaptureSource;
     if (!text && !imageBase64) return;
+    if (isSendInFlight || isSending) return;
+    isSendInFlight = true;
 
-    if (text && shouldTaskIntent(text)) {
-      await createTaskFromContext(text, {
-        imageBase64,
-        imageMimeType,
-        captureSource,
-        capture: true
-      });
-      return;
-    }
+    try {
+      await exitVirtualCursorTextEntry("send");
 
-    if (!imageBase64 && shouldAutoCapture(text)) {
-      const status = appendMessage("Auto-capturing screen...", "bot");
-      try {
-        screenshotBtn.disabled = true;
-        setButtonContent(screenshotBtn, "camera", "Shot...");
-        const data = await captureScreen("turbo");
-        imageBase64 = data.image_base64;
-        imageMimeType = data.mime_type || "image/jpeg";
-        captureSource = data.source || null;
-        const sourceWidth = data.source?.capture_width || data.original_width || data.width;
-        const sourceHeight = data.source?.capture_height || data.original_height || data.height;
-        status.textContent = `Auto-captured ${data.width}x${data.height} from source ${sourceWidth}x${sourceHeight}.`;
-      } catch (err) {
-        status.textContent = `Auto screenshot failed: ${err.message || err}`;
-        setButtonContent(screenshotBtn, "camera", "Shot");
-        screenshotBtn.disabled = false;
+      if (text && !imageBase64 && await handleUiCommand(text)) {
+        clearImagePreview();
         return;
-      } finally {
-        setButtonContent(screenshotBtn, "camera", "Shot");
-        screenshotBtn.disabled = false;
       }
-    }
 
-    messageInput.value = "";
-    clearImagePreview();
-    appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
-    const fixedSourceHint = captureSource?.window_title
-      ? `\n\nScreenshot source window title: ${captureSource.window_title}`
-      : "";
-    await sendToAI(
-      (text || "Analyze this screenshot and give one useful next step.") + fixedSourceHint,
-      imageBase64,
-      captureSource
-    );
+      if (text && shouldTaskIntent(text)) {
+        await createTaskFromContext(text, {
+          imageBase64,
+          imageMimeType,
+          captureSource,
+          capture: true
+        });
+        return;
+      }
+
+      if (!imageBase64 && shouldAutoCapture(text)) {
+        const status = appendMessage("Auto-capturing screen...", "bot");
+        try {
+          screenshotBtn.disabled = true;
+          setButtonContent(screenshotBtn, "camera", "Shot...");
+          const data = await captureScreen("turbo");
+          imageBase64 = data.image_base64;
+          imageMimeType = data.mime_type || "image/jpeg";
+          captureSource = data.source || null;
+          const sourceWidth = data.source?.capture_width || data.original_width || data.width;
+          const sourceHeight = data.source?.capture_height || data.original_height || data.height;
+          status.textContent = `Auto-captured ${data.width}x${data.height} from source ${sourceWidth}x${sourceHeight}.`;
+        } catch (err) {
+          status.textContent = `Auto screenshot failed: ${err.message || err}`;
+          setButtonContent(screenshotBtn, "camera", "Shot");
+          screenshotBtn.disabled = false;
+          return;
+        } finally {
+          setButtonContent(screenshotBtn, "camera", "Shot");
+          screenshotBtn.disabled = false;
+        }
+      }
+
+      messageInput.value = "";
+      clearImagePreview();
+      appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
+      const fixedSourceHint = captureSource?.window_title
+        ? `\n\nScreenshot source window title: ${captureSource.window_title}`
+        : "";
+      await sendToAI(
+        (text || "Analyze this screenshot and give one useful next step.") + fixedSourceHint,
+        imageBase64,
+        captureSource
+      );
+    } finally {
+      isSendInFlight = false;
+    }
   };
 
   const takeScreenshot = async () => {
-    if (screenshotBtn.disabled || isSending) return;
+    if (isScreenshotInFlight || screenshotBtn.disabled || isSending) return;
+    isScreenshotInFlight = true;
     screenshotBtn.disabled = true;
     setButtonContent(screenshotBtn, "camera", "Shot...");
 
@@ -1207,11 +1673,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     } finally {
       setButtonContent(screenshotBtn, "camera", "Shot");
       screenshotBtn.disabled = false;
+      isScreenshotInFlight = false;
     }
   };
 
   sendBtn?.addEventListener("click", () => sendMessage());
   messageInput?.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && !event.shiftKey && !isSending) {
       event.preventDefault();
       sendMessage();
@@ -1226,7 +1694,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   taskCaptureBtn?.addEventListener("click", () => {
     createTaskFromContext(messageInput?.value || "", { capture: true });
   });
-  voiceBtn?.addEventListener("click", toggleVoiceMode);
+  voiceBtn?.addEventListener("virtual-cursor-activate", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleVoiceMode({ source: "virtual-cursor" });
+  });
+  voiceBtn?.addEventListener("click", (event) => {
+    if (!event.isTrusted && (isVoiceModeEnabled || isVoiceRecording || isVoiceStarting)) return;
+    toggleVoiceMode({ source: event.isTrusted ? "button" : "programmatic" });
+  });
 
   dragBar?.addEventListener("mousedown", async (event) => {
     if (event.target.closest(".drag-bar-actions")) return;
