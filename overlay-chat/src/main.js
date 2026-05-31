@@ -14,6 +14,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const maxBtn = document.getElementById("maxBtn");
   const searchBtn = document.getElementById("searchBtn");
   const tasksBtn = document.getElementById("tasksBtn");
+  const gamepathBtn = document.getElementById("gamepathBtn");
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
   const messageInput = document.getElementById("messageInput");
@@ -56,6 +57,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     "shield-off": '<path d="M2 2 22 22"/><path d="M18.7 18.7A13 13 0 0 1 12.34 22a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c1.2 0 2.6-.43 3.9-1.08"/><path d="M11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1v7a8.7 8.7 0 0 1-.56 3.14"/>',
     square: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
     cursor: '<path d="m4 4 7.07 16.97 2.51-7.39 7.39-2.51Z"/><path d="m13.58 13.58 5.84 5.84"/>',
+    database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
     target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
@@ -180,7 +182,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   virtualCursorBtn?.addEventListener("click", () => virtualCursor.toggle());
 
   const setVirtualCursorActiveWindow = async (label) => {
-    virtualCursor.setActiveWindow(label);
+    await virtualCursor.setActiveWindow(label);
+    localStorage.setItem("igpu-virtual-cursor-active-window", label);
     await events.emit?.("virtual-cursor-active-window", { window: label, source: "main" }).catch(() => {});
   };
 
@@ -378,6 +381,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     return msgDiv;
   };
 
+  const createBotResponseMessage = (statusText) => {
+    const msgDiv = appendMessage("", "bot");
+    msgDiv.classList.add("lookup-message");
+    const statusDiv = document.createElement("div");
+    statusDiv.className = "lookup-status";
+    statusDiv.textContent = statusText || "Checking GamePath...";
+    const contentDiv = document.createElement("div");
+    contentDiv.className = "lookup-content";
+    msgDiv.append(statusDiv, contentDiv);
+    return { msgDiv, statusDiv, contentDiv };
+  };
+
+  const formatLookupStatus = (status) => {
+    const stage = String(status?.stage || "");
+    const score = Number(status?.retrieval_score);
+    const scoreText = Number.isFinite(score) && score > 0 ? ` ${Math.round(score * 100)}%` : "";
+    if (stage === "gamepath_hit") return `GamePath hit: local guide${scoreText}`;
+    if (stage === "gamepath_summarizing") return `GamePath hit: summarizing${scoreText}`;
+    if (stage === "gamepath_miss") return `GamePath miss: Hermes/Tavily${scoreText}`;
+    if (stage === "gamepath_skipped") return "GamePath skipped: general chat";
+    if (stage === "gamepath_disputed") return "GamePath disputed: verification mode";
+    if (stage === "gamepath_feedback_missing") return "GamePath feedback: no recent entry";
+    if (stage === "gamepath_context") return "GamePath context: Hermes sorting";
+    if (stage === "guide_context") return "Local guide context: Hermes sorting";
+    if (stage === "memory_context") return "Memory context: Hermes sorting";
+    if (stage === "agent_may_search_web") return "Local miss: Hermes may use Tavily";
+    if (stage === "agent_web_search") return "Local miss: Hermes may use Tavily";
+    if (stage === "agent_no_tools") return "GamePath miss: Hermes local answer";
+    if (stage === "gamepath_stored") return "Saved to GamePath";
+    if (stage === "gamepath_not_stored") return "Not saved to GamePath";
+    return status?.message || "Checking guide source...";
+  };
+
   const showImagePreview = (base64, source = null, mimeType = "image/jpeg") => {
     pendingImageBase64 = base64;
     pendingImageMimeType = mimeType || "image/jpeg";
@@ -508,17 +544,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     await setVirtualCursorActiveWindow("main");
   };
 
-  const openSearchWindow = async (keyword = "", options = {}) => {
+  const openSearchWindow = async () => {
     const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
     localStorage.setItem("currentGameId", game);
-    localStorage.setItem("igpu-game-search-pending-keyword", keyword || "");
-    localStorage.setItem("igpu-game-search-auto-run", options.autoSearch ? "true" : "false");
+    localStorage.removeItem("igpu-game-search-pending-keyword");
+    localStorage.removeItem("igpu-game-search-auto-run");
     if (invoke) {
       await invoke("show_search_window").catch((err) => {
         appendMessage(`Search window failed: ${err?.message || err}`, "bot");
       });
     }
-    await events.emit?.("search:context", { game, keyword, autoSearch: Boolean(options.autoSearch) }).catch(() => {});
+    await events.emit?.("search:context", { game }).catch(() => {});
     await setVirtualCursorActiveWindow("search");
   };
 
@@ -533,13 +569,49 @@ document.addEventListener("DOMContentLoaded", async () => {
     await setVirtualCursorActiveWindow("main");
   };
 
+  const openGamePathWindow = async () => {
+    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    localStorage.setItem("currentGameId", game);
+    if (invoke) {
+      await invoke("show_gamepath_window").catch((err) => {
+        appendMessage(`GamePath window failed: ${err?.message || err}`, "bot");
+      });
+    }
+    await events.emit?.("gamepath:context", { game }).catch(() => {});
+    await setVirtualCursorActiveWindow("gamepath");
+  };
+
+  const closeGamePathWindow = async () => {
+    if (invoke) {
+      await invoke("hide_gamepath_window").catch((err) => {
+        appendMessage(`GamePath close failed: ${err?.message || err}`, "bot");
+      });
+    }
+    await setVirtualCursorActiveWindow("main");
+  };
+
+  const notifyGamePathChanged = async (details = {}) => {
+    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    const payload = {
+      ...details,
+      game,
+      changed_at: Date.now()
+    };
+    localStorage.setItem("igpu-gamepath-last-change", JSON.stringify(payload));
+    await events.emit?.("gamepath:changed", payload).catch(() => {});
+  };
+
   tasksBtn?.addEventListener("click", (event) => {
     event.preventDefault();
     openTasksWindow();
   });
   searchBtn?.addEventListener("click", (event) => {
     event.preventDefault();
-    openSearchWindow(messageInput?.value || "");
+    openSearchWindow();
+  });
+  gamepathBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    openGamePathWindow();
   });
 
   const normalizeCommandText = (text) => (text || "")
@@ -633,6 +705,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const wantsOff = includesAny(compact, ["\u95dc\u9589", "\u95dc\u6389", "\u95dc\u8d77", "\u96b1\u85cf", "\u6536\u8d77", "\u53d6\u6d88", "\u505c\u6b62", "close", "hide", "off", "stop", "disable"]);
     const wantsOn = includesAny(compact, ["\u958b\u555f", "\u6253\u958b", "\u958b\u8d77", "\u958b", "\u555f\u52d5", "open", "on", "start", "enable"]);
+    const wantsStore = includesAny(compact, ["\u5b58\u4e0b\u4f86", "\u5132\u5b58", "\u4fdd\u5b58", "\u5b58\u8d77\u4f86", "\u5b58", "\u8a18\u9304", "\u8a18\u4e0b", "save", "store", "record"]);
 
     if (includesAny(compact, ["task", "\u4efb\u52d9", "\u76ee\u6a19\u6e05\u55ae", "\u5f85\u8fa6"]) && includesAny(compact, ["\u8996\u7a97", "\u7a97\u53e3", "\u9762\u677f", "\u958b", "\u95dc", "\u96b1\u85cf", "\u6536\u8d77", "\u986f\u793a", "open", "show", "close", "hide", "toggle"])) {
       const action = requestedWindowAction(compact, wantsOn, wantsOff);
@@ -655,22 +728,21 @@ document.addEventListener("DOMContentLoaded", async () => {
       return true;
     }
 
-    if (includesAny(compact, ["gamesearch", "\u904a\u6232\u641c\u5c0b", "\u653b\u7565", "\u641c\u5c0b", "\u67e5\u8a62", "\u641c\u5c0b\u8996\u7a97", "\u653b\u7565\u8996\u7a97"])) {
-      const keyword = extractSearchKeyword(rawText);
+    if (!wantsStore && includesAny(compact, ["gamesearch", "\u904a\u6232\u641c\u5c0b", "\u641c\u5c0b", "\u67e5\u8a62", "\u641c\u5c0b\u8996\u7a97", "\u653b\u7565\u8996\u7a97"])) {
       appendUserMessage(rawText);
       if (wantsOff) {
         await closeSearchWindow();
         appendMessage("UI command: Game Search closed.", "bot");
       } else if (includesAny(compact, ["\u5207\u63db", "\u958b\u95dc", "toggle"])) {
         if (invoke) {
-          await invoke("toggle_search_window").catch(async () => openSearchWindow(keyword, { autoSearch: Boolean(keyword) }));
+          await invoke("toggle_search_window").catch(async () => openSearchWindow());
         } else {
-          await openSearchWindow(keyword, { autoSearch: Boolean(keyword) });
+          await openSearchWindow();
         }
         appendMessage("UI command: Game Search toggled.", "bot");
       } else {
-        await openSearchWindow(keyword, { autoSearch: Boolean(keyword) });
-        appendMessage(keyword ? `UI command: Searching "${keyword}".` : "UI command: Game Search opened.", "bot");
+        await openSearchWindow();
+        appendMessage("UI command: Game Search opened.", "bot");
       }
       if (messageInput) messageInput.value = "";
       return true;
@@ -908,6 +980,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     localStorage.setItem("currentGameId", value);
     if (options.emit !== false && (options.forceEmit || previous !== value)) {
       events.emit?.("search:context", { game: value, source: options.source || "game-select" }).catch(() => {});
+      events.emit?.("gamepath:context", { game: value, source: options.source || "game-select" }).catch(() => {});
     }
     return previous !== value;
   };
@@ -1511,11 +1584,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     setBusy(true);
     abortController = new AbortController();
 
-    const botMsgDiv = appendMessage(
-      imageBase64 ? "Reading compressed screenshot..." : "Reading response...",
-      "bot"
+    const { statusDiv, contentDiv } = createBotResponseMessage(
+      imageBase64 ? "Reading compressed screenshot..." : "Preparing response..."
     );
-    let receivedText = false;
 
     try {
       const body = {
@@ -1536,8 +1607,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         const detail = await response.text().catch(() => "");
         throw new Error(`Backend returned ${response.status}: ${detail}`);
       }
-      const rawResponse = await response.text();
-      const lines = rawResponse.split(/\r?\n/);
       let collected = "";
       let showedOverlay = false;
 
@@ -1548,25 +1617,58 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         try {
           const dataObj = JSON.parse(dataStr);
+          if (dataObj.lookup_status) {
+            statusDiv.textContent = formatLookupStatus(dataObj.lookup_status);
+            statusDiv.dataset.stage = dataObj.lookup_status.stage || "";
+            if (["gamepath_stored", "gamepath_disputed"].includes(dataObj.lookup_status.stage)) {
+              await notifyGamePathChanged(dataObj.lookup_status);
+            }
+            scrollChatToBottom();
+            return;
+          }
           if (dataObj.overlay) {
             const hudShown = await showHudOverlay(dataObj.overlay, captureSource);
             showedOverlay = showedOverlay || hudShown;
             if (!hudShown) {
               collected += `\nHUD 顯示失敗。${lastHudError}`;
-              receivedText = true;
+              contentDiv.textContent = collected.trim();
+              scrollChatToBottom();
             }
           }
           const content = dataObj.content || "";
           if (!content) return;
           collected += content;
-          receivedText = true;
+          contentDiv.textContent = collected.trimStart();
+          scrollChatToBottom();
         } catch (err) {
           console.warn("Could not parse SSE line:", line, err);
         }
       };
 
-      for (const line of lines) await handleSseLine(line.trimEnd());
-      botMsgDiv.textContent = collected.trim() || (
+      if (response.body?.getReader) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || "";
+          for (const line of lines) await handleSseLine(line.trimEnd());
+        }
+        buffer += decoder.decode();
+        if (buffer) {
+          const lines = buffer.split(/\r?\n/);
+          for (const line of lines) await handleSseLine(line.trimEnd());
+        }
+      } else {
+        const rawResponse = await response.text();
+        const lines = rawResponse.split(/\r?\n/);
+        for (const line of lines) await handleSseLine(line.trimEnd());
+      }
+
+      contentDiv.textContent = collected.trim() || (
         showedOverlay
           ? "HUD 已標記。"
           : "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
@@ -1574,10 +1676,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       scrollChatToBottom();
     } catch (error) {
       if (error.name === "AbortError") {
-        botMsgDiv.textContent += "\n\nStopped.";
+        contentDiv.textContent = `${contentDiv.textContent || ""}\n\nStopped.`.trim();
       } else {
         console.error(error);
-        botMsgDiv.textContent = `Connection failed: ${error.message || error}`;
+        statusDiv.textContent = "Connection failed";
+        statusDiv.dataset.stage = "error";
+        contentDiv.textContent = `${error.message || error}`;
       }
     } finally {
       abortController = null;
@@ -1754,6 +1858,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     await clearHudOverlay();
     appendMessage("HUD cleared.", "bot");
   }).catch(() => {});
+
+  const applyGamePathAsk = async (entry = {}) => {
+    const title = entry.title || entry.question || "GamePath";
+    messageInput.value = entry.message || `根據 GamePath「${title}」，請幫我整理下一步`;
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    localStorage.removeItem("igpu-gamepath-ask-pending");
+    await appWindow?.show?.().catch(() => {});
+    await appWindow?.setFocus?.().catch(() => {});
+    await setVirtualCursorActiveWindow("main");
+    messageInput?.focus();
+  };
+
   await events.listen?.("tasks:ask", async (event) => {
     const task = event.payload || {};
     const title = task.title || "目前任務";
@@ -1762,6 +1878,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     await appWindow?.setFocus?.().catch(() => {});
     messageInput?.focus();
   }).catch(() => {});
+
+  await events.listen?.("gamepath:ask", async (event) => {
+    await applyGamePathAsk(event.payload || {});
+  }).catch(() => {});
+
+  window.addEventListener("storage", (event) => {
+    if (event.key !== "igpu-gamepath-ask-pending" || !event.newValue) return;
+    try {
+      applyGamePathAsk(JSON.parse(event.newValue));
+    } catch (err) {
+      console.warn("Pending GamePath ask failed:", err);
+    }
+  });
 
   await globalShortcut.register?.("F9", takeScreenshot).catch((err) => {
     console.warn("F9 registration failed:", err);

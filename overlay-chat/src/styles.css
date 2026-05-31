@@ -238,6 +238,72 @@ body.perf-mode {
 }
 
 /* 頂端 actions 區 */
+.lookup-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lookup-status {
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.lookup-status[data-stage="gamepath_hit"] {
+  color: #b8f7d4;
+  border-color: rgba(91, 232, 150, 0.32);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.lookup-status[data-stage="agent_web_search"] {
+  color: #ffd89a;
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.lookup-status[data-stage="gamepath_context"],
+.lookup-status[data-stage="guide_context"],
+.lookup-status[data-stage="memory_context"] {
+  color: #c7d2fe;
+  border-color: rgba(129, 140, 248, 0.34);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.lookup-status[data-stage="agent_may_search_web"] {
+  color: #ffd89a;
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.lookup-status[data-stage="gamepath_stored"] {
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.lookup-status[data-stage="gamepath_not_stored"] {
+  color: #fff2c3;
+  border-color: rgba(255, 213, 111, 0.36);
+  background: rgba(255, 213, 111, 0.1);
+}
+
+.lookup-status[data-stage="error"] {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.36);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.lookup-content:empty {
+  display: none;
+}
+
 .drag-bar-actions {
   display: flex;
   align-items: center;

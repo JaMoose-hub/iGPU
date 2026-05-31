@@ -110,7 +110,7 @@ export function initVirtualCursor({
   const badge = layer.querySelector(".virtual-cursor-badge");
 
   let enabled = false;
-  let activeWindow = "main";
+  let activeWindow = localStorage.getItem("igpu-virtual-cursor-active-window") || "main";
   let x = Math.round(window.innerWidth / 2);
   let y = Math.round(window.innerHeight / 2);
   let targetElement = null;
@@ -403,6 +403,8 @@ export function initVirtualCursor({
 
     enabled = nextEnabled;
     activeWindow = payload.activeWindow || "main";
+    localStorage.setItem("igpu-virtual-cursor-enabled", enabled ? "true" : "false");
+    localStorage.setItem("igpu-virtual-cursor-active-window", activeWindow);
     windowMoveActive = payload.movingWindow === windowLabel;
     if (Number.isFinite(Number(payload.x))) x = Number(payload.x);
     if (Number.isFinite(Number(payload.y))) y = Number(payload.y);
@@ -524,7 +526,6 @@ export function initVirtualCursor({
   const handleKeyDown = (event) => {
     if (event.key === "F11") {
       event.preventDefault();
-      toggleEnabled();
       return;
     }
     if (!enabled || !isActiveWindow()) return;
@@ -609,6 +610,41 @@ export function initVirtualCursor({
     applyRender(event.payload || {});
   }).catch(() => {});
 
+  events?.listen?.("virtual-cursor-active-window", (event) => {
+    const label = event.payload?.window || event.payload?.activeWindow;
+    if (!label) return;
+    activeWindow = label;
+    localStorage.setItem("igpu-virtual-cursor-active-window", activeWindow);
+    if (!enabled && localStorage.getItem("igpu-virtual-cursor-enabled") === "true") {
+      enabled = true;
+    }
+    if (Number.isFinite(Number(event.payload?.x))) x = Number(event.payload.x);
+    if (Number.isFinite(Number(event.payload?.y))) y = Number(event.payload.y);
+    if (!isActiveWindow()) {
+      leaveTextEntry({ blur: true });
+      setScrollDragMode(null);
+    }
+    updateVisuals();
+  }).catch(() => {});
+
+  events?.listen?.("virtual-cursor-transfer", (event) => {
+    if (event.payload?.window !== windowLabel) return;
+    activeWindow = windowLabel;
+    localStorage.setItem("igpu-virtual-cursor-active-window", activeWindow);
+    if (!enabled && localStorage.getItem("igpu-virtual-cursor-enabled") === "true") {
+      enabled = true;
+    }
+    if (Number.isFinite(Number(event.payload?.x))) x = Number(event.payload.x);
+    if (Number.isFinite(Number(event.payload?.y))) y = Number(event.payload.y);
+    leaveTextEntry({ blur: true });
+    setScrollDragMode(null);
+    updateVisuals();
+  }).catch(() => {});
+
+  events?.listen?.("virtual-cursor-frames-changed", () => {
+    window.requestAnimationFrame(updateVisuals);
+  }).catch(() => {});
+
   events?.listen?.("virtual-cursor-exit-text-entry", () => {
     leaveTextEntry({ blur: true });
   }).catch(() => {});
@@ -634,10 +670,19 @@ export function initVirtualCursor({
     setEnabled,
     toggle: toggleEnabled,
     syncPosition: syncLocalPosition,
-    setActiveWindow: (label) => {
+    setActiveWindow: (label) => (
+      localStorage.setItem("igpu-virtual-cursor-active-window", label),
       invoke?.("set_virtual_cursor_active_window", { label }).catch((err) => {
         console.warn("Virtual cursor active-window sync failed:", err);
-      });
+      })
+    ),
+    adoptActiveWindow: (label) => {
+      activeWindow = label;
+      localStorage.setItem("igpu-virtual-cursor-active-window", label);
+      if (localStorage.getItem("igpu-virtual-cursor-enabled") === "true") {
+        enabled = true;
+      }
+      updateVisuals();
     },
     refresh: updateVisuals
   };

@@ -11,7 +11,13 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg(windows)]
+use windows_sys::Win32::Foundation::POINT;
+
+#[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::XboxController::{
@@ -124,7 +130,7 @@ fn apply_current_capture_protection(window: &tauri::WebviewWindow) {
 }
 
 fn apply_capture_protection_to_all_windows(app: &tauri::AppHandle, excluded: bool) {
-    for label in ["main", "hud", "tasks", "search"] {
+    for label in ["main", "hud", "tasks", "search", "gamepath"] {
         if let Some(window) = app.get_webview_window(label) {
             set_window_display_excluded(&window, excluded);
         }
@@ -297,6 +303,96 @@ fn select_virtual_cursor_frame<'a>(
         .map(|(_, frame)| frame)
 }
 
+fn virtual_cursor_exit_edge(
+    frame: &VirtualCursorWindowFrame,
+    next_x: f64,
+    next_y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) -> Option<&'static str> {
+    let left = frame.x as f64;
+    let top = frame.y as f64;
+    let right = left + frame.width as f64;
+    let bottom = top + frame.height as f64;
+
+    let horizontal = if delta_x > 0.0 && next_x > right {
+        Some("right")
+    } else if delta_x < 0.0 && next_x < left {
+        Some("left")
+    } else {
+        None
+    };
+    let vertical = if delta_y > 0.0 && next_y > bottom {
+        Some("down")
+    } else if delta_y < 0.0 && next_y < top {
+        Some("up")
+    } else {
+        None
+    };
+
+    match (horizontal, vertical) {
+        (Some(x_edge), Some(y_edge)) => {
+            if delta_x.abs() >= delta_y.abs() {
+                Some(x_edge)
+            } else {
+                Some(y_edge)
+            }
+        }
+        (Some(edge), None) | (None, Some(edge)) => Some(edge),
+        (None, None) => None,
+    }
+}
+
+fn transfer_virtual_cursor_at_edge(
+    state: &mut VirtualCursorState,
+    frames: &[VirtualCursorWindowFrame],
+    source: &VirtualCursorWindowFrame,
+    edge: &str,
+    next_x: f64,
+    next_y: f64,
+) -> bool {
+    let source_left = source.x as f64;
+    let source_top = source.y as f64;
+    let source_right = source_left + source.width as f64;
+    let source_bottom = source_top + source.height as f64;
+    let cursor_screen_x = match edge {
+        "left" => source_left - 1.0,
+        "right" => source_right + 1.0,
+        _ => next_x.clamp(source_left, source_right),
+    };
+    let cursor_screen_y = match edge {
+        "up" => source_top - 1.0,
+        "down" => source_bottom + 1.0,
+        _ => next_y.clamp(source_top, source_bottom),
+    };
+
+    let Some(target) =
+        pick_virtual_cursor_transfer_target(frames, source, edge, cursor_screen_x, cursor_screen_y)
+    else {
+        return false;
+    };
+
+    let target_scale = if target.scale_factor > 0.0 {
+        target.scale_factor
+    } else {
+        1.0
+    };
+    let (target_width, target_height) = frame_local_size(&target);
+    let local_x =
+        ((cursor_screen_x - target.x as f64) / target_scale).clamp(12.0, target_width - 12.0);
+    let local_y =
+        ((cursor_screen_y - target.y as f64) / target_scale).clamp(12.0, target_height - 12.0);
+
+    state.active_window = target.label.to_string();
+    state.moving_window = None;
+    state.initialized = true;
+    state.local_x = local_x;
+    state.local_y = local_y;
+    state.screen_x = target.x as f64 + local_x * target_scale;
+    state.screen_y = target.y as f64 + local_y * target_scale;
+    true
+}
+
 fn initialize_virtual_cursor_position(
     state: &mut VirtualCursorState,
     frames: &[VirtualCursorWindowFrame],
@@ -435,19 +531,22 @@ fn emit_virtual_cursor_render(app: &tauri::AppHandle) -> Result<(), String> {
     let screen_y = state.screen_y;
     drop(state);
 
-    app.emit(
+    let payload = serde_json::json!({
+        "enabled": true,
+        "activeWindow": active_window,
+        "x": local_x,
+        "y": local_y,
+        "screenX": screen_x,
+        "screenY": screen_y,
+        "movingWindow": moving_window,
+    });
+    let _ = app.emit_to(
+        active_window.as_str(),
         "virtual-cursor-render",
-        serde_json::json!({
-            "enabled": true,
-            "activeWindow": active_window,
-            "x": local_x,
-            "y": local_y,
-            "screenX": screen_x,
-            "screenY": screen_y,
-            "movingWindow": moving_window,
-        }),
-    )
-    .map_err(|err| err.to_string())
+        payload.clone(),
+    );
+    app.emit("virtual-cursor-render", payload)
+        .map_err(|err| err.to_string())
 }
 
 fn set_virtual_cursor_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -517,9 +616,31 @@ fn move_virtual_cursor_by(app: &tauri::AppHandle, delta_x: f64, delta_y: f64) {
                 return;
             }
             clamp_virtual_cursor_to_world(&mut state, &frames);
-            state.screen_x += delta_x;
-            state.screen_y += delta_y;
-            clamp_virtual_cursor_to_world(&mut state, &frames);
+            let next_x = state.screen_x + delta_x;
+            let next_y = state.screen_y + delta_y;
+            let active_window = state.active_window.clone();
+            let transferred = frames
+                .iter()
+                .find(|frame| frame.label == active_window.as_str())
+                .and_then(|source| {
+                    if frame_contains_screen_point(source, next_x, next_y) {
+                        return None;
+                    }
+                    virtual_cursor_exit_edge(source, next_x, next_y, delta_x, delta_y)
+                        .map(|edge| (source, edge))
+                })
+                .map(|(source, edge)| {
+                    transfer_virtual_cursor_at_edge(
+                        &mut state, &frames, source, edge, next_x, next_y,
+                    )
+                })
+                .unwrap_or(false);
+
+            if !transferred {
+                state.screen_x = next_x;
+                state.screen_y = next_y;
+                clamp_virtual_cursor_to_world(&mut state, &frames);
+            }
             moved = true;
         }
     }
@@ -591,8 +712,16 @@ fn start_virtual_cursor_keyboard_poll(app: tauri::AppHandle) {
         let mut pending_activate = false;
         let mut controls_clear_since: Option<Instant> = None;
         let mut was_escape = false;
+        let mut was_f11 = false;
 
         loop {
+            let f11 = virtual_key_down(0x7A);
+            if f11 && !was_f11 {
+                let enabled = !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed);
+                let _ = set_virtual_cursor_enabled(&app, enabled);
+            }
+            was_f11 = f11;
+
             if !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed) {
                 was_tab = false;
                 was_activate = false;
@@ -832,7 +961,7 @@ fn park_window_if_hidden(window: &tauri::WebviewWindow) {
 }
 
 fn park_hidden_companion_windows(app: &tauri::AppHandle) {
-    for label in ["hud", "tasks", "search"] {
+    for label in ["hud", "tasks", "search", "gamepath"] {
         if let Some(window) = app.get_webview_window(label) {
             park_window_if_hidden(&window);
         }
@@ -1248,13 +1377,100 @@ fn ensure_search_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, 
     Ok(search)
 }
 
+fn ensure_gamepath_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let Some(gamepath) = app.get_webview_window("gamepath") else {
+        return Err("gamepath window not found".to_string());
+    };
+    apply_current_capture_protection(&gamepath);
+    Ok(gamepath)
+}
+
+fn clamp_i32(value: i32, minimum: i32, maximum: i32) -> i32 {
+    if maximum < minimum {
+        minimum
+    } else {
+        value.clamp(minimum, maximum)
+    }
+}
+
+fn companion_child_position(
+    app: &tauri::AppHandle,
+    child: &tauri::WebviewWindow,
+    fallback_size: PhysicalSize<u32>,
+    cascade_offset: i32,
+) -> (i32, i32) {
+    let Some(main) = app.get_webview_window("main") else {
+        return (80 + cascade_offset, 80 + cascade_offset);
+    };
+
+    let Ok(main_pos) = main.outer_position() else {
+        return (80 + cascade_offset, 80 + cascade_offset);
+    };
+    let main_size = main
+        .outer_size()
+        .unwrap_or_else(|_| PhysicalSize::new(520, 620));
+    let child_size = child.outer_size().unwrap_or(fallback_size);
+    let child_width = i32::try_from(child_size.width.max(1)).unwrap_or(i32::MAX / 4);
+    let child_height = i32::try_from(child_size.height.max(1)).unwrap_or(i32::MAX / 4);
+    let main_width = i32::try_from(main_size.width.max(1)).unwrap_or(520);
+    let main_height = i32::try_from(main_size.height.max(1)).unwrap_or(620);
+    let gap = 12;
+
+    let monitor = main.current_monitor().ok().flatten();
+    let (mon_left, mon_top, mon_right, mon_bottom) = if let Some(monitor) = monitor {
+        let position = monitor.position();
+        let size = monitor.size();
+        (
+            position.x,
+            position.y,
+            position.x + i32::try_from(size.width).unwrap_or(i32::MAX / 4),
+            position.y + i32::try_from(size.height).unwrap_or(i32::MAX / 4),
+        )
+    } else {
+        (
+            main_pos.x - 240,
+            main_pos.y - 240,
+            main_pos.x + main_width + child_width + 240,
+            main_pos.y + main_height + child_height + 240,
+        )
+    };
+
+    let right_x = main_pos.x + main_width + gap;
+    let left_x = main_pos.x - child_width - gap;
+    let below_y = main_pos.y + main_height + gap;
+    let above_y = main_pos.y - child_height - gap;
+    let aligned_y = main_pos.y + cascade_offset;
+    let aligned_x = main_pos.x + cascade_offset;
+
+    let (preferred_x, preferred_y) = if right_x + child_width <= mon_right {
+        (right_x, aligned_y)
+    } else if left_x >= mon_left {
+        (left_x, aligned_y)
+    } else if below_y + child_height <= mon_bottom {
+        (aligned_x, below_y)
+    } else if above_y >= mon_top {
+        (aligned_x, above_y)
+    } else {
+        (
+            main_pos.x + (main_width - child_width).min(36).max(-36) + cascade_offset,
+            main_pos.y + 36 + cascade_offset,
+        )
+    };
+
+    let max_x = mon_right - child_width;
+    let max_y = mon_bottom - child_height;
+    (
+        clamp_i32(preferred_x, mon_left, max_x),
+        clamp_i32(preferred_y, mon_top, max_y),
+    )
+}
+
 #[tauri::command]
 fn show_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
     park_hidden_companion_windows(&app);
     let tasks = ensure_tasks_window(&app)?;
     apply_current_capture_protection(&tasks);
-    let x = 80;
-    let y = 80;
+    let (x, y) = companion_child_position(&app, &tasks, PhysicalSize::new(380, 560), 0);
     let _ = tasks.set_position(PhysicalPosition::new(x, y));
     let _ = tasks.set_always_on_top(true);
     tasks.show().map_err(|err| err.to_string())?;
@@ -1269,13 +1485,27 @@ fn show_search_window(app: tauri::AppHandle) -> Result<(), String> {
     park_hidden_companion_windows(&app);
     let search = ensure_search_window(&app)?;
     apply_current_capture_protection(&search);
-    let x = 100;
-    let y = 100;
+    let (x, y) = companion_child_position(&app, &search, PhysicalSize::new(960, 720), 24);
     let _ = search.set_position(PhysicalPosition::new(x, y));
     let _ = search.set_always_on_top(true);
     search.show().map_err(|err| err.to_string())?;
     force_companion_window_repaint(&search, x, y);
     let result = search.set_focus().map_err(|err| err.to_string());
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
+}
+
+#[tauri::command]
+fn show_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
+    park_hidden_companion_windows(&app);
+    let gamepath = ensure_gamepath_window(&app)?;
+    apply_current_capture_protection(&gamepath);
+    let (x, y) = companion_child_position(&app, &gamepath, PhysicalSize::new(520, 620), 48);
+    let _ = gamepath.set_position(PhysicalPosition::new(x, y));
+    let _ = gamepath.set_always_on_top(true);
+    gamepath.show().map_err(|err| err.to_string())?;
+    force_companion_window_repaint(&gamepath, x, y);
+    let result = gamepath.set_focus().map_err(|err| err.to_string());
     let _ = emit_virtual_cursor_frames_changed(&app);
     result
 }
@@ -1301,6 +1531,16 @@ fn hide_search_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn hide_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(gamepath) = app.get_webview_window("gamepath") else {
+        return Ok(());
+    };
+    let result = hide_companion_window(&gamepath);
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
+}
+
+#[tauri::command]
 fn toggle_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
     let tasks = ensure_tasks_window(&app)?;
     if tasks.is_visible().unwrap_or(false) {
@@ -1321,6 +1561,70 @@ fn toggle_search_window(app: tauri::AppHandle) -> Result<(), String> {
         result
     } else {
         show_search_window(app)
+    }
+}
+
+#[tauri::command]
+fn toggle_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
+    let gamepath = ensure_gamepath_window(&app)?;
+    if gamepath.is_visible().unwrap_or(false) {
+        let result = hide_companion_window(&gamepath);
+        let _ = emit_virtual_cursor_frames_changed(&app);
+        result
+    } else {
+        show_gamepath_window(app)
+    }
+}
+
+#[cfg(windows)]
+fn cursor_position() -> Option<(i32, i32)> {
+    let mut point = POINT { x: 0, y: 0 };
+    let ok = unsafe { GetCursorPos(&mut point) };
+    if ok == 0 {
+        None
+    } else {
+        Some((point.x, point.y))
+    }
+}
+
+#[cfg(windows)]
+fn begin_polling_window_drag(window: tauri::WebviewWindow) -> Result<(), String> {
+    let (start_x, start_y) = cursor_position().ok_or_else(|| "GetCursorPos failed".to_string())?;
+    let start_position = window.outer_position().map_err(|err| err.to_string())?;
+    let app = window.app_handle().clone();
+
+    thread::spawn(move || {
+        loop {
+            if !virtual_key_down(0x01) {
+                break;
+            }
+            if let Some((cursor_x, cursor_y)) = cursor_position() {
+                let next_x = start_position
+                    .x
+                    .saturating_add(cursor_x.saturating_sub(start_x));
+                let next_y = start_position
+                    .y
+                    .saturating_add(cursor_y.saturating_sub(start_y));
+                let _ = window.set_position(PhysicalPosition::new(next_x, next_y));
+            }
+            thread::sleep(Duration::from_millis(12));
+        }
+        let _ = emit_virtual_cursor_frames_changed(&app);
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn begin_gamepath_window_drag(app: tauri::AppHandle) -> Result<(), String> {
+    let gamepath = ensure_gamepath_window(&app)?;
+    #[cfg(windows)]
+    {
+        begin_polling_window_drag(gamepath)
+    }
+    #[cfg(not(windows))]
+    {
+        gamepath.start_dragging().map_err(|err| err.to_string())
     }
 }
 
@@ -1395,6 +1699,7 @@ fn set_virtual_cursor_window_move(
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
 
@@ -1429,6 +1734,7 @@ fn set_virtual_cursor_active_window(app: tauri::AppHandle, label: String) -> Res
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
     let frames = collect_virtual_cursor_window_frames(&app)?;
@@ -1472,6 +1778,7 @@ fn set_virtual_cursor_window_position(
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
     let frames = collect_virtual_cursor_window_frames(&app)?;
@@ -1523,6 +1830,7 @@ fn focus_virtual_cursor_text_entry(
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1562,6 +1870,7 @@ fn click_virtual_cursor_position(
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1588,6 +1897,7 @@ fn focus_companion_window(app: tauri::AppHandle, label: String) -> Result<(), St
         "main" => "main",
         "tasks" => "tasks",
         "search" => "search",
+        "gamepath" => "gamepath",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1610,7 +1920,7 @@ fn collect_virtual_cursor_window_frames(
     app: &tauri::AppHandle,
 ) -> Result<Vec<VirtualCursorWindowFrame>, String> {
     let mut frames = Vec::new();
-    for label in ["main", "tasks", "search"] {
+    for label in ["main", "tasks", "search", "gamepath"] {
         let Some(window) = app.get_webview_window(label) else {
             continue;
         };
@@ -1768,7 +2078,7 @@ fn virtual_cursor_transfer_window(
     id: String,
 ) -> Result<(), String> {
     match label.as_str() {
-        "main" | "tasks" | "search" => {}
+        "main" | "tasks" | "search" | "gamepath" => {}
         _ => return Err("unsupported virtual cursor transfer target".to_string()),
     }
 
@@ -1794,7 +2104,7 @@ fn virtual_cursor_transfer_at_edge(
     id: String,
 ) -> Result<Option<String>, String> {
     match source.as_str() {
-        "main" | "tasks" | "search" => {}
+        "main" | "tasks" | "search" | "gamepath" => {}
         _ => return Err("unsupported virtual cursor source".to_string()),
     }
     match edge.as_str() {
@@ -1876,7 +2186,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-                if matches!(window.label(), "main" | "tasks" | "search") {
+                if matches!(window.label(), "main" | "tasks" | "search" | "gamepath") {
                     let _ = emit_virtual_cursor_frames_changed(window.app_handle());
                 }
             }
@@ -1939,11 +2249,9 @@ pub fn run() {
                                 let _ = app.emit("clear-hud-hotkey", ());
                             }
                             Code::F11 => {
-                                if let Some(main) = app.get_webview_window("main") {
-                                    let _ = main.show();
-                                    let _ = main.set_focus();
-                                }
-                                let _ = app.emit("virtual-cursor-toggle-request", ());
+                                let enabled =
+                                    !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed);
+                                let _ = set_virtual_cursor_enabled(app, enabled);
                             }
                             _ => {}
                         }
@@ -1967,7 +2275,6 @@ pub fn run() {
                 Code::F8,
                 Code::F9,
                 Code::F10,
-                Code::F11,
             ] {
                 let shortcut = Shortcut::new(None, key);
                 let _ = app.global_shortcut().register(shortcut);
@@ -1989,6 +2296,11 @@ pub fn run() {
                 let _ = search.set_always_on_top(true);
                 let _ = hide_companion_window(&search);
             }
+            if let Some(gamepath) = app.get_webview_window("gamepath") {
+                clear_window_capture_protection(&gamepath);
+                let _ = gamepath.set_always_on_top(true);
+                let _ = hide_companion_window(&gamepath);
+            }
 
             // 在 Windows 上設定視窗截圖排除
             Ok(())
@@ -2001,10 +2313,14 @@ pub fn run() {
             hide_hud_window,
             show_tasks_window,
             show_search_window,
+            show_gamepath_window,
             hide_tasks_window,
             hide_search_window,
+            hide_gamepath_window,
             toggle_tasks_window,
             toggle_search_window,
+            toggle_gamepath_window,
+            begin_gamepath_window_drag,
             game_search_browser_back,
             game_search_browser_forward,
             game_search_browser_reload,

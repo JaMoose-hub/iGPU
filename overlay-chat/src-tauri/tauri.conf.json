@@ -68,6 +68,22 @@
         "alwaysOnTop": true,
         "visible": false,
         "resizable": true
+      },
+      {
+        "label": "gamepath",
+        "title": "gamepath-viewer",
+        "url": "gamepath.html",
+        "x": -32000,
+        "y": -32000,
+        "width": 520,
+        "height": 620,
+        "minWidth": 420,
+        "minHeight": 460,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": true
       }
     ],
     "security": {

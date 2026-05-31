@@ -15,6 +15,11 @@ logs/
 guide_cache/
 memory_cache/
 game_guides/
+gamepath/gamepath.sqlite
+gamepath/gamepath.sqlite-*
+gamepath/notes/
+docs/gamepath_benchmark_results*.json
+docs/gamepath_retrieval_evaluator_results.json
 *.log
 tmp/
 temp/

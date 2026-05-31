@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GamePath</title>
+  <link rel="stylesheet" href="gamepath.css" />
+  <link rel="stylesheet" href="virtualCursor.css" />
+</head>
+
+<body>
+  <div class="gamepath-drag" data-tauri-drag-region data-cursor-action="window-move" data-cursor-label="Move window">
+    <div class="gamepath-title" data-tauri-drag-region>
+      <span class="icon" data-icon="database"></span>
+      <span>GamePath</span>
+    </div>
+    <div class="gamepath-window-actions">
+      <button id="refreshBtn" class="window-btn" title="Refresh" aria-label="Refresh">
+        <span class="icon" data-icon="refresh"></span>
+      </button>
+      <button id="closeBtn" class="window-btn close-btn" title="Close" aria-label="Close">
+        <span class="icon" data-icon="x"></span>
+      </button>
+    </div>
+  </div>
+
+  <section class="stats-row">
+    <div class="stat">
+      <span>SQLite</span>
+      <strong id="entryCount">-</strong>
+    </div>
+    <div class="stat">
+      <span>Game</span>
+      <strong id="currentGame">All</strong>
+    </div>
+  </section>
+
+  <div class="search-row">
+    <span class="icon" data-icon="search"></span>
+    <input id="searchInput" type="search" placeholder="搜尋 GamePath 攻略..." />
+  </div>
+
+  <main id="entryList" class="entry-list" data-cursor-action="scroll-drag" data-cursor-scroll data-cursor-label="Scroll GamePath"></main>
+
+  <template id="emptyTemplate">
+    <section class="empty-state">
+      <span class="icon" data-icon="database"></span>
+      <p>目前沒有可顯示的 GamePath 資料</p>
+      <small>問攻略後，Hermes 濃縮出的提示會保存到這裡。</small>
+    </section>
+  </template>
+
+  <script type="module" src="/gamepath.js"></script>
+</body>
+
+</html>
