@@ -1,0 +1,290 @@
+{
+  "generated_at": "2026-06-07T09:39:29+0800",
+  "db_path": "C:\\Projects\\iGPU\\gamepath\\gamepath.sqlite",
+  "case_count": 13,
+  "summary": {
+    "top1": 1.0,
+    "hit5": 1.0,
+    "avg_ms": 51.45,
+    "min_ms": 30.692,
+    "max_ms": 108.844
+  },
+  "rows": [
+    {
+      "label": "旅館路線",
+      "expected_id": 75,
+      "query": "鷦木旅館辦公室地圖要在哪拿？",
+      "tags": [
+        "route",
+        "location"
+      ],
+      "note": "攻略包路線 / 地圖取得",
+      "top_id": 75,
+      "top_title": "攻略包：鷦木市-鷦木旅館",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.269,
+      "coverage": 1.0,
+      "core_overlap": 0.875,
+      "elapsed_ms": 56.341
+    },
+    {
+      "label": "廚房餐廳路線",
+      "expected_id": 79,
+      "query": "療養院一樓西側廚房餐廳要怎麼走？",
+      "tags": [
+        "route",
+        "enemy"
+      ],
+      "note": "攻略包路線 / 敵人避開",
+      "top_id": 79,
+      "top_title": "攻略包：療養院-一樓西側 廚房、餐廳",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "summarize",
+      "score": 1.0,
+      "gap": 0.041,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 36.309
+    },
+    {
+      "label": "等候室道具",
+      "expected_id": 83,
+      "query": "等候室後面是不是要去遊樂室兌換道具？",
+      "tags": [
+        "route",
+        "puzzle"
+      ],
+      "spoiler_level": "medium",
+      "note": "道具兌換 / 路線提示",
+      "top_id": 83,
+      "top_title": "攻略包：療養院-一樓東側 等候室",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 0.979,
+      "gap": 0.146,
+      "coverage": 1.0,
+      "core_overlap": 0.375,
+      "elapsed_ms": 40.221
+    },
+    {
+      "label": "決戰怪物",
+      "expected_id": 94,
+      "query": "淨水場那個怪物女孩決戰要先啟動哪幾個系統？",
+      "tags": [
+        "enemy",
+        "route"
+      ],
+      "spoiler_level": "medium",
+      "note": "Boss/敵人路線",
+      "top_id": 94,
+      "top_title": "攻略包：淨水場-決戰怪物“女孩”",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 0.992,
+      "gap": 0.314,
+      "coverage": 0.75,
+      "core_overlap": 0.75,
+      "elapsed_ms": 30.692
+    },
+    {
+      "label": "彩蛋收集",
+      "expected_id": 101,
+      "query": "浣熊市警局豆腐先生彩蛋在哪段路線？",
+      "tags": [
+        "item",
+        "location"
+      ],
+      "note": "彩蛋 / 收集品",
+      "top_id": 101,
+      "top_title": "攻略包：浣熊市警局-一樓西側、豆腐先生彩蛋",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.112,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 37.284
+    },
+    {
+      "label": "研究主任室謎題",
+      "expected_id": 124,
+      "query": "前往研究主任室在機關盒處輸入太陽太陽星星的那個長順序是哪筆？",
+      "tags": [
+        "puzzle"
+      ],
+      "spoiler_level": "high",
+      "note": "高劇透密碼 / 謎題答案",
+      "top_id": 124,
+      "top_title": "攻略包：⑭前往研究主任室在機關盒處解謎",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "summarize",
+      "score": 1.0,
+      "gap": 0.0,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 43.51
+    },
+    {
+      "label": "主廚喪屍",
+      "expected_id": 128,
+      "query": "遊樂室外主廚喪屍和酒吧保險箱是哪一段？",
+      "tags": [
+        "enemy",
+        "puzzle"
+      ],
+      "spoiler_level": "medium",
+      "note": "敵人 + 保險箱混合段落",
+      "top_id": 128,
+      "top_title": "攻略包：療養院-一樓西側 遊樂室、主廚喪屍",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "summarize",
+      "score": 1.0,
+      "gap": 0.018,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 41.1
+    },
+    {
+      "label": "酒吧保險箱",
+      "expected_id": 131,
+      "query": "酒吧休閒室保險箱左10右80左30在哪筆攻略？",
+      "tags": [
+        "puzzle"
+      ],
+      "spoiler_level": "medium",
+      "note": "保險箱密碼",
+      "top_id": 131,
+      "top_title": "攻略包：療養院-辦公室、資料室、酒吧休閒室保險箱",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "summarize",
+      "score": 1.0,
+      "gap": 0.0,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 47.844
+    },
+    {
+      "label": "孢源喪屍弱點",
+      "expected_id": 133,
+      "query": "教堂孢源喪屍弱點是不是發光部位？",
+      "tags": [
+        "enemy"
+      ],
+      "spoiler_level": "medium",
+      "note": "敵人弱點",
+      "top_id": 133,
+      "top_title": "攻略包：療養院中庭-屋頂、孢源喪屍（里昂）",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.25,
+      "coverage": 1.0,
+      "core_overlap": 0.625,
+      "elapsed_ms": 34.697
+    },
+    {
+      "label": "泰坦巨蛛",
+      "expected_id": 134,
+      "query": "NF大廈泰坦巨蛛弱點在哪？",
+      "tags": [
+        "enemy"
+      ],
+      "spoiler_level": "medium",
+      "note": "Boss 弱點",
+      "top_id": 134,
+      "top_title": "攻略包：浣熊市東部-NF大廈、泰坦巨蛛",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.278,
+      "coverage": 1.0,
+      "core_overlap": 0.75,
+      "elapsed_ms": 37.626
+    },
+    {
+      "label": "Hermes 自動保存",
+      "expected_id": 139,
+      "query": "廚房屠夫弱點是什麼？要硬打嗎？",
+      "tags": [
+        "boss",
+        "enemy"
+      ],
+      "note": "Hermes web 濃縮後保存",
+      "top_id": 139,
+      "top_title": "廚房的屠夫的弱點是什麼?",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "summarize",
+      "score": 1.0,
+      "gap": 0.029,
+      "coverage": 1.0,
+      "core_overlap": 0.5,
+      "elapsed_ms": 86.949
+    },
+    {
+      "label": "Vision 保存",
+      "expected_id": 140,
+      "query": "黑白格地板昏暗走廊這是哪裡？",
+      "tags": [
+        "vision",
+        "mechanic"
+      ],
+      "note": "截圖/vision 產生的 GamePath 筆記",
+      "top_id": 140,
+      "top_title": "豪宅昏暗走廊 黑白格地板 這是哪裡",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.401,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 108.844
+    },
+    {
+      "label": "唱歌女殭屍",
+      "expected_id": 143,
+      "query": "唱歌女殭屍在哪出沒？",
+      "tags": [
+        "route",
+        "location"
+      ],
+      "note": "相似問法命中已保存條目",
+      "top_id": 143,
+      "top_title": "唱歌女殭屍 在哪出沒 ?",
+      "rank": 1,
+      "hit_top1": true,
+      "hit_top5": true,
+      "confidence": "direct",
+      "score": 1.0,
+      "gap": 0.238,
+      "coverage": 1.0,
+      "core_overlap": 1.0,
+      "elapsed_ms": 67.43
+    }
+  ]
+}

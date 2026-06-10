@@ -121,8 +121,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let lastVoiceToggleAt = 0;
   let lastSentVoiceText = "";
   let lastSentVoiceAt = 0;
-  const storedProtectMode = localStorage.getItem("protect-mode");
-  let captureProtectionEnabled = storedProtectMode === "software-redact" || storedProtectMode === "os-exclude";
+  let captureProtectionEnabled = false;
+  localStorage.setItem("protect-mode", "off");
 
   localStorage.removeItem("hud-overlay");
   await invoke?.("hide_hud_window").catch((err) => {
@@ -143,8 +143,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   await appWindow?.setContentProtected?.(false).catch((err) => {
     console.warn("Could not clear main-window content protection:", err);
   });
-  await invoke?.("set_main_capture_exclusion", { excluded: captureProtectionEnabled }).catch((err) => {
-    console.warn("Could not set window capture exclusion:", err);
+  await invoke?.("set_main_capture_exclusion", { excluded: false }).catch((err) => {
+    console.warn("Could not clear window capture exclusion:", err);
   });
 
   if (localStorage.getItem("perf-mode") === "true") {
@@ -372,10 +372,91 @@ document.addEventListener("DOMContentLoaded", async () => {
     observer.observe(chatWindow, { childList: true, subtree: true, characterData: true });
   }
 
+  const clearNode = (node) => {
+    while (node?.firstChild) node.removeChild(node.firstChild);
+  };
+
+  const cleanResponseText = (text) => String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const splitInlineHintLines = (text) => {
+    const source = String(text || "");
+    return source.replace(
+      /\s+(?=(?:Hint\s*\d+|提示\s*\d+|下一步|建議|注意|理由|答案|無暴雷提示|風險|操作)[:：])/gi,
+      "\n"
+    );
+  };
+
+  const parseMarkerLine = (line) => {
+    const trimmed = String(line || "").trim();
+    const hintMatch = trimmed.match(/^(Hint\s*\d+|提示\s*\d+|下一步|建議|注意|理由|答案|無暴雷提示|風險|操作)[:：]\s*(.*)$/i);
+    if (hintMatch) {
+      return { type: "hint", marker: hintMatch[1], text: hintMatch[2] || "" };
+    }
+    const numberedMatch = trimmed.match(/^(\d+[.)])\s+(.*)$/);
+    if (numberedMatch) {
+      return { type: "line", marker: numberedMatch[1], text: numberedMatch[2] || "" };
+    }
+    const bulletMatch = trimmed.match(/^([-*])\s+(.*)$/);
+    if (bulletMatch) {
+      return { type: "line", marker: bulletMatch[1], text: bulletMatch[2] || "" };
+    }
+    return { type: "paragraph", text: trimmed };
+  };
+
+  const appendFormattedText = (node, text) => {
+    node.appendChild(document.createTextNode(text || ""));
+  };
+
+  const renderFormattedMessage = (target, text) => {
+    if (!target) return;
+    const normalized = cleanResponseText(splitInlineHintLines(text));
+    clearNode(target);
+    target.classList.add("formatted-response");
+    if (!normalized) return;
+
+    const paragraphs = normalized.split(/\n{2,}/);
+    paragraphs.forEach((paragraph) => {
+      const lines = paragraph.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) return;
+
+      lines.forEach((line) => {
+        const parsed = parseMarkerLine(line);
+        const row = document.createElement("div");
+        row.className = parsed.type === "hint" ? "response-line response-hint" : "response-line";
+
+        if (parsed.type === "paragraph") {
+          row.className = "response-paragraph";
+          appendFormattedText(row, parsed.text);
+          target.appendChild(row);
+          return;
+        }
+
+        const marker = document.createElement("span");
+        marker.className = parsed.type === "hint" ? "response-label" : "response-marker";
+        marker.textContent = parsed.type === "hint" ? `${parsed.marker}:` : parsed.marker;
+
+        const body = document.createElement("span");
+        body.className = "response-body";
+        appendFormattedText(body, parsed.text);
+        row.append(marker, body);
+        target.appendChild(row);
+      });
+    });
+  };
+
   const appendMessage = (text, sender) => {
     const msgDiv = document.createElement("div");
     msgDiv.classList.add("message", sender === "user" ? "user-message" : "bot-message");
-    msgDiv.textContent = text;
+    if (sender === "bot" && text) {
+      renderFormattedMessage(msgDiv, text);
+    } else {
+      msgDiv.textContent = text;
+    }
     chatWindow.appendChild(msgDiv);
     scrollChatToBottom();
     return msgDiv;
@@ -387,31 +468,267 @@ document.addEventListener("DOMContentLoaded", async () => {
     const statusDiv = document.createElement("div");
     statusDiv.className = "lookup-status";
     statusDiv.textContent = statusText || "Checking GamePath...";
+    const routeLogDiv = document.createElement("div");
+    routeLogDiv.className = "lookup-route-log";
+    routeLogDiv.hidden = true;
     const contentDiv = document.createElement("div");
     contentDiv.className = "lookup-content";
-    msgDiv.append(statusDiv, contentDiv);
-    return { msgDiv, statusDiv, contentDiv };
+    msgDiv.append(statusDiv, routeLogDiv, contentDiv);
+    return { msgDiv, statusDiv, routeLogDiv, routeTrace: [], contentDiv };
   };
 
   const formatLookupStatus = (status) => {
     const stage = String(status?.stage || "");
-    const score = Number(status?.retrieval_score);
-    const scoreText = Number.isFinite(score) && score > 0 ? ` ${Math.round(score * 100)}%` : "";
-    if (stage === "gamepath_hit") return `GamePath hit: local guide${scoreText}`;
-    if (stage === "gamepath_summarizing") return `GamePath hit: summarizing${scoreText}`;
-    if (stage === "gamepath_miss") return `GamePath miss: Hermes/Tavily${scoreText}`;
-    if (stage === "gamepath_skipped") return "GamePath skipped: general chat";
-    if (stage === "gamepath_disputed") return "GamePath disputed: verification mode";
-    if (stage === "gamepath_feedback_missing") return "GamePath feedback: no recent entry";
-    if (stage === "gamepath_context") return "GamePath context: Hermes sorting";
-    if (stage === "guide_context") return "Local guide context: Hermes sorting";
-    if (stage === "memory_context") return "Memory context: Hermes sorting";
-    if (stage === "agent_may_search_web") return "Local miss: Hermes may use Tavily";
-    if (stage === "agent_web_search") return "Local miss: Hermes may use Tavily";
-    if (stage === "agent_no_tools") return "GamePath miss: Hermes local answer";
-    if (stage === "gamepath_stored") return "Saved to GamePath";
-    if (stage === "gamepath_not_stored") return "Not saved to GamePath";
+    const accuracyText = lookupAccuracyParts(status).join(" / ");
+    const timingText = lookupTimingParts(status).join(" / ");
+    const scoreText = [
+      accuracyText,
+      timingText ? `耗時 ${timingText}` : ""
+    ].filter(Boolean).join(" | ");
+    const suffix = scoreText ? ` | ${scoreText}` : "";
+    const isVisionRoute = status?.local_router?.route_source === "vision"
+      || String(status?.local_router?.intent_route || "").startsWith("screenshot_");
+    const routePrefix = status?.local_router?.used
+      ? [isVisionRoute ? "Vision" : "地端 Qwen"]
+      : status?.local_router?.intent_route
+        ? [isVisionRoute ? "Vision補救" : "後端補救"]
+        : [];
+    const evalPrefix = status?.local_router_retrieval?.used ? ["地端 Qwen 評估"] : routePrefix;
+    const path = (segments) => `搜尋路徑：${segments.filter(Boolean).join(" → ")}${suffix}`;
+    if (stage === "gamepath_hit") return path([...evalPrefix, "GamePath", "本地回答"]);
+    if (stage === "gamepath_summarizing") return path([...evalPrefix, "GamePath", "Hermes 整理"]);
+    if (stage === "gamepath_miss") return path([...routePrefix, "GamePath 未命中", "Hermes/Tavily"]);
+    if (stage === "gamepath_skipped") return path(["略過 GamePath", "一般聊天"]);
+    if (stage === "gamepath_disputed") return "驗證：上一個 GamePath 提示已降權";
+    if (stage === "gamepath_feedback_missing") return "驗證：找不到上一筆 GamePath 紀錄";
+    if (stage === "gamepath_context") return path(["GamePath", "Hermes 整理"]);
+    if (stage === "guide_context") return path(["本地攻略", "Hermes 整理"]);
+    if (stage === "memory_context") return path(["玩家記憶", "Hermes 整理"]);
+    if (stage === "agent_may_search_web") return path(["本地未命中", "Hermes/Tavily"]);
+    if (stage === "agent_web_search") return path(["本地未命中", "Hermes/Tavily"]);
+    if (stage === "agent_no_tools") return path(["GamePath 未命中", "Hermes 回答"]);
+    if (stage === "gamepath_stored") return "保存：已寫入 GamePath";
+    if (stage === "gamepath_not_stored") return "保存：未寫入 GamePath";
     return status?.message || "Checking guide source...";
+  };
+
+  const compactLookupValue = (value, maxLen = 90) => {
+    if (value == null) return "";
+    const text = Array.isArray(value)
+      ? value.filter(Boolean).join(",")
+      : typeof value === "object"
+        ? JSON.stringify(value)
+        : String(value);
+    const compact = text.replace(/\s+/g, " ").trim();
+    if (!compact) return "";
+    return compact.length > maxLen ? `${compact.slice(0, Math.max(0, maxLen - 1))}…` : compact;
+  };
+
+  const formatLookupPercent = (value) => {
+    const numberValue = Number(value);
+    if (!Number.isFinite(numberValue)) return "";
+    const clamped = Math.max(0, Math.min(1, numberValue));
+    return `${Math.round(clamped * 100)}%`;
+  };
+
+  const formatLookupDuration = (value) => {
+    const ms = Number(value);
+    if (!Number.isFinite(ms) || ms < 0) return "";
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.round(ms / 1000)}s`;
+  };
+
+  const intentRouteLabel = (route) => {
+    switch (String(route || "")) {
+      case "gamepath_query":
+        return "攻略查詢";
+      case "hermes_web":
+        return "網路查詢";
+      case "general_chat":
+        return "一般聊天";
+      case "ui_command":
+        return "介面指令";
+      case "task_memory":
+        return "任務記錄";
+      case "screenshot_gamepath_query":
+        return "截圖攻略";
+      case "screenshot_visual":
+        return "截圖看圖";
+      case "screenshot_hud":
+        return "截圖/HUD";
+      case "clarify":
+        return "需要釐清";
+      case "skip":
+        return "略過";
+      default:
+        return compactLookupValue(route, 28);
+    }
+  };
+
+  const retrievalLabel = (value) => {
+    switch (String(value || "")) {
+      case "direct":
+        return "可直接用";
+      case "summarize":
+        return "需整理";
+      case "miss":
+        return "未命中";
+      case "skipped":
+        return "未查詢";
+      default:
+        return compactLookupValue(value, 28);
+    }
+  };
+
+  const lookupAccuracyParts = (status) => {
+    const parts = [];
+    const retrievalRouter = status?.local_router_retrieval || null;
+    const topCandidate = Array.isArray(status?.candidates) ? status.candidates[0] : null;
+    const scoreText = formatLookupPercent(status?.retrieval_score);
+    const coverageText = formatLookupPercent(topCandidate?.match_coverage);
+    const routerScoreText = formatLookupPercent(retrievalRouter?.score);
+    const retrievalConf = retrievalLabel(retrievalRouter?.confidence || status?.retrieval_confidence);
+
+    if (scoreText) parts.push(`準確度 ${scoreText}`);
+    else if (routerScoreText) parts.push(`準確度 ${routerScoreText}`);
+    if (coverageText) parts.push(`覆蓋 ${coverageText}`);
+    if (retrievalConf) parts.push(`評估 ${retrievalConf}`);
+    return parts;
+  };
+
+  const lookupTimingParts = (status) => {
+    const parts = [];
+    const stage = String(status?.stage || "");
+    const router = status?.local_router || null;
+    const retrievalRouter = status?.local_router_retrieval || null;
+    const intentMs = formatLookupDuration(router?.latency_ms ?? status?.intent_latency_ms);
+    const sqliteMs = formatLookupDuration(status?.search_elapsed_ms);
+    const retrievalMs = formatLookupDuration(retrievalRouter?.latency_ms);
+    const hintMs = formatLookupDuration(status?.gamepath_hint_ms);
+
+    const isVisionRoute = router?.route_source === "vision"
+      || String(router?.intent_route || "").startsWith("screenshot_");
+    if (intentMs) parts.push(`${isVisionRoute ? "Vision判斷" : "Qwen意圖"} ${intentMs}`);
+    if (sqliteMs) parts.push(`SQLite ${sqliteMs}`);
+    if (retrievalMs) parts.push(`Qwen評估 ${retrievalMs}`);
+    if (hintMs) parts.push(`Qwen提示 ${hintMs}`);
+
+    if (stage === "gamepath_miss") {
+      parts.push("Hermes/Tavily 待開始");
+    } else if (stage === "agent_may_search_web" || stage === "agent_web_search") {
+      parts.push("Hermes/Tavily 進行中");
+    } else if (stage === "agent_no_tools") {
+      parts.push("Hermes 回答中");
+    }
+
+    return parts;
+  };
+
+  const lookupRouteSegments = (status) => {
+    const stage = String(status?.stage || "");
+    const router = status?.local_router || null;
+    const retrievalRouter = status?.local_router_retrieval || null;
+    const segments = [];
+
+    if (router?.used || router?.intent_route) {
+      const route = intentRouteLabel(router.intent_route || (router.search_gamepath ? "gamepath_query" : "general_chat"));
+      const isVisionRoute = router?.route_source === "vision"
+        || String(router?.intent_route || "").startsWith("screenshot_");
+      const label = router?.used
+        ? (isVisionRoute ? "Vision判斷" : "Qwen判斷")
+        : (isVisionRoute ? "Vision補救" : "後端補救");
+      segments.push(route ? `${label}:${route}` : label);
+    }
+    const pushRetrievalSegment = () => {
+      if (!retrievalRouter?.used) return;
+      const retrievalRoute = retrievalLabel(retrievalRouter.confidence || retrievalRouter.route || retrievalRouter.reason);
+      segments.push(retrievalRoute ? `Qwen評估:${retrievalRoute}` : "Qwen評估");
+    };
+
+    if (stage === "gamepath_hit") {
+      segments.push("GamePath本地命中");
+      pushRetrievalSegment();
+      segments.push("本地回答");
+    } else if (stage === "gamepath_summarizing" || stage === "gamepath_context") {
+      segments.push("GamePath本地命中");
+      pushRetrievalSegment();
+      segments.push("模型整理");
+    } else if (stage === "gamepath_miss") {
+      segments.push("GamePath未命中");
+      pushRetrievalSegment();
+      segments.push("Hermes/Tavily候選");
+    }
+    else if (stage === "gamepath_skipped") segments.push("略過GamePath", "一般聊天");
+    else if (stage === "guide_context") segments.push("本地攻略快取", "模型整理");
+    else if (stage === "memory_context") segments.push("玩家記憶", "模型整理");
+    else if (stage === "agent_may_search_web" || stage === "agent_web_search") segments.push("本地未命中", "Hermes/Tavily");
+    else if (stage === "agent_no_tools") segments.push("本地未命中", "Hermes回答");
+    else if (stage === "gamepath_stored") segments.push("GamePath寫入", "SQLite+Markdown");
+    else if (stage === "gamepath_not_stored") segments.push("GamePath未寫入");
+    else if (stage === "gamepath_disputed") segments.push("玩家回報", "GamePath降權");
+    else if (stage === "gamepath_feedback_missing") segments.push("玩家回報", "找不到紀錄");
+    else if (stage === "error") segments.push("錯誤");
+    else if (status?.source) segments.push(compactLookupValue(status.source, 40));
+
+    return segments.filter(Boolean);
+  };
+
+  const formatLookupTrace = (status) => {
+    const segments = lookupRouteSegments(status);
+    const parts = [];
+    const accuracyParts = lookupAccuracyParts(status);
+    const gamepathHits = status?.gamepath_hits ?? status?.hits;
+    const topCandidate = Array.isArray(status?.candidates) ? status.candidates[0] : null;
+    const topId = status?.top_id ?? topCandidate?.id;
+    const topTitle = status?.top_title || topCandidate?.title || topCandidate?.question;
+
+    if (segments.length) parts.push(`路徑：${segments.join(" → ")}`);
+    if (accuracyParts.length) parts.push(accuracyParts.join(" / "));
+    const timingParts = lookupTimingParts(status);
+    if (timingParts.length) parts.push(`耗時：${timingParts.join(" / ")}`);
+    if (gamepathHits != null) parts.push(`本地候選 ${gamepathHits}`);
+    if (topTitle) parts.push(`最佳候選 #${topId ?? "?"} ${compactLookupValue(topTitle, 46)}`);
+    if (status?.entry_id != null) parts.push(`寫入 #${status.entry_id}`);
+    if (status?.reason) parts.push(`原因：${compactLookupValue(status.reason, 46)}`);
+
+    return parts.join(" | ");
+  };
+
+  const recordLookupStatus = (status, statusDiv, routeLogDiv, routeTrace) => {
+    if (!status || !statusDiv) return;
+    const summary = formatLookupStatus(status);
+    const detail = formatLookupTrace(status);
+    const stage = status?.stage || "";
+    const previous = routeTrace[routeTrace.length - 1];
+
+    statusDiv.textContent = summary;
+    statusDiv.dataset.stage = stage;
+
+    if (!previous || previous.detail !== detail) {
+      routeTrace.push({
+        stage,
+        summary,
+        detail,
+        time: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        })
+      });
+    }
+
+    if (!routeLogDiv) return;
+    routeLogDiv.replaceChildren();
+    routeTrace.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = "lookup-route-line";
+      row.dataset.stage = item.stage || "";
+      row.textContent = `${index + 1}. ${item.time} ${item.detail}`;
+      routeLogDiv.appendChild(row);
+    });
+    routeLogDiv.hidden = routeTrace.length === 0;
+    statusDiv.title = routeTrace.map((item, index) => `${index + 1}. ${item.time} ${item.detail}`).join("\n");
   };
 
   const showImagePreview = (base64, source = null, mimeType = "image/jpeg") => {
@@ -443,6 +760,61 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const shouldAutoCapture = (text) => AUTO_CAPTURE_RE.test(text || "");
   const shouldTaskIntent = (text) => TASK_INTENT_RE.test(text || "") || VOICE_TASK_INTENT_RE.test(text || "");
+
+  const routeUserIntent = async (text, signal = null) => {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) return null;
+    try {
+      const response = await fetch(`${API_BASE}/intent/route`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: trimmed,
+          game_id: gameSelect?.value || null
+        }),
+        signal
+      });
+      if (!response.ok) {
+        throw new Error(`Intent route returned ${response.status}`);
+      }
+      const data = await response.json();
+      const decision = data?.decision || {};
+      return {
+        route: String(data?.route || decision.intent_route || "").trim() || (
+          decision.prefer_hermes_agent
+            ? "hermes_web"
+            : decision.search_gamepath
+              ? "gamepath_query"
+              : "general_chat"
+        ),
+        decision,
+        elapsedMs: data?.elapsed_ms
+      };
+    } catch (err) {
+      if (err?.name === "AbortError") throw err;
+      console.warn("Qwen intent route failed; continuing as chat:", err);
+      return {
+        route: "general_chat",
+        decision: {
+          used: false,
+          intent_route: "general_chat",
+          reason: `route_failed:${err?.message || err}`
+        },
+        elapsedMs: null
+      };
+    }
+  };
+
+  const formatIntentRouteStatus = (intent, fallbackRoute = "") => {
+    const route = String(intent?.route || fallbackRoute || "unknown").trim();
+    const decision = intent?.decision || {};
+    const reason = decision.raw_reason || decision.reason || "";
+    const elapsed = Number(intent?.elapsedMs ?? decision.latency_ms);
+    const parts = [`Qwen route: ${route}`];
+    if (reason) parts.push(`${reason}`);
+    if (Number.isFinite(elapsed) && elapsed > 0) parts.push(`${Math.round(elapsed)}ms`);
+    return parts.join(" | ");
+  };
 
   const selectedCaptureMonitor = () => {
     const value = captureDisplaySelect?.value || localStorage.getItem("capture-monitor") || "auto";
@@ -680,9 +1052,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     localStorage.setItem("perf-mode", enabled ? "true" : "false");
   };
 
-  const handleUiCommand = async (rawText) => {
+  const handleUiCommand = async (rawText, options = {}) => {
     const text = normalizeCommandText(rawText);
     const compact = compactCommandText(rawText);
+    const appendCommandUserMessage = () => {
+      if (!options.userAlreadyAppended) appendUserMessage(rawText);
+    };
     const directUiTarget = includesAny(compact, [
       "gamesearch",
       "\u904a\u6232\u641c\u5c0b",
@@ -709,7 +1084,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (includesAny(compact, ["task", "\u4efb\u52d9", "\u76ee\u6a19\u6e05\u55ae", "\u5f85\u8fa6"]) && includesAny(compact, ["\u8996\u7a97", "\u7a97\u53e3", "\u9762\u677f", "\u958b", "\u95dc", "\u96b1\u85cf", "\u6536\u8d77", "\u986f\u793a", "open", "show", "close", "hide", "toggle"])) {
       const action = requestedWindowAction(compact, wantsOn, wantsOff);
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       if (action === "close") {
         await closeTasksWindow();
         appendMessage("UI command: Task window closed.", "bot");
@@ -729,7 +1104,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (!wantsStore && includesAny(compact, ["gamesearch", "\u904a\u6232\u641c\u5c0b", "\u641c\u5c0b", "\u67e5\u8a62", "\u641c\u5c0b\u8996\u7a97", "\u653b\u7565\u8996\u7a97"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       if (wantsOff) {
         await closeSearchWindow();
         appendMessage("UI command: Game Search closed.", "bot");
@@ -751,7 +1126,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (includesAny(compact, ["\u900f\u660e", "opacity"])) {
       const percent = extractPercent(text);
       if (percent) {
-        appendUserMessage(rawText);
+        appendCommandUserMessage();
         applyOpacity(percent);
         appendMessage(`UI command: Opacity set to ${percent}%.`, "bot");
         if (messageInput) messageInput.value = "";
@@ -760,7 +1135,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (includesAny(compact, ["\u5167\u5bb9\u4fdd\u8b77", "\u4fdd\u8b77\u5167\u5bb9", "\u622a\u5716\u4fdd\u8b77", "protection", "protect"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       if ((wantsOn && !captureProtectionEnabled) || (wantsOff && captureProtectionEnabled) || (!wantsOn && !wantsOff)) {
         await toggleCaptureProtection();
       } else {
@@ -771,14 +1146,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (includesAny(compact, ["\u622a\u5716", "\u64f7\u53d6\u756b\u9762", "screenshot", "capture"]) && !includesAny(compact, ["\u4efb\u52d9", "task"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       await takeScreenshot();
       if (messageInput) messageInput.value = "";
       return true;
     }
 
     if (includesAny(compact, ["hud", "\u6a19\u8a18"]) && includesAny(compact, ["\u6e05\u9664", "\u95dc\u6389", "\u6d88\u6389", "clear", "hide"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       await clearHudOverlay();
       appendMessage("UI command: HUD cleared.", "bot");
       if (messageInput) messageInput.value = "";
@@ -786,7 +1161,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (includesAny(compact, ["hud"]) && includesAny(compact, ["test", "\u6e2c\u8a66"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       const target = hudTargetFromSource(null);
       target.imageWidth = Number(target.width);
       target.imageHeight = Number(target.height);
@@ -797,7 +1172,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (includesAny(compact, ["perf", "\u6027\u80fd", "\u6548\u80fd"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       const enabled = wantsOff ? false : wantsOn ? true : !document.body.classList.contains("perf-mode");
       setPerfMode(enabled);
       appendMessage(enabled ? "UI command: Perf mode on." : "UI command: Perf mode off.", "bot");
@@ -806,7 +1181,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (includesAny(compact, ["\u8a9e\u97f3", "voice", "mic", "\u9ea5\u514b\u98a8"])) {
-      appendUserMessage(rawText);
+      appendCommandUserMessage();
       if (wantsOff) {
         stopVoiceMode();
         appendMessage("UI command: Voice mode off.", "bot");
@@ -863,13 +1238,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const createTaskFromContext = async (note = "", context = {}) => {
-    if (isSending) return;
+    const parentBusy = context.parentBusy === true;
+    if (isSending && !parentBusy) return;
     const originalNote = (note || "").trim();
     let imageBase64 = context.imageBase64 ?? pendingImageBase64;
     let imageMimeType = context.imageMimeType ?? pendingImageMimeType;
     let captureSource = context.captureSource ?? pendingCaptureSource;
-    const status = appendMessage("Building task from screen...", "bot");
-    setBusy(true);
+    const routeStatus = context.intent ? `${formatIntentRouteStatus(context.intent, "task_memory")}\n` : "";
+    const status = appendMessage(`${routeStatus}Building task from screen...`, "bot");
+    if (!parentBusy) setBusy(true);
     if (taskCaptureBtn) {
       taskCaptureBtn.disabled = true;
       setButtonContent(taskCaptureBtn, "loader", "Task...");
@@ -885,7 +1262,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         captureSource = data.source || null;
       }
 
-      appendUserMessage(originalNote || "Create a task from the current screen.", imageBase64, imageMimeType);
+      if (!context.userAlreadyAppended) {
+        appendUserMessage(originalNote || "Create a task from the current screen.", imageBase64, imageMimeType);
+      }
       const response = await fetch(`${API_BASE}/tasks/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -894,7 +1273,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           image_base64: imageBase64,
           game_id: gameSelect?.value || null,
           source_title: captureSource?.window_title || ""
-        })
+        }),
+        signal: context.signal || abortController?.signal
       });
 
       if (!response.ok) {
@@ -909,9 +1289,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (messageInput) messageInput.value = "";
       await openTasksWindow();
     } catch (err) {
-      status.textContent = `Task logging failed: ${err.message || err}`;
+      status.textContent = err?.name === "AbortError"
+        ? "Task logging stopped."
+        : `Task logging failed: ${err.message || err}`;
     } finally {
-      setBusy(false);
+      if (!parentBusy) setBusy(false);
       if (taskCaptureBtn) {
         taskCaptureBtn.disabled = false;
         setButtonContent(taskCaptureBtn, "flag", "Task");
@@ -1579,14 +1961,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   };
 
-  const sendToAI = async (text, imageBase64 = null, captureSource = null) => {
-    if (isSending) return;
-    setBusy(true);
-    abortController = new AbortController();
+  const sendToAI = async (text, imageBase64 = null, captureSource = null, options = {}) => {
+    const manageBusy = options.manageBusy !== false;
+    if (manageBusy && isSending) return;
+    if (manageBusy) {
+      setBusy(true);
+      abortController = new AbortController();
+    } else if (!abortController) {
+      abortController = new AbortController();
+    }
 
-    const { statusDiv, contentDiv } = createBotResponseMessage(
+    const { statusDiv, routeLogDiv, routeTrace, contentDiv } = createBotResponseMessage(
       imageBase64 ? "Reading compressed screenshot..." : "Preparing response..."
     );
+    let collected = "";
+    let showedOverlay = false;
 
     try {
       const body = {
@@ -1607,9 +1996,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         const detail = await response.text().catch(() => "");
         throw new Error(`Backend returned ${response.status}: ${detail}`);
       }
-      let collected = "";
-      let showedOverlay = false;
-
       const handleSseLine = async (line) => {
         if (!line.startsWith("data: ")) return;
         const dataStr = line.slice(6).trim();
@@ -1618,8 +2004,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try {
           const dataObj = JSON.parse(dataStr);
           if (dataObj.lookup_status) {
-            statusDiv.textContent = formatLookupStatus(dataObj.lookup_status);
-            statusDiv.dataset.stage = dataObj.lookup_status.stage || "";
+            recordLookupStatus(dataObj.lookup_status, statusDiv, routeLogDiv, routeTrace);
             if (["gamepath_stored", "gamepath_disputed"].includes(dataObj.lookup_status.stage)) {
               await notifyGamePathChanged(dataObj.lookup_status);
             }
@@ -1631,14 +2016,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             showedOverlay = showedOverlay || hudShown;
             if (!hudShown) {
               collected += `\nHUD 顯示失敗。${lastHudError}`;
-              contentDiv.textContent = collected.trim();
+              renderFormattedMessage(contentDiv, collected.trim());
               scrollChatToBottom();
             }
           }
           const content = dataObj.content || "";
           if (!content) return;
           collected += content;
-          contentDiv.textContent = collected.trimStart();
+          renderFormattedMessage(contentDiv, collected.trimStart());
           scrollChatToBottom();
         } catch (err) {
           console.warn("Could not parse SSE line:", line, err);
@@ -1668,24 +2053,26 @@ document.addEventListener("DOMContentLoaded", async () => {
         for (const line of lines) await handleSseLine(line.trimEnd());
       }
 
-      contentDiv.textContent = collected.trim() || (
+      renderFormattedMessage(contentDiv, collected.trim() || (
         showedOverlay
           ? "HUD 已標記。"
           : "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
-      );
+      ));
       scrollChatToBottom();
     } catch (error) {
       if (error.name === "AbortError") {
-        contentDiv.textContent = `${contentDiv.textContent || ""}\n\nStopped.`.trim();
+        renderFormattedMessage(contentDiv, `${collected.trim()}\n\nStopped.`.trim());
       } else {
         console.error(error);
         statusDiv.textContent = "Connection failed";
         statusDiv.dataset.stage = "error";
-        contentDiv.textContent = `${error.message || error}`;
+        renderFormattedMessage(contentDiv, `${error.message || error}`);
       }
     } finally {
-      abortController = null;
-      setBusy(false);
+      if (manageBusy) {
+        abortController = null;
+        setBusy(false);
+      }
     }
   };
 
@@ -1697,27 +2084,53 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!text && !imageBase64) return;
     if (isSendInFlight || isSending) return;
     isSendInFlight = true;
+    let busyManagedHere = false;
+    let userAlreadyAppended = false;
 
     try {
       await exitVirtualCursorTextEntry("send");
 
-      if (text && !imageBase64 && await handleUiCommand(text)) {
-        clearImagePreview();
-        return;
+      setBusy(true);
+      busyManagedHere = true;
+      abortController = new AbortController();
+
+      messageInput.value = "";
+      clearImagePreview();
+      appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
+      userAlreadyAppended = true;
+
+      const intent = text ? await routeUserIntent(text, abortController.signal) : null;
+      if (abortController?.signal?.aborted) return;
+      const intentRoute = String(intent?.route || "").trim();
+
+      if (text && !imageBase64 && intentRoute === "ui_command") {
+        abortController = null;
+        setBusy(false);
+        busyManagedHere = false;
+        if (await handleUiCommand(text, { userAlreadyAppended })) {
+          return;
+        }
+        setBusy(true);
+        busyManagedHere = true;
+        abortController = new AbortController();
       }
 
-      if (text && shouldTaskIntent(text)) {
+      if (text && intentRoute === "task_memory") {
         await createTaskFromContext(text, {
           imageBase64,
           imageMimeType,
           captureSource,
-          capture: true
+          capture: true,
+          intent,
+          userAlreadyAppended,
+          parentBusy: true,
+          signal: abortController?.signal
         });
         return;
       }
 
-      if (!imageBase64 && shouldAutoCapture(text)) {
-        const status = appendMessage("Auto-capturing screen...", "bot");
+      if (!imageBase64 && intentRoute === "screenshot_hud") {
+        const status = appendMessage(`${formatIntentRouteStatus(intent, "screenshot_hud")}\nAuto-capturing screen...`, "bot");
         try {
           screenshotBtn.disabled = true;
           setButtonContent(screenshotBtn, "camera", "Shot...");
@@ -1739,18 +2152,27 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
       }
 
-      messageInput.value = "";
-      clearImagePreview();
-      appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
       const fixedSourceHint = captureSource?.window_title
         ? `\n\nScreenshot source window title: ${captureSource.window_title}`
         : "";
       await sendToAI(
         (text || "Analyze this screenshot and give one useful next step.") + fixedSourceHint,
         imageBase64,
-        captureSource
+        captureSource,
+        { manageBusy: false }
       );
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        appendMessage("Stopped.", "bot");
+      } else {
+        console.error(err);
+        appendMessage(`Send failed: ${err.message || err}`, "bot");
+      }
     } finally {
+      if (busyManagedHere) {
+        abortController = null;
+        setBusy(false);
+      }
       isSendInFlight = false;
     }
   };

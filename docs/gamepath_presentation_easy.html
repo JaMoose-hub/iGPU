@@ -1,0 +1,891 @@
+<!doctype html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GamePath 簡報講稿版</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101217;
+      --panel: #1b1f28;
+      --panel-2: #252a35;
+      --line: #3a4150;
+      --text: #f4f7fb;
+      --muted: #bdc7d8;
+      --soft: #8d99ad;
+      --green: #7ddb9c;
+      --cyan: #83dce9;
+      --blue: #9aaeff;
+      --yellow: #ffd978;
+      --red: #ff9f9f;
+      --shadow: 0 20px 56px rgba(0, 0, 0, 0.34);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, rgba(131, 220, 233, 0.1), transparent 330px),
+        var(--bg);
+      color: var(--text);
+      font-family: "Microsoft JhengHei", "Noto Sans TC", "Segoe UI", Arial, sans-serif;
+      line-height: 1.62;
+    }
+
+    .deck {
+      width: min(1280px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .slide {
+      min-height: min(900px, calc(100vh - 32px));
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 44px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .slide.compact {
+      min-height: auto;
+    }
+
+    .eyebrow {
+      color: var(--cyan);
+      font-weight: 800;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(42px, 7vw, 84px);
+      line-height: 1.06;
+      letter-spacing: 0;
+      margin-bottom: 20px;
+    }
+
+    h2 {
+      font-size: clamp(30px, 4.2vw, 52px);
+      line-height: 1.14;
+      letter-spacing: 0;
+      margin-bottom: 22px;
+    }
+
+    h3 {
+      font-size: 21px;
+      line-height: 1.32;
+      letter-spacing: 0;
+      margin-bottom: 10px;
+    }
+
+    p {
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 940px;
+    }
+
+    .lead {
+      font-size: clamp(20px, 2.1vw, 28px);
+      color: var(--muted);
+      max-width: 1040px;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .tag,
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .pill.good {
+      color: var(--green);
+      border-color: rgba(125, 219, 156, 0.42);
+      background: rgba(125, 219, 156, 0.12);
+    }
+
+    .pill.warn {
+      color: var(--yellow);
+      border-color: rgba(255, 217, 120, 0.42);
+      background: rgba(255, 217, 120, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.036), rgba(255, 255, 255, 0.015)), var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    .span-3 {
+      grid-column: span 3;
+    }
+
+    .span-4 {
+      grid-column: span 4;
+    }
+
+    .span-5 {
+      grid-column: span 5;
+    }
+
+    .span-6 {
+      grid-column: span 6;
+    }
+
+    .span-7 {
+      grid-column: span 7;
+    }
+
+    .span-8 {
+      grid-column: span 8;
+    }
+
+    .span-12 {
+      grid-column: span 12;
+    }
+
+    .metric {
+      min-height: 150px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .metric-label {
+      color: var(--soft);
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .metric-value {
+      font-size: clamp(34px, 5vw, 58px);
+      font-weight: 900;
+      line-height: 1;
+      color: var(--green);
+      margin: 10px 0;
+    }
+
+    .metric-value.blue {
+      color: var(--blue);
+    }
+
+    .metric-value.warn {
+      color: var(--yellow);
+    }
+
+    .metric-value.red {
+      color: var(--red);
+    }
+
+    .metric-note {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 155px;
+    }
+
+    .step::after {
+      content: ">";
+      position: absolute;
+      right: -12px;
+      top: 56px;
+      color: var(--soft);
+      font-weight: 900;
+    }
+
+    .step:last-child::after {
+      display: none;
+    }
+
+    .step small {
+      display: block;
+      color: var(--cyan);
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .step p {
+      font-size: 14px;
+      margin-bottom: 0;
+    }
+
+    .list {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .list li {
+      margin: 9px 0;
+    }
+
+    .sublist {
+      margin: 8px 0 2px;
+      padding-left: 18px;
+      color: var(--soft);
+      font-size: 15px;
+    }
+
+    .sublist li {
+      margin: 5px 0;
+    }
+
+    .example {
+      border-left: 4px solid var(--cyan);
+      background: rgba(131, 220, 233, 0.08);
+      padding: 14px 16px;
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 18px;
+    }
+
+    .example strong {
+      color: var(--cyan);
+    }
+
+    .callout {
+      border: 1px solid rgba(131, 220, 233, 0.4);
+      background: rgba(131, 220, 233, 0.08);
+      border-radius: 8px;
+      padding: 18px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .callout strong {
+      color: var(--cyan);
+    }
+
+    .demo-shot {
+      display: block;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d0f14;
+    }
+
+    .demo-caption {
+      color: var(--muted);
+      font-size: 16px;
+      margin-bottom: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    th,
+    td {
+      padding: 12px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.045);
+      font-weight: 900;
+    }
+
+    .code {
+      display: inline-block;
+      color: #e8eeff;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: Consolas, "Courier New", monospace;
+    }
+
+    .speaker {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: 16px;
+      padding-top: 14px;
+      color: var(--soft);
+      font-size: 15px;
+    }
+
+    .speaker strong {
+      color: var(--yellow);
+    }
+
+    .hint-demo {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .hint {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .hint strong {
+      color: var(--green);
+    }
+
+    .footer {
+      color: var(--soft);
+      font-size: 13px;
+      padding-top: 22px;
+    }
+
+    @media (max-width: 900px) {
+      .deck {
+        width: min(100% - 28px, 1280px);
+      }
+
+      .grid,
+      .flow,
+      .hint-demo {
+        grid-template-columns: 1fr;
+      }
+
+      .span-3,
+      .span-4,
+      .span-5,
+      .span-6,
+      .span-7,
+      .span-8,
+      .span-12 {
+        grid-column: auto;
+      }
+
+      .step::after {
+        content: "v";
+        right: 18px;
+        top: auto;
+        bottom: -24px;
+      }
+
+      .slide {
+        min-height: auto;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">Game Companion / GamePath Briefing</div>
+      <h1>GamePath：讓玩家不用跳出遊戲查攻略</h1>
+      <p class="lead">
+        這套架構把「常見攻略」沉澱在本地，用地端 Qwen 判斷要不要查，
+        用 SQLite/RAG Lite 快速找答案；本地不足時才交給雲端 Hermes Agent GPT5.5 與 Tavily。
+      </p>
+      <div class="tag-row">
+        <span class="tag">Cloud + Local Hybrid</span>
+        <span class="tag">iGPU Qwen Router</span>
+        <span class="tag">SQLite FTS5</span>
+        <span class="tag">RAG Lite</span>
+        <span class="tag">Hermes GPT5.5</span>
+        <span class="tag">LLM-wiki Ready</span>
+      </div>
+      <div class="callout" style="margin-top:24px">
+        <strong> 核心目的： </strong>
+        玩家卡關時不用離開遊戲去翻長篇攻略；常見問題走本地 GamePath 快速回答， 本地不知道或需要最新版資訊時才上雲，降低延遲、成本與暴雷風險。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>1. 玩家痛點：查攻略會打斷遊戲</h2>
+      <div class="grid">
+        <article class="card span-6">
+          <h3>以前的流程</h3>
+          <ul class="list">
+            <li>玩家卡住。</li>
+            <li>Alt + Tab 切出去。</li>
+            <li>搜尋攻略、比對版本、找關鍵段落。</li>
+            <li>回到遊戲時已經失去節奏。</li>
+          </ul>
+        </article>
+        <article class="card span-6">
+          <h3>GamePath 的流程</h3>
+          <ul class="list">
+            <li>玩家直接問遊戲感知。</li>
+            <li>系統先查本地攻略庫。</li>
+            <li>用 Hint 1/2/3 回答，不一次暴雷。</li>
+            <li>本地沒有才上網補資料。</li>
+          </ul>
+        </article>
+      </div>
+      <div class="example" style="margin-top:18px">
+        <strong>簡單例子：</strong>
+        玩家問「廚房那個怪物還是很難打」，系統應該先找廚房怪物相關資料，
+        但回答方式要換成「打法建議」，而不是只重複路線攻略。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>2. 總體架構：地端快取 + 雲端補強</h2>
+      <div class="flow">
+        <div class="step">
+          <small>Step 1</small>
+          <h3>玩家輸入</h3>
+          <p>文字、語音、截圖或 HUD 需求進入遊戲陪伴前端。</p>
+        </div>
+        <div class="step">
+          <small>Step 2</small>
+          <h3>地端模型意圖</h3>
+          <p>用 iGPU 判斷這句話是攻略、聊天、UI 指令、截圖 HUD，還是需要上網。</p>
+        </div>
+        <div class="step">
+          <small>Step 3</small>
+          <h3>GamePath</h3>
+          <p>攻略問題才查本機資料庫</p>
+        </div>
+        <div class="step">
+          <small>Step 4</small>
+          <h3>Hermes Agent</h3>
+          <p>本地資料信心不足、最新版、patch 或複雜推理時，交給 Hermes GPT5.5 / Tavily。</p>
+        </div>
+        <div class="step">
+          <small>Step 5</small>
+          <h3>寫回本地</h3>
+          <p>只有可重用的低劇透提示，才保存成 SQLite + Markdown。</p>
+        </div>
+      </div>
+      <div class="speaker">
+        <strong>講法：</strong>
+        地端負責「快、便宜、可離線」，雲端負責「查新資料、複雜推理、整理答案」。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>3. 三種玩家問法，走三條不同路</h2>
+      <div class="grid">
+        <article class="card span-4">
+          <h3>攻略問題</h3>
+          <p class="example">「唱歌的女殭屍在哪？」</p>
+          <p>Qwen 判斷為 <span class="code">gamepath_query</span>，查 GamePath，本地命中後用 Hint 回覆。</p>
+        </article>
+        <article class="card span-4">
+          <h3>UI 指令</h3>
+          <p class="example">「調整遊戲感知視窗透明度」</p>
+          <p>Qwen 判斷為 <span class="code">ui_command</span>，不查攻略庫，交給前端安全動作。</p>
+        </article>
+        <article class="card span-4">
+          <h3>最新版問題</h3>
+          <p class="example">「最新 patch 怪物有改弱點嗎？」</p>
+          <p>Qwen 判斷為 <span class="code">hermes_web</span>，跳過本地舊資料，交給 Hermes/Tavily。</p>
+        </article>
+      </div>
+      <div class="callout" style="margin-top:18px">
+        <strong>重點：</strong>
+        不是每句話都查 SQLite，也不是每句話都上雲。Qwen 的價值是先判斷「該去哪裡找」。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>4. RAG Lite 簡單的方式理解</h2>
+      <div class="grid">
+        <article class="card span-7">
+          <h3>像一本有索引的攻略筆記</h3>
+          <ul class="list">
+            <li>格式 Markdown 是完整筆記。</li>
+            <li>SQLite、FTS5 則負責建立索引、快速搜尋並篩選正確段落</li>
+            <li>Backend Evaluator 先用硬性規則打分數及排序 (關鍵字核心詞重疊、Tag、資料範圍...)
+              <ul class="sublist">
+                <li>玩家問：「廚房的怪物怎麼打？」</li>
+                <li><strong>match_coverage</strong> 看重要詞是否被覆蓋：廚房、怪物、打法、弱點、攻略。</li>
+                <li>候選 A：「廚房屠夫弱點是肩膀，建議用溶血注射器。」=> 覆蓋高。</li>
+                <li>候選 B：「廚房旁邊可以取得鑰匙。」=> 只有廚房，覆蓋不夠。</li>
+                <li><strong>core_overlap</strong> 看核心意思：A 是怪物打法所以高；B 是解謎/路線所以低。</li>
+              </ul>
+            </li>
+            <li>最後模型依據分數只看相關段落，整理成玩家能用的提示。</li>
+          </ul>
+        </article>
+        <aside class="card span-5">
+          <h3>和完整 RAG 差在哪？</h3>
+          <table>
+            <tbody>
+              <tr>
+                <td>GamePath RAG Lite</td>
+                <td>不用 embedding ,Rerank model，適合 iGPU 。</td>
+              </tr>
+              <tr>
+                <td>傳統 Vector RAG</td>
+                <td>語意更強，但要額外 embedding 模型與向量索引。</td>
+              </tr>
+              <tr>
+                <td>GraphRAG</td>
+                <td>適合大型 wiki 和角色、地點、事件關係推理，目前還不需要。</td>
+              </tr>
+            </tbody>
+          </table>
+        </aside>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>5. direct / summarize / miss 定義</h2>
+      <div class="grid">
+        <article class="card span-4">
+          <h3><span class="pill good">direct (score >= 0.74)</span></h3>
+          <p>本地資料很明確，可以直接回答。</p>
+          <p class="example">「這把鑰匙用在哪？」<br>直接給低劇透提示。</p>
+        </article>
+        <article class="card span-4">
+          <h3><span class="pill warn">summarize (0.46 <= score < 0.74)</span>
+          </h3>
+          <p>本地有資料，但資料比較長，要濃縮成玩家能懂的說法。</p>
+          <p class="example">「這關怎麼走？」<br>從長攻略抽出 3 個步驟：<br>
+            1. 從中央大堂進入西側走廊，先不要進餐廳，沿著左邊牆走到廚房。<br>
+            2. 廚房內會遇到拿刀的怪物，建議不要硬打，先繞過它到餐廳。<br>
+            3. 餐廳桌上可以拿到手槍彈藥，接著從餐廳北側門出去。
+            4. 出去後會到樓梯間，上二樓前先確認背包裡有紅寶石。<br>
+            5. 如果沒有紅寶石，回到主廳右側的理事長辦公室取得。</p>
+        </article>
+        <article class="card span-4">
+          <h3><span class="pill warn">miss (score < 0.46)</span>
+          </h3>
+          <p>本地不夠或候選很像硬湊，才交給 Hermes / Tavily。</p>
+          <p class="example">「最新版是不是改了？」<br>需要查網路。</p>
+        </article>
+      </div>
+      <div class="hint-demo">
+        <div class="hint"><strong>Hint 1</strong><br>先給方向，不暴雷。</div>
+        <div class="hint"><strong>Hint 2</strong><br>給區域、路線 或 互動物件。</div>
+        <div class="hint"><strong>Hint 3</strong><br>接近答案，但仍避免整段劇透。</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>6. 什麼資料會寫回 GamePath？ (目前硬性規則)</h2>
+      <div class="grid">
+        <article class="card span-6">
+          <h3>會保存</h3>
+          <ul class="list">
+            <li>道具用途。</li>
+            <li>任務下一步。</li>
+            <li>怪物打法或弱點。</li>
+            <li>地圖、路線、謎題提示。</li>
+            <li>Hermes 查網路後濃縮出的可重用攻略。</li>
+          </ul>
+        </article>
+        <article class="card span-6">
+          <h3>不保存</h3>
+          <ul class="list">
+            <li>一般聊天。</li>
+            <li>UI 指令，例如打開視窗、調透明度。</li>
+            <li>不確定或 timeout 的答案。</li>
+            <li>只有網址或來源清單。</li>
+            <li>和既有條目高度重複的內容。</li>
+          </ul>
+        </article>
+      </div>
+      <div class="example" style="margin-top:18px">
+        <strong>簡單例子：</strong>
+        「廚房怪物弱點是什麼？」查到後可以存。<br>
+        「幫我打開 GamePath 視窗」只是操作，不會存。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>7. Benchmark 與 Qwen Gate 實測</h2>
+      <h3 style="margin-top:16px">單純地端資料庫搜尋</h3>
+      <div class="grid" style="margin-bottom:16px">
+        <article class="card metric span-3">
+          <div class="metric-label">最大壓測資料量</div>
+          <div class="metric-value">5,000</div>
+          <div class="metric-note">隔離 SQLite，不污染正式 GamePath。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">Top-1 準確度</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">隔離合成壓測正例，已判定為攻略查詢後的本地搜尋。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">搜尋 P95</div>
+          <div class="metric-value warn">484ms</div>
+          <div class="metric-note">隔離合成 5,000 筆資料、108 次正例查詢。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">重複寫入辨識</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">相似 Hermes 回答不再洗版新增。</div>
+        </article>
+      </div>
+      <div class="card">
+        <h3>Benchmark 摘要：本地搜尋規模測試</h3>
+        <p>以下只看「已被 Qwen 判定為攻略查詢」之後的 SQLite / RAG Lite 搜尋表現。</p>
+        <table>
+          <thead>
+            <tr>
+              <th>資料量</th>
+              <th>DB Size</th>
+              <th>正例 Top-1</th>
+              <th>搜尋 P95</th>
+              <th>去重成功</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>100</td>
+              <td>876 KiB</td>
+              <td><span class="pill good">100%</span></td>
+              <td>101.5 ms</td>
+              <td>100%</td>
+            </tr>
+            <tr>
+              <td>500</td>
+              <td>3,904 KiB</td>
+              <td><span class="pill good">100%</span></td>
+              <td>161.5 ms</td>
+              <td>100%</td>
+            </tr>
+            <tr>
+              <td>2,000</td>
+              <td>15,088 KiB</td>
+              <td><span class="pill good">100%</span></td>
+              <td>266.4 ms</td>
+              <td>100%</td>
+            </tr>
+            <tr>
+              <td>5,000</td>
+              <td>37,388 KiB</td>
+              <td><span class="pill good">100%</span></td>
+              <td>484.2 ms</td>
+              <td>100%</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout" style="margin-top:16px">
+          <strong>負例命中率 33.33%：</strong>純 SQLite/RAG Lite 會出現誤命中，意思是「不能每句話都無腦查本地資料」。
+        </div>
+      </div>
+      <h3 style="margin-top:16px">地端模型意圖判定</h3>
+      <div class="grid" style="margin-top:16px">
+        <article class="card metric span-3">
+          <div class="metric-label">Qwen 正例路由</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">30 筆攻略問題全判為 <span class="code">gamepath_query</span>。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">Qwen Gate 後 Top-1</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">Qwen 只決定是否查；檢索保留玩家原始問句。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">負例阻擋率</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">8 筆非本地攻略問題都沒有進 SQLite。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">Qwen 平均耗時</div>
+          <div class="metric-value warn">13.3s</div>
+          <div class="metric-note">iGPU 地端模型；SQLite 本身平均 52.2ms。</div>
+        </article>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>負例樣本：Qwen 是否成功擋住 GamePath</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>負例類型</th>
+              <th>玩家問法</th>
+              <th>Qwen route</th>
+              <th>Qwen 後結果</th>
+              <th>純 SQLite 可能結果</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>一般聊天</td>
+              <td>我今天心情不好，先陪我聊一下。</td>
+              <td><span class="pill">general_chat</span></td>
+              <td>阻擋 GamePath</td>
+              <td><span class="pill warn">誤命中</span> 豪宅昏暗走廊</td>
+            </tr>
+            <tr>
+              <td>UI 指令</td>
+              <td>打開 GamePath 視窗讓我看資料庫。</td>
+              <td><span class="pill">ui_command</span></td>
+              <td>阻擋 GamePath</td>
+              <td><span class="pill warn">誤命中</span> 全文主要路線整理</td>
+            </tr>
+            <tr>
+              <td>透明度設定</td>
+              <td>把視窗透明度調到 70%。</td>
+              <td><span class="pill">ui_command</span></td>
+              <td>阻擋 GamePath</td>
+              <td>Miss</td>
+            </tr>
+            <tr>
+              <td>最新版網路問題</td>
+              <td>最新 patch 廚房屠夫弱點有改嗎？幫我查網路。</td>
+              <td><span class="pill">hermes_web</span></td>
+              <td>不查本地舊資料，交給 Hermes/Tavily</td>
+              <td><span class="pill warn">誤命中</span> 廚房屠夫弱點</td>
+            </tr>
+            <tr>
+              <td>玩家記憶</td>
+              <td>幫我記錄我剛拿到紅寶石和地下室鑰匙。</td>
+              <td><span class="pill">task_memory</span></td>
+              <td>阻擋 GamePath</td>
+              <td><span class="pill warn">誤命中</span> 公寓地下停車場</td>
+            </tr>
+            <tr>
+              <td>HUD 標記</td>
+              <td>幫我看畫面並圈出門在哪。</td>
+              <td><span class="pill">screenshot_hud</span></td>
+              <td>阻擋 GamePath</td>
+              <td>Miss</td>
+            </tr>
+            <tr>
+              <td>明確否定搜尋</td>
+              <td>先不要查攻略，我只是想確認你有沒有聽到。</td>
+              <td><span class="pill">general_chat</span></td>
+              <td>阻擋 GamePath</td>
+              <td><span class="pill warn">誤命中</span> 不要擊殺喪屍</td>
+            </tr>
+            <tr>
+              <td>架構說明</td>
+              <td>現在 GamePath 架構跟 Hermes 的關係再說明一次。</td>
+              <td><span class="pill">general_chat</span></td>
+              <td>阻擋 GamePath</td>
+              <td><span class="pill warn">誤命中</span> 唱歌女殭屍</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout" style="margin-top:16px">
+        <strong>簡單說：</strong>
+        本地搜尋速度和命中率已足夠；Qwen Gate 的價值是把聊天、UI、記憶、HUD、最新版網路問題擋在 GamePath 之外。
+      </div>
+      <div class="speaker">
+        <strong>來源：</strong>
+        <a
+          href="file:///C:/Projects/iGPU/docs/gamepath_report.html">file:///C:/Projects/iGPU/docs/gamepath_report.html</a>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>8. Demo：實際問答畫面</h2>
+      <div class="grid">
+        <article class="card span-12">
+          <h3>Demo 1：GamePath 本地命中，整理成 Hint 1 / 2 / 3</h3>
+          <p class="demo-caption">玩家問「廚房的怪物如何打敗？」後，系統走地端 Qwen 評估 -> GamePath -> 本地回答，並把資料整理成可操作提示。</p>
+          <img class="demo-shot" src="assets/gamepath_demo_kitchen_monster.png"
+            alt="GamePath demo: kitchen monster local hit with Hint 1 2 3">
+        </article>
+        <article class="card span-12">
+          <h3>Demo 2：本地不足時，Hermes / Tavily 補資料</h3>
+          <p class="demo-caption">玩家問「東翼大廳的入口怎麼進入？」時，本地資料不足，流程改走 Hermes / Tavily，最後仍用低劇透 Hint 格式回到玩家介面。</p>
+          <img class="demo-shot" src="assets/gamepath_demo_east_wing.png"
+            alt="GamePath demo: Hermes Tavily web assisted answer">
+        </article>
+        <article class="card span-12">
+          <h3>Demo 3：直接據透</h3>
+          <p class="demo-caption">玩家問「保險櫃密碼」AI web搜尋後直接據透</p>
+          <img class="demo-shot" src="assets/gamepath_demo_safebox.png"
+            alt="GamePath demo: general chat skipped GamePath">
+        </article>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>9. 結論</h2>
+      <div class="grid">
+        <article class="card span-4">
+          <h3>優勢</h3>
+          <ul class="list">
+            <li>本地命中時，不用每次查網路。</li>
+            <li>SQLite + Markdown 易於打包與離線使用。</li>
+            <li>iGPU 友善，不需要額外 embedding ,Rerank model。</li>
+            <li>低劇透 Hint 格式比較符合遊戲體驗。</li>
+          </ul>
+        </article>
+        <article class="card span-4">
+          <h3>限制</h3>
+          <ul class="list">
+            <li>Qwen gate 有延遲，平均約 13.3 秒。</li>
+            <li>不是完整語意向量搜尋，仍有 miss 的可能。</li>
+            <li>資料量變大後，需要版本、可信度、過期資料治理。</li>
+          </ul>
+        </article>
+        <article class="card span-4">
+          <h3>未來銜接 AI Infra (LLM-wiki)</h3>
+          <ul class="list">
+            <li>現在：GamePath 是可查攻略提示庫。</li>
+            <li>中期：Markdown notes及圖片變成 wiki 頁面。</li>
+            <li>長期：AI Infra 的銜接應用</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer">
+      產生依據：
+      <span class="code">docs/gamepath_report.html</span>、
+      <span class="code">docs/gamepath_qwen_gate_existing_tests.json</span>、
+      <span class="code">docs/gamepath_stress_results.json</span>。
+      本檔為簡報講稿版，可直接用瀏覽器開啟。
+    </div>
+  </main>
+</body>
+
+</html>

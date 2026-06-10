@@ -1,0 +1,1161 @@
+<!doctype html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GamePath 簡報版報告</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111318;
+      --panel: #1b1f28;
+      --panel-2: #232834;
+      --line: #363d4c;
+      --text: #f4f7fb;
+      --muted: #b8c2d4;
+      --soft: #8793a8;
+      --green: #80d89c;
+      --cyan: #82d9ea;
+      --blue: #96adff;
+      --yellow: #ffd678;
+      --red: #ff9b9b;
+      --shadow: 0 22px 60px rgba(0, 0, 0, 0.32);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, rgba(130, 217, 234, 0.1), transparent 360px),
+        var(--bg);
+      color: var(--text);
+      font-family: "Microsoft JhengHei", "Noto Sans TC", "Segoe UI", Arial, sans-serif;
+      line-height: 1.62;
+    }
+
+    .deck {
+      width: min(1280px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 34px 0 70px;
+    }
+
+    .slide {
+      min-height: min(900px, calc(100vh - 40px));
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 42px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .slide.compact {
+      min-height: auto;
+    }
+
+    .eyebrow {
+      color: var(--cyan);
+      font-weight: 800;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(42px, 7vw, 84px);
+      line-height: 1.05;
+      letter-spacing: 0;
+      margin-bottom: 20px;
+    }
+
+    h2 {
+      font-size: clamp(30px, 4.2vw, 52px);
+      line-height: 1.15;
+      letter-spacing: 0;
+      margin-bottom: 22px;
+    }
+
+    h3 {
+      font-size: 21px;
+      line-height: 1.3;
+      letter-spacing: 0;
+      margin-bottom: 10px;
+    }
+
+    p {
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 920px;
+    }
+
+    .lead {
+      font-size: clamp(19px, 2vw, 26px);
+      max-width: 980px;
+      color: var(--muted);
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .tag,
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .pill.good {
+      color: var(--green);
+      border-color: rgba(128, 216, 156, 0.42);
+      background: rgba(128, 216, 156, 0.12);
+    }
+
+    .pill.warn {
+      color: var(--yellow);
+      border-color: rgba(255, 214, 120, 0.42);
+      background: rgba(255, 214, 120, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)), var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    .span-3 {
+      grid-column: span 3;
+    }
+
+    .span-4 {
+      grid-column: span 4;
+    }
+
+    .span-5 {
+      grid-column: span 5;
+    }
+
+    .span-6 {
+      grid-column: span 6;
+    }
+
+    .span-7 {
+      grid-column: span 7;
+    }
+
+    .span-8 {
+      grid-column: span 8;
+    }
+
+    .span-12 {
+      grid-column: span 12;
+    }
+
+    .metric {
+      min-height: 150px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .metric-label {
+      color: var(--soft);
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .metric-value {
+      font-size: clamp(34px, 5vw, 58px);
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0;
+      color: var(--green);
+      margin: 10px 0;
+    }
+
+    .metric-value.blue {
+      color: var(--blue);
+    }
+
+    .metric-value.warn {
+      color: var(--yellow);
+    }
+
+    .metric-note {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 150px;
+    }
+
+    .step::after {
+      content: "→";
+      position: absolute;
+      right: -13px;
+      top: 52px;
+      color: var(--soft);
+      font-weight: 900;
+    }
+
+    .step:last-child::after {
+      display: none;
+    }
+
+    .step small {
+      display: block;
+      color: var(--cyan);
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .step p {
+      font-size: 14px;
+      margin-bottom: 0;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .diagram .box {
+      min-height: 120px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .diagram .box strong {
+      display: block;
+      color: var(--text);
+      font-size: 18px;
+      margin-bottom: 6px;
+    }
+
+    .diagram .box span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .list li {
+      color: var(--muted);
+      padding: 11px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 17px;
+    }
+
+    .list li:last-child {
+      border-bottom: 0;
+    }
+
+    .list strong {
+      color: var(--text);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 15px;
+    }
+
+    th,
+    td {
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .mini-table {
+      font-size: 13px;
+    }
+
+    .mini-table th,
+    .mini-table td {
+      padding: 8px 9px;
+      line-height: 1.45;
+    }
+
+    .two-col-list {
+      columns: 2;
+      column-gap: 22px;
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .two-col-list li {
+      break-inside: avoid;
+      margin: 0 0 7px;
+    }
+
+    .callout {
+      border: 1px solid rgba(130, 217, 234, 0.38);
+      background: rgba(130, 217, 234, 0.08);
+      border-radius: 8px;
+      padding: 20px;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .callout strong {
+      color: var(--cyan);
+    }
+
+    .code {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      color: #dce5ff;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      padding: 2px 6px;
+      white-space: nowrap;
+    }
+
+    .hint-demo {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .hint-demo .hint {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .hint strong {
+      color: var(--green);
+    }
+
+    .footer {
+      color: var(--soft);
+      font-size: 13px;
+      padding-top: 22px;
+    }
+
+    @media print {
+      body {
+        background: #111318;
+      }
+
+      .slide {
+        min-height: 100vh;
+        break-after: page;
+      }
+    }
+
+    @media (max-width: 980px) {
+
+      .span-3,
+      .span-4,
+      .span-5,
+      .span-6,
+      .span-7,
+      .span-8 {
+        grid-column: span 12;
+      }
+
+      .flow,
+      .diagram,
+      .hint-demo {
+        grid-template-columns: 1fr;
+      }
+
+      .step::after {
+        content: "↓";
+        right: 18px;
+        top: auto;
+        bottom: -23px;
+      }
+
+      .slide {
+        min-height: auto;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="eyebrow">Game Companion / GamePath Presentation</div>
+      <h1>GamePath 本地攻略知識庫</h1>
+      <p class="lead">
+        用地端 Qwen 做意圖分流，用 SQLite FTS5 + RAG Lite 快速查本地攻略，
+        本地不足或需要複雜推理時，再交給雲端 Hermes Agent（GPT5.5）/ Tavily，
+        最後用低劇透 Hint 形式回覆玩家。
+      </p>
+      <div class="tag-row">
+        <span class="tag">Cloud + Local Hybrid</span>
+        <span class="tag">SQLite FTS5</span>
+        <span class="tag">RAG Lite</span>
+        <span class="tag">Qwen Intent Gate</span>
+        <span class="tag">Hermes Agent GPT5.5</span>
+        <span class="tag">Tavily Web Search</span>
+        <span class="tag">LLM-wiki Ready</span>
+      </div>
+      <div class="callout" style="margin-top:24px">
+        <strong>核心目的：</strong>
+        玩家卡關時不用離開遊戲去翻長篇攻略；常見問題走本地 GamePath 快速回答，
+        本地不知道或需要最新版資訊時才上雲，降低延遲、成本與暴雷風險。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>1. GamePath 架構圖與流程</h2>
+      <div class="flow">
+        <div class="step">
+          <small>Step 1</small>
+          <h3>玩家輸入</h3>
+          <p>文字、語音、截圖或 HUD 需求進入遊戲陪伴 Overlay。</p>
+        </div>
+        <div class="step">
+          <small>Step 2</small>
+          <h3>Qwen Intent Gate</h3>
+          <p>判斷是攻略、一般聊天、UI 指令、玩家記憶、HUD，或 web/current 問題。</p>
+        </div>
+        <div class="step">
+          <small>Step 3</small>
+          <h3>GamePath RAG Lite</h3>
+          <p>攻略問題才查 SQLite FTS5、chunk index 與 metadata。</p>
+        </div>
+        <div class="step">
+          <small>Step 4</small>
+          <h3>Evaluator</h3>
+          <p>用 coverage、core overlap、area、tags、trust state 判斷命中品質。</p>
+        </div>
+        <div class="step">
+          <small>Step 5</small>
+          <h3>Hermes GPT5.5 / Tavily</h3>
+          <p>本地不足、最新版、patch 或網路攻略需求才進雲端 Agent 搜尋與整理。</p>
+        </div>
+        <div class="step">
+          <small>Step 6</small>
+          <h3>Hint 回覆</h3>
+          <p>整理成 Hint 1/2/3，避免一開始就暴雷。</p>
+        </div>
+      </div>
+
+      <div class="diagram" style="margin-top:18px">
+        <div class="box">
+          <strong>SQLite</strong>
+          <span>查詢入口，保存 entry、chunk、FTS5、metadata。</span>
+        </div>
+        <div class="box">
+          <strong>Markdown Notes</strong>
+          <span>人可讀攻略本體，未來可直接成為 LLM-wiki 頁面來源。</span>
+        </div>
+        <div class="box">
+          <strong>Local Qwen / Cloud Hermes</strong>
+          <span>Qwen 在地端 iGPU 做分流；Hermes Agent（GPT5.5）負責雲端推理、濃縮與外部工具。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>2. RAG Lite 解釋</h2>
+      <div class="grid">
+        <article class="card span-7">
+          <h3>目前做法</h3>
+          <ul class="list">
+            <li><strong>寫入：</strong>攻略濃縮後保存成 Markdown，並建立 SQLite entry / chunk。</li>
+            <li><strong>索引：</strong>用 SQLite FTS5 + 中文 n-gram / search terms 擴展查詢。</li>
+            <li><strong>召回：</strong>用玩家原始問句查 entry 與 chunk，不讓 Qwen 改寫取代主查詢。</li>
+            <li><strong>排序：</strong>依 match coverage、core overlap、metadata、area/entity/tags rerank。</li>
+            <li><strong>決策：</strong>direct、summarize、miss；miss 才進 Hermes/Tavily。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <table>
+          <thead>
+            <tr>
+              <th>方案</th>
+              <th>檢索方式</th>
+              <th>資源需求</th>
+              <th>適合度</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>GamePath RAG Lite</td>
+              <td>SQLite FTS5 + chunk + metadata rerank</td>
+              <td>低，不需 embedding model</td>
+              <td><span class="pill good">目前採用</span></td>
+            </tr>
+            <tr>
+              <td>Vector RAG</td>
+              <td>Embedding + vector similarity</td>
+              <td>中到高，需要額外模型與索引</td>
+              <td>未來資料量變大可選配</td>
+            </tr>
+            <tr>
+              <td>GraphRAG</td>
+              <td>實體、關係、事件圖譜</td>
+              <td>高，需要圖資料與摘要維護</td>
+              <td>未來 LLM-wiki / 世界觀整理可考慮</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid" style="margin-top:16px">
+
+        <article class="card span-6">
+          <h3>direct / summarize / miss</h3>
+          <table class="mini-table">
+            <tbody>
+              <tr>
+                <td><span class="pill good">direct</span></td>
+                <td>本地資料高信心命中；用地端 Qwen 整理成 Hint，不需要查網路。</td>
+              </tr>
+              <tr>
+                <td><span class="pill warn">summarize</span></td>
+                <td>有相關段落，但需要模型濃縮、重組或換成玩家可用提示。</td>
+              </tr>
+              <tr>
+                <td><span class="pill warn">miss</span></td>
+                <td>本地不足或候選太像硬湊；才交給 Hermes GPT5.5 / Tavily。</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>3. Benchmark</h2>
+      <div class="grid">
+        <article class="card metric span-3">
+          <div class="metric-label">最大壓測資料量</div>
+          <div class="metric-value blue">5,000</div>
+          <div class="metric-note">隔離合成 SQLite，不污染正式 GamePath。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">5,000 筆 Top-1</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">正例包含 exact、paraphrase、noisy tag。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">5,000 筆搜尋 P95</div>
+          <div class="metric-value blue">484ms</div>
+          <div class="metric-note">平均 248.9ms，P95 484.2ms。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">重複寫入辨識</div>
+          <div class="metric-value">100%</div>
+          <div class="metric-note">避免 Hermes 相似回答重複洗版。</div>
+        </article>
+      </div>
+
+      <div class="grid" style="margin-top:16px">
+        <article class="card span-6">
+          <h3>Qwen Intent Gate 實測</h3>
+          <table>
+            <tbody>
+              <tr>
+                <td>攻略正例</td>
+                <td><span class="pill good">30 筆，路由 100%</span></td>
+              </tr>
+              <tr>
+                <td>非攻略負例</td>
+                <td><span class="pill good">8 筆，阻擋 100%</span></td>
+              </tr>
+              <tr>
+                <td>Qwen gate 後 Top-1</td>
+                <td><span class="pill good">100%</span></td>
+              </tr>
+              <tr>
+                <td>Qwen 平均耗時</td>
+                <td><span class="pill warn">13.3s</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+        <article class="card span-6">
+          <h3>三種查詢方式比較</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>方式</th>
+                <th>正例 Top-1</th>
+                <th>負例誤命中</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>純 SQLite / RAG Lite</td>
+                <td>100%</td>
+                <td><span class="pill warn">75%</span></td>
+              </tr>
+              <tr>
+                <td>Qwen gate + 原始問句</td>
+                <td><span class="pill good">100%</span></td>
+                <td><span class="pill good">0%</span></td>
+              </tr>
+              <tr>
+                <td>Qwen gate + Qwen 改寫</td>
+                <td><span class="pill warn">80%</span></td>
+                <td>0%</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+
+      <div class="callout" style="margin-top:16px">
+        <strong>數字怎麼看：</strong>
+        SQLite/RAG Lite 本體在 5,000 筆仍可維持 100% Top-1，但純 SQLite 對負例會有 75% 誤命中；
+        因此目前真正採用的是「Qwen gate + 玩家原句檢索」。Qwen 成本高，但能把不該查 GamePath 的句子擋掉，
+        這也是下一步要做 route cache 的原因。
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>3-1. Benchmark 測試資料</h2>
+      <div class="grid">
+        <article class="card span-6">
+          <h3>隔離合成壓測資料</h3>
+          <table class="mini-table">
+            <tbody>
+              <tr>
+                <td>資料庫規模</td>
+                <td>100 / 500 / 2,000 / 5,000 筆；報告主看 5,000 筆結果。</td>
+              </tr>
+              <tr>
+                <td>Golden 正解</td>
+                <td>12 類攻略主題，混入大量其他遊戲與雜訊資料。</td>
+              </tr>
+              <tr>
+                <td>正例查詢</td>
+                <td>exact / paraphrase / noisy tag，每類重複測試，共 108 次正例查詢。</td>
+              </tr>
+              <tr>
+                <td>負例查詢</td>
+                <td>6 種 hard negative x 3 次，共 18 次，用來測純 SQLite 會不會硬湊答案。</td>
+              </tr>
+              <tr>
+                <td>重複寫入</td>
+                <td>6 筆相似 Hermes 答案，用來驗證不重複新增。</td>
+              </tr>
+            </tbody>
+          </table>
+          <h3 style="margin-top:16px">Golden 主題</h3>
+          <ol class="two-col-list">
+            <li>唱歌女殭屍位置</li>
+            <li>廚房屠夫怪打法</li>
+            <li>銀鑰匙用途</li>
+            <li>紅光中庭互動</li>
+            <li>舊醫院下一步</li>
+            <li>鍋爐房三閥門</li>
+            <li>鏡湖碼頭地圖碎片</li>
+            <li>鐘塔守門人弱點</li>
+            <li>月銀枝用途</li>
+            <li>資料室白衣 NPC</li>
+            <li>沉沒禮拜堂支線</li>
+            <li>西翼大廳暗門</li>
+          </ol>
+        </article>
+
+        <article class="card span-6">
+          <h3>正式 Qwen Gate 測試資料</h3>
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>類型</th>
+                <th>筆數</th>
+                <th>目的</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>攻略正例</td>
+                <td>30</td>
+                <td>測 Qwen 是否能判斷為 <span class="code">gamepath_query</span>，並讓 GamePath 用原始問句命中。</td>
+              </tr>
+              <tr>
+                <td>非攻略負例</td>
+                <td>8</td>
+                <td>測一般聊天、UI、記憶、HUD、最新版網路問題是否被擋在 SQLite 前。</td>
+              </tr>
+              <tr>
+                <td>診斷比較</td>
+                <td>30</td>
+                <td>同一批正例再測 Qwen 改寫 query/tags，確認是否會拉低命中。</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3 style="margin-top:16px">負例測試問法</h3>
+          <table class="mini-table">
+            <tbody>
+              <tr>
+                <td>一般聊天</td>
+                <td>我今天心情不好，先陪我聊一下。</td>
+              </tr>
+              <tr>
+                <td>UI 指令</td>
+                <td>打開 GamePath 視窗讓我看資料庫。</td>
+              </tr>
+              <tr>
+                <td>透明度設定</td>
+                <td>把視窗透明度調到 70%。</td>
+              </tr>
+              <tr>
+                <td>最新版網路</td>
+                <td>最新 patch 廚房屠夫弱點有改嗎？幫我查網路。</td>
+              </tr>
+              <tr>
+                <td>玩家記憶</td>
+                <td>幫我記錄我剛拿到紅寶石和地下室鑰匙。</td>
+              </tr>
+              <tr>
+                <td>HUD 標記</td>
+                <td>幫我看畫面並圈出門在哪。</td>
+              </tr>
+              <tr>
+                <td>否定搜尋</td>
+                <td>先不要查攻略，我只是想確認你有沒有聽到。</td>
+              </tr>
+              <tr>
+                <td>架構說明</td>
+                <td>現在 GamePath 架構跟 Hermes 的關係再說明一次。</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+    </section>
+
+    <section class="slide compact">
+      <h2>3-2. 正式攻略正例清單（30 筆）</h2>
+      <div class="card">
+        <table class="mini-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>測試類型</th>
+              <th>玩家測試問法</th>
+              <th>期望 entry</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td>旅館路線</td>
+              <td>鷦木旅館辦公室地圖要在哪拿？</td>
+              <td>#75</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td>廚房餐廳路線</td>
+              <td>療養院一樓西側廚房餐廳要怎麼走？</td>
+              <td>#79</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td>等候室道具</td>
+              <td>等候室後面是不是要去遊樂室兌換道具？</td>
+              <td>#83</td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td>決戰怪物</td>
+              <td>淨水場那個怪物女孩決戰要先啟動哪幾個系統？</td>
+              <td>#94</td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td>彩蛋收集</td>
+              <td>浣熊市警局豆腐先生彩蛋在哪段路線？</td>
+              <td>#101</td>
+            </tr>
+            <tr>
+              <td>6</td>
+              <td>研究主任室謎題</td>
+              <td>前往研究主任室在機關盒處輸入太陽太陽星星的那個長順序是哪筆？</td>
+              <td>#124</td>
+            </tr>
+            <tr>
+              <td>7</td>
+              <td>主廚喪屍</td>
+              <td>遊樂室外主廚喪屍和酒吧保險箱是哪一段？</td>
+              <td>#128</td>
+            </tr>
+            <tr>
+              <td>8</td>
+              <td>酒吧保險箱</td>
+              <td>酒吧休閒室保險箱左10右80左30在哪筆攻略？</td>
+              <td>#131</td>
+            </tr>
+            <tr>
+              <td>9</td>
+              <td>孢源喪屍弱點</td>
+              <td>教堂孢源喪屍弱點是不是發光部位？</td>
+              <td>#133</td>
+            </tr>
+            <tr>
+              <td>10</td>
+              <td>泰坦巨蛛</td>
+              <td>NF大廈泰坦巨蛛弱點在哪？</td>
+              <td>#134</td>
+            </tr>
+            <tr>
+              <td>11</td>
+              <td>Hermes 自動保存</td>
+              <td>廚房屠夫弱點是什麼？要硬打嗎？</td>
+              <td>#139</td>
+            </tr>
+            <tr>
+              <td>12</td>
+              <td>Vision 保存</td>
+              <td>黑白格地板昏暗走廊這是哪裡？</td>
+              <td>#140</td>
+            </tr>
+            <tr>
+              <td>13</td>
+              <td>唱歌女殭屍</td>
+              <td>唱歌女殭屍在哪出沒？</td>
+              <td>#143</td>
+            </tr>
+            <tr>
+              <td>14</td>
+              <td>警衛室門禁卡</td>
+              <td>警衛室和投藥室哪裡拿西側門禁卡？</td>
+              <td>#78</td>
+            </tr>
+            <tr>
+              <td>15</td>
+              <td>血液研究室車庫</td>
+              <td>血液研究室分析血液後六角扳手和車庫器官箱在哪？</td>
+              <td>#85</td>
+            </tr>
+            <tr>
+              <td>16</td>
+              <td>隔離病房腕帶</td>
+              <td>隔離病房和警備主管室要拿幾級身份識別腕帶？</td>
+              <td>#88</td>
+            </tr>
+            <tr>
+              <td>17</td>
+              <td>三樓肥碩喪屍</td>
+              <td>三樓閣樓的肥碩喪屍那段要往哪走？</td>
+              <td>#89</td>
+            </tr>
+            <tr>
+              <td>18</td>
+              <td>貴賓室地下研究所</td>
+              <td>中庭到貴賓室謎題和地下研究所是哪段攻略？</td>
+              <td>#92</td>
+            </tr>
+            <tr>
+              <td>19</td>
+              <td>鷹之星物流倉庫</td>
+              <td>鷹之星物流倉庫三樓拿雪松溪公寓鑰匙和屋頂分電器在哪？</td>
+              <td>#96</td>
+            </tr>
+            <tr>
+              <td>20</td>
+              <td>公寓地下停車場電池</td>
+              <td>公寓地下停車場和汙水處理設施拿電池開捲簾門怎麼走？</td>
+              <td>#97</td>
+            </tr>
+            <tr>
+              <td>21</td>
+              <td>雪松溪公寓集裝箱</td>
+              <td>雪松溪公寓門口BSAA集裝箱鑰匙和信號接收器在哪？</td>
+              <td>#98</td>
+            </tr>
+            <tr>
+              <td>22</td>
+              <td>加油站燃油桶</td>
+              <td>加油站燃油桶和下水道到4號集裝箱是哪一段？</td>
+              <td>#99</td>
+            </tr>
+            <tr>
+              <td>23</td>
+              <td>格裡姆斯通繼電器</td>
+              <td>格裡姆斯通大樓屋頂拿繼電器下樓引爆炸彈怎麼走？</td>
+              <td>#100</td>
+            </tr>
+            <tr>
+              <td>24</td>
+              <td>孤兒院路線</td>
+              <td>孤兒院臥室和育兒室是哪一段路線？</td>
+              <td>#103</td>
+            </tr>
+            <tr>
+              <td>25</td>
+              <td>警局暴君追逐</td>
+              <td>浣熊市警局東側暴君追逐戰到私人收藏室怎麼走？</td>
+              <td>#104</td>
+            </tr>
+            <tr>
+              <td>26</td>
+              <td>方舟伺服器室</td>
+              <td>方舟伺服器室庫房精英衛隊指揮官是哪段？</td>
+              <td>#107</td>
+            </tr>
+            <tr>
+              <td>27</td>
+              <td>生化武器儲存室舔食者</td>
+              <td>生化武器儲存室11和12舔食者大戰是哪段攻略？</td>
+              <td>#110</td>
+            </tr>
+            <tr>
+              <td>28</td>
+              <td>顯微鏡分析斷手</td>
+              <td>血液研究室顯微鏡分析斷手是哪一步？</td>
+              <td>#122</td>
+            </tr>
+            <tr>
+              <td>29</td>
+              <td>理事長室紅寶石</td>
+              <td>理事長室拿紅寶石和月之晶石謎題怎麼解？</td>
+              <td>#127</td>
+            </tr>
+            <tr>
+              <td>30</td>
+              <td>檢查室保險箱</td>
+              <td>檢查室保險箱右30左10右50在哪筆攻略？</td>
+              <td>#129</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>4. 優劣分析</h2>
+      <div class="grid">
+        <article class="card span-6">
+          <h3>優勢</h3>
+          <ul class="list">
+            <li><strong>本地快取：</strong>已保存攻略可直接命中，不必每次查網路。</li>
+            <li><strong>低資源：</strong>SQLite FTS5 不需要額外 embedding model，適合 iGPU。</li>
+            <li><strong>可打包：</strong>SQLite + Markdown 易於 offline installer 與團隊開發使用。</li>
+            <li><strong>可控：</strong>Qwen 只做意圖 gate，不直接操作 UI 或系統。</li>
+            <li><strong>雲地分工：</strong>地端負責快取與分流，雲端 Hermes GPT5.5 負責複雜推理與查網路。</li>
+            <li><strong>低劇透：</strong>回答用 Hint 1/2/3，而不是直接吐完整攻略。</li>
+          </ul>
+        </article>
+        <article class="card span-6">
+          <h3>限制</h3>
+          <ul class="list">
+            <li><strong>Qwen gate 慢：</strong>iGPU 平均約 13.3s，玩家體感會受影響。</li>
+            <li><strong>非完整語意：</strong>RAG Lite 沒有 embedding，同義詞很遠時會比較吃力。</li>
+            <li><strong>不可無腦查：</strong>純 SQLite 會把非攻略問題硬湊成攻略。</li>
+            <li><strong>資料治理需求：</strong>資料變大後要管理版本、可信度、重複與過期內容。</li>
+            <li><strong>Qwen 改寫風險：</strong>改寫 query/tags 會讓 Top-1 從 100% 降到 80%。</li>
+            <li><strong>雲端依賴：</strong>Hermes GPT5.5 / Tavily 需要網路、API 設定與延遲預算。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="grid" style="margin-top:16px">
+        <article class="card span-6">
+          <h3>目前取捨</h3>
+          <p>
+            這版不是追求最強 RAG，而是先追求「可打包、可離線、有足夠準確度」。
+            對遊戲陪伴來說，玩家正在玩遊戲，穩定與低打擾比一次回答塞滿所有知識更重要。
+          </p>
+        </article>
+        <article class="card span-6">
+          <h3>何時需要升級</h3>
+          <p>
+            當資料量成長到跨遊戲、跨任務線、同義詞非常多，或玩家常用截圖加模糊描述時，
+            才需要加入 embedding reranker、向量索引，甚至 GraphRAG 的實體關係整理。
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>5. 未來與 LLM-wiki 的整合</h2>
+      <div class="grid">
+        <article class="card span-4">
+          <h3>短期</h3>
+          <ul class="list">
+            <li>保留 Qwen gate + 原始問句檢索。</li>
+            <li>加 route cache，降低 13.3s 的重複判斷成本。</li>
+            <li>持續保存 Hermes/Tavily 濃縮後的可重用提示。</li>
+          </ul>
+        </article>
+        <article class="card span-4">
+          <h3>中期</h3>
+          <ul class="list">
+            <li>Markdown notes 轉成 LLM-wiki 頁面。</li>
+            <li>依 game_id、area、entity_type 建立目錄。</li>
+            <li>加入 verified / disputed / deprecated 狀態。</li>
+          </ul>
+        </article>
+        <article class="card span-4">
+          <h3>長期</h3>
+          <ul class="list">
+            <li>資料量超過大型 wiki 後再引入 embedding reranker。</li>
+            <li>需要跨角色、地點、事件推理時再評估 GraphRAG。</li>
+            <li>讓 GamePath 成為雲端/地端模型共用的穩定知識層。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="callout" style="margin-top:18px">
+        <strong>整合方向：</strong>
+        Markdown 是知識本體，SQLite 是可重建索引，地端 Qwen 與雲端 Hermes GPT5.5 是使用知識的推理層。
+        這樣即使後端 Agent 快速迭代，攻略知識也不會被任意取代。
+      </div>
+
+      <div class="grid" style="margin-top:18px">
+        <article class="card span-4">
+          <h3>GamePath 現在</h3>
+          <p>偏向「可查的攻略提示庫」：每筆資料已濃縮、可被 SQLite 搜尋，也能顯示在 GamePath 視窗。</p>
+        </article>
+        <article class="card span-4">
+          <h3>LLM-wiki 未來</h3>
+          <p>偏向「可閱讀、可維護的知識頁」：同一遊戲下按區域、道具、敵人、任務線整理成頁面。</p>
+        </article>
+        <article class="card span-4">
+          <h3>兩者關係</h3>
+          <p>不是替代關係；Markdown notes 可升級成 wiki 來源，SQLite 索引可從 wiki 內容重新產生。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="slide">
+      <h2>6. 結論</h2>
+      <div class="grid">
+        <article class="card span-7">
+          <h3>目前最穩流程</h3>
+          <div class="callout">
+            <strong>地端 Qwen 判斷要不要查，GamePath 用玩家原句查，雲端 Hermes Agent（GPT5.5）負責整理與補網路。</strong>
+          </div>
+          <p style="margin-top:18px">
+            GamePath RAG Lite 已經能支撐數千筆本地攻略快速查找；
+            Qwen gate 能把非攻略問題擋掉，避免 SQLite 硬湊錯誤攻略。
+          </p>
+        </article>
+        <aside class="card span-5">
+          <h3>玩家端呈現</h3>
+          <p>回答不直接暴雷，而是逐步提示；泡泡狀態會顯示路徑、命中信心與主要耗時，讓玩家知道是本地命中還是上雲查找。</p>
+          <div class="hint-demo">
+            <div class="hint"><strong>Hint 1</strong><br>給方向與觀察點。</div>
+            <div class="hint"><strong>Hint 2</strong><br>給路線或互動物件。</div>
+            <div class="hint"><strong>Hint 3</strong><br>接近答案，但仍避免過度劇透。</div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="callout" style="margin-top:18px">
+        <strong>一句話總結：</strong>
+        GamePath 是把「玩家已查過、可重用、低劇透」的攻略沉澱在本地；
+        Qwen 決定該不該用它，Hermes GPT5.5 在本地不足時補齊外部知識。
+      </div>
+
+      <div class="grid" style="margin-top:18px">
+        <article class="card metric span-3">
+          <div class="metric-label">正式 gate 測試</div>
+          <div class="metric-value blue">38</div>
+          <div class="metric-note">30 正例 + 8 負例。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">負例誤命中</div>
+          <div class="metric-value">0%</div>
+          <div class="metric-note">Qwen gate 後。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">本地搜尋</div>
+          <div class="metric-value blue">52.2ms</div>
+          <div class="metric-note">Qwen gate 後 SQLite 平均。</div>
+        </article>
+        <article class="card metric span-3">
+          <div class="metric-label">下一步</div>
+          <div class="metric-value warn">Cache</div>
+          <div class="metric-note">優先降低 Qwen gate 延遲。</div>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer">
+      產生依據：
+      <span class="code">docs/gamepath_report.html</span>、
+      <span class="code">docs/gamepath_stress_results.json</span>、
+      <span class="code">docs/gamepath_qwen_gate_existing_tests.json</span>。
+    </div>
+  </main>
+</body>
+
+</html>

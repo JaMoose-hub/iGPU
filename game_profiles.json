@@ -1,0 +1,24 @@
+{
+  "profiles": {
+    "RESIDENT_EVIL_requiem": {
+      "name": "RESIDENT_EVIL_requiem",
+      "aliases": [
+        "Resident Evil Requiem"
+      ],
+      "processes": [
+        "codex.exe"
+      ],
+      "window_titles": [
+        "Codex"
+      ],
+      "process_paths": [
+        "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.11010.0_x64__2p2nqsd0c76g0\\app\\Codex.exe"
+      ],
+      "learned": true,
+      "updated_at": "2026-05-31T18:16:25+0800"
+    }
+  },
+  "process_mappings": {
+    "codex.exe": "RESIDENT_EVIL_requiem"
+  }
+}

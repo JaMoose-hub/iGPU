@@ -1,0 +1,214 @@
+{
+  "generated_at": "2026-05-31T21:42:55+0800",
+  "runs_per_case": 80,
+  "game_id": "__bench_rag_lite__",
+  "seed_ids": [
+    64,
+    65
+  ],
+  "cases": [
+    {
+      "name": "silver_key_location",
+      "query": "銀鑰匙在哪",
+      "expected_text": "銀鑰匙",
+      "forbidden_text": "最終 boss",
+      "old": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 0.972,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 0.972,
+          "context_chars": 79,
+          "passage_count": 88,
+          "rag_chunk_count": 0,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Silver Key 銀鑰匙在廚房後方 pantry 的藍色烤箱旁。拿到後先不要回大廳，直接用在 cellar gate 的銀色鎖，可以開地下酒窖捷徑。"
+        },
+        "avg_ms": 9.9451,
+        "p50_ms": 9.7617,
+        "p95_ms": 11.5842,
+        "min_ms": 8.6599,
+        "max_ms": 12.5067
+      },
+      "rag_lite": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 0.972,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 0.972,
+          "context_chars": 79,
+          "passage_count": 2,
+          "rag_chunk_count": 2,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Silver Key 銀鑰匙在廚房後方 pantry 的藍色烤箱旁。拿到後先不要回大廳，直接用在 cellar gate 的銀色鎖，可以開地下酒窖捷徑。"
+        },
+        "avg_ms": 8.498,
+        "p50_ms": 8.3136,
+        "p95_ms": 9.8233,
+        "min_ms": 7.6095,
+        "max_ms": 12.5816
+      }
+    },
+    {
+      "name": "kitchen_route",
+      "query": "kitchen route pantry guide",
+      "expected_text": "pantry",
+      "forbidden_text": "Final Boss",
+      "old": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 1.0,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 1.0,
+          "context_chars": 98,
+          "passage_count": 88,
+          "rag_chunk_count": 0,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Kitchen Route 廚房那關先從冷藏櫃旁邊繞過去，聽到第二次腳步聲再進 pantry。Kitchen route is safer if you hug the left wall."
+        },
+        "avg_ms": 9.4758,
+        "p50_ms": 9.2291,
+        "p95_ms": 10.3565,
+        "min_ms": 8.3254,
+        "max_ms": 19.9705
+      },
+      "rag_lite": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 1.0,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 1.0,
+          "context_chars": 184,
+          "passage_count": 3,
+          "rag_chunk_count": 3,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Kitchen Route 廚房那關先從冷藏櫃旁邊繞過去，聽到第二次腳步聲再進 pantry。Kitchen route is safer if you hug the left wall.\n\n---\n\n## Silver Key 銀鑰匙在廚房後方 pantry 的藍色烤箱旁。拿到後先不要回大廳，直接用在 cellar gate 的銀色鎖，可以開地下酒窖捷徑。"
+        },
+        "avg_ms": 8.4214,
+        "p50_ms": 8.2884,
+        "p95_ms": 9.8316,
+        "min_ms": 7.2749,
+        "max_ms": 11.3849
+      }
+    },
+    {
+      "name": "singing_zombies",
+      "query": "兩個會唱歌的女殭屍",
+      "expected_text": "女殭屍",
+      "forbidden_text": "最終 boss",
+      "old": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 1.0,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 1.0,
+          "context_chars": 69,
+          "passage_count": 88,
+          "rag_chunk_count": 0,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Two Singing Zombies 會唱歌的兩個女殭屍通常一個靠聲音提示巡邏，另一個躲在東翼更深處。先聽聲音距離，不要急著開槍。"
+        },
+        "avg_ms": 9.2431,
+        "p50_ms": 8.978,
+        "p95_ms": 10.4776,
+        "min_ms": 8.1724,
+        "max_ms": 12.3501
+      },
+      "rag_lite": {
+        "result": {
+          "hits": 1,
+          "top_title": "Kitchen Manor full walkthrough",
+          "top_id": 64,
+          "top_score": 1.0,
+          "retrieval_confidence": "summarize",
+          "retrieval_score": 1.0,
+          "context_chars": 69,
+          "passage_count": 1,
+          "rag_chunk_count": 1,
+          "contains_expected": true,
+          "contains_forbidden": false,
+          "excerpt_preview": "## Two Singing Zombies 會唱歌的兩個女殭屍通常一個靠聲音提示巡邏，另一個躲在東翼更深處。先聽聲音距離，不要急著開槍。"
+        },
+        "avg_ms": 6.7886,
+        "p50_ms": 6.5942,
+        "p95_ms": 7.807,
+        "min_ms": 5.9102,
+        "max_ms": 13.7989
+      }
+    },
+    {
+      "name": "unrelated_miss",
+      "query": "obsidian spoon moon factory boss weakness guide",
+      "expected_text": "obsidian",
+      "forbidden_text": "最終 boss",
+      "old": {
+        "result": {
+          "hits": 0,
+          "top_title": "",
+          "top_id": null,
+          "top_score": 0.0,
+          "retrieval_confidence": "",
+          "retrieval_score": 0.0,
+          "context_chars": 0,
+          "passage_count": 0,
+          "rag_chunk_count": 0,
+          "contains_expected": false,
+          "contains_forbidden": false,
+          "excerpt_preview": ""
+        },
+        "avg_ms": 7.1349,
+        "p50_ms": 6.9057,
+        "p95_ms": 8.8047,
+        "min_ms": 5.9771,
+        "max_ms": 11.1224
+      },
+      "rag_lite": {
+        "result": {
+          "hits": 0,
+          "top_title": "",
+          "top_id": null,
+          "top_score": 0.0,
+          "retrieval_confidence": "",
+          "retrieval_score": 0.0,
+          "context_chars": 0,
+          "passage_count": 0,
+          "rag_chunk_count": 0,
+          "contains_expected": false,
+          "contains_forbidden": false,
+          "excerpt_preview": ""
+        },
+        "avg_ms": 7.9285,
+        "p50_ms": 7.6993,
+        "p95_ms": 10.172,
+        "min_ms": 6.9335,
+        "max_ms": 11.1071
+      }
+    }
+  ],
+  "summary": {
+    "old_avg_ms": 8.9497,
+    "rag_lite_avg_ms": 7.9091,
+    "latency_delta_percent": 11.63,
+    "cpu_seconds_delta": 2.9375,
+    "rss_before_mib": 49.07,
+    "rss_after_mib": 61.25,
+    "db_size_before_kib": 856.0,
+    "db_size_after_kib": 1088.0,
+    "seed_chunk_count": 88
+  }
+}

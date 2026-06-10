@@ -70,6 +70,36 @@ ENABLE_LOCAL_TOOLS = os.environ.get(
     "IGPU_ENABLE_LOCAL_TOOLS",
     "0" if CHAT_BACKEND == "hermes" else "1",
 ).strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_ROUTER_ENABLED = os.environ.get("IGPU_LOCAL_ROUTER_ENABLED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_ROUTER_URL = os.environ.get("IGPU_LOCAL_ROUTER_URL", "http://127.0.0.1:18081").strip()
+LOCAL_ROUTER_MODEL = os.environ.get("IGPU_LOCAL_ROUTER_MODEL", "qwen3.5-4b-q4_k_m").strip()
+LOCAL_ROUTER_ROLE = os.environ.get("IGPU_LOCAL_ROUTER_ROLE", "user_intent_router").strip()
+LOCAL_ROUTER_TIMEOUT_SECONDS = int(os.environ.get("IGPU_LOCAL_ROUTER_TIMEOUT", "20"))
+LOCAL_ROUTER_GAMEPATH_GATE = os.environ.get("IGPU_LOCAL_ROUTER_GAMEPATH_GATE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_ROUTER_GAMEPATH_MAX_CHARS = int(os.environ.get("IGPU_LOCAL_ROUTER_GAMEPATH_MAX_CHARS", "280"))
+LOCAL_ROUTER_RETRIEVAL_EVAL = os.environ.get("IGPU_LOCAL_ROUTER_RETRIEVAL_EVAL", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_ROUTER_ALWAYS_ROUTE = os.environ.get("IGPU_LOCAL_ROUTER_ALWAYS_ROUTE", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS = int(os.environ.get("IGPU_LOCAL_ROUTER_CACHE_TTL", "600"))
 
 ASSET_ROOT = Path(
     os.environ.get(
@@ -156,6 +186,7 @@ MEMORY_DB = MEMORY_CACHE_DIR / "memory.sqlite"
 llama_process: Optional[subprocess.Popen] = None
 history: list[dict[str, Any]] = []
 last_gamepath_reference: dict[str, Any] = {}
+local_router_decision_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 last_active_game_window: Optional[dict[str, Any]] = None
 last_active_game_detection: Optional[dict[str, Any]] = None
 generate_lock = asyncio.Lock()
@@ -197,6 +228,12 @@ class ChatRequest(BaseModel):
     use_memory: bool = True
 
 
+class IntentRouteRequest(BaseModel):
+    message: str
+    game_id: Optional[str] = None
+    use_guides: Optional[bool] = None
+
+
 class GuideSearchRequest(BaseModel):
     game_id: Optional[str] = None
     query: str
@@ -227,6 +264,11 @@ class GamePathAddRequest(BaseModel):
     spoiler_level: str = "none"
     source_type: str = "manual"
     agent_used: bool = False
+    version: Optional[str] = None
+    area: Optional[str] = None
+    entity_type: Optional[str] = None
+    entity_name: Optional[str] = None
+    source_quality: Optional[float] = None
 
 
 class GamePathSearchRequest(BaseModel):
@@ -235,6 +277,11 @@ class GamePathSearchRequest(BaseModel):
     tags: Any = None
     spoiler_level: str = "low"
     limit: int = 5
+    version: Optional[str] = None
+    area: Optional[str] = None
+    entity_type: Optional[str] = None
+    entity_name: Optional[str] = None
+    strict_metadata: bool = False
 
 
 class GamePathFeedbackRequest(BaseModel):
@@ -275,6 +322,14 @@ def get_system_prompt() -> str:
 
 def llama_base_url() -> str:
     return f"http://{LLAMA_HOST}:{LLAMA_PORT}"
+
+
+def local_router_v1_url(endpoint: str) -> str:
+    base = LOCAL_ROUTER_URL.rstrip("/")
+    clean_endpoint = endpoint.lstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/{clean_endpoint}"
+    return f"{base}/v1/{clean_endpoint}"
 
 
 def post_json(url: str, payload: dict[str, Any], timeout: int = 30):
@@ -630,9 +685,49 @@ def lookup_status_event(stage: str, message: str, **extra: Any) -> str:
     return sse_data({"lookup_status": payload})
 
 
+def gamepath_store_lookup_status_event(stored_item: dict[str, Any], game_id: Optional[str]) -> str:
+    status = str(stored_item.get("status") or "").strip()
+    if status == "duplicate_existing":
+        return lookup_status_event(
+            "gamepath_not_stored",
+            "GamePath 已有相似紀錄，這次沒有新增重複條目。",
+            source="gamepath",
+            web_search=False,
+            fast_path=True,
+            entry_id=stored_item.get("id"),
+            game_id=game_id,
+            reason="duplicate_existing",
+        )
+    message = (
+        "已更新既有 GamePath 相似紀錄，避免新增重複條目。"
+        if status == "updated_duplicate"
+        else "已濃縮並存入 GamePath，下次同類問題會走本地快取。"
+    )
+    return lookup_status_event(
+        "gamepath_stored",
+        message,
+        source="gamepath",
+        web_search=False,
+        fast_path=False,
+        entry_id=stored_item.get("id"),
+        game_id=game_id,
+        reason=status or "stored",
+    )
+
+
 def llama_ready() -> bool:
     try:
         get_json(f"{llama_base_url()}/v1/models", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def local_router_ready() -> bool:
+    if not LOCAL_ROUTER_ENABLED:
+        return False
+    try:
+        get_json(local_router_v1_url("models"), timeout=2)
         return True
     except Exception:
         return False
@@ -1187,6 +1282,32 @@ def call_llama_chat_payload(payload: dict[str, Any]) -> str:
     return data["choices"][0]["message"].get("content") or ""
 
 
+def call_local_router_once(
+    messages: list[dict[str, Any]],
+    max_tokens: int = 96,
+    timeout_seconds: Optional[int] = None,
+) -> str:
+    if not LOCAL_ROUTER_ENABLED:
+        raise RuntimeError("Local router is disabled.")
+    payload = {
+        "model": LOCAL_ROUTER_MODEL,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
+        "top_p": 0.8,
+        "top_k": 20,
+        "cache_prompt": True,
+    }
+    with post_json(
+        local_router_v1_url("chat/completions"),
+        payload,
+        timeout_seconds or LOCAL_ROUTER_TIMEOUT_SECONDS,
+    ) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data["choices"][0]["message"].get("content") or ""
+
+
 def call_llama_once_no_recovery(messages: list[dict[str, Any]], max_tokens: int = 1536) -> str:
     payload = {
         "model": MODEL_ALIAS,
@@ -1561,11 +1682,82 @@ GAMEPATH_UI_SKIP_RE = re.compile(
     r"llama|hermes|模型|backend|gpu|igpu|dgpu)",
     re.IGNORECASE,
 )
+GAMEPATH_SAVE_ONLY_RE = re.compile(
+    r"(存下來|保存|存起來|記錄下來|刪掉|刪除|打開|開啟|關閉|刷新|有幾筆|多少資料|資料庫|狀態|機制)",
+    re.IGNORECASE,
+)
+GAMEPATH_NEGATED_GUIDE_RE = re.compile(
+    r"(不用|不要|先不用|不需要|別).{0,10}(查|搜尋|搜索|找|攻略|網路|上網|web|guide)",
+    re.IGNORECASE,
+)
+GAMEPATH_WEB_INTENT_RE = re.compile(
+    r"(上網|網路|web|tavily|最新|新版本|patch|hotfix|版本差異|更新|社群|speedrun|meta|"
+    r"攻略庫沒有|本地沒有|交給\s*Hermes\s*查)",
+    re.IGNORECASE,
+)
+GAMEPATH_VERSION_COMPARE_RE = re.compile(
+    r"((?:\b\d+(?:\.\d+){1,3}\b).{0,24}(?:\u8ddf|\u548c|vs|/|,).{0,24}"
+    r"(?:\b\d+(?:\.\d+){1,3}\b).{0,28}(?:\u5dee\u7570|\u4e0d\u540c|\u6539|\u6bd4\u8f03|\u67e5))|"
+    r"(\u7248\u672c.{0,16}(?:\u5dee\u7570|\u4e0d\u540c|\u6bd4\u8f03))",
+    re.IGNORECASE,
+)
+LOCAL_ROUTER_GAMEPATH_CANDIDATE_RE = re.compile(
+    r"(game|guide|walkthrough|tips|quest|item|boss|map|route|where|how|stuck|puzzle|"
+    r"name|character|enemy|zombie|"
+    r"\u653b\u7565|\u6559\u5b78|\u63d0\u793a|\u4efb\u52d9|\u7269\u54c1|\u9053\u5177|"
+    r"\u95dc\u5361|\u5361\u95dc|\u8def\u7dda|\u5730\u5716|\u540d\u5b57|\u540d\u7a31|\u89d2\u8272|\u654c\u4eba|\u602a\u7269|\u6bad\u5c4d|\u50f5\u5c4d|"
+    r"\u9806\u5e8f|\u8f49\u76e4|\u95a5\u9580|\u6a5f\u95dc|\u89f8\u767c|\u8ffd|\u64cb\u8def|\u786c\u6253|\u6253\u4e0d\u52d5|\u8ff7\u8def|\u6697\u9580|"
+    r"\u9418\u8072|\u9ed1\u5e3d|\u8001\u4eba|\u4fdd\u96aa\u7d72|\u9470\u5319|\u7d20\u6750|\u652f\u7dda|"
+    r"\u600e|\u54ea|\u627e|\u7528)",
+    re.IGNORECASE,
+)
 GAMEPATH_TRUST_STATES = {"unverified", "verified", "disputed", "needs_review", "deprecated"}
 SPOILER_RANKS = {"none": 0, "low": 1, "medium": 2, "high": 3, "full": 4}
 GAMEPATH_DIRECT_MAX_CHARS = 900
 GAMEPATH_CONTEXT_MAX_CHARS = 1800
 GAMEPATH_PASSAGE_MAX_CHARS = 900
+GAMEPATH_ENTITY_TYPES = {
+    "item",
+    "quest",
+    "boss",
+    "npc",
+    "map",
+    "route",
+    "puzzle",
+    "mechanic",
+    "material",
+    "location",
+    "character",
+    "enemy",
+}
+GAMEPATH_ENTITY_TYPE_ALIASES = {
+    "items": "item",
+    "usage": "item",
+    "weapon": "item",
+    "equipment": "item",
+    "resource": "material",
+    "resources": "material",
+    "materials": "material",
+    "walkthrough": "route",
+    "path": "route",
+    "area": "location",
+    "zone": "location",
+    "monster": "enemy",
+    "zombie": "enemy",
+}
+GAMEPATH_SOURCE_TAGS = {
+    "auto",
+    "hermes",
+    "guide",
+    "vision",
+    "web",
+    "manual",
+    "agent",
+    "tavily",
+    "local",
+    "llama",
+    "qwen",
+}
 GAMEPATH_GENERIC_TERMS = {
     "guide",
     "walkthrough",
@@ -1604,6 +1796,53 @@ GAMEPATH_GENERIC_TERMS = {
     "關卡",
     "過關",
 }
+GAMEPATH_GENERIC_TERMS.update(
+    {
+        "\u653b\u7565",
+        "\u6559\u5b78",
+        "\u63d0\u793a",
+        "\u7528\u9014",
+        "\u7528\u6cd5",
+        "\u7269\u54c1",
+        "\u9053\u5177",
+        "\u4efb\u52d9",
+        "\u7d20\u6750",
+        "\u6750\u6599",
+        "\u8def\u7dda",
+        "\u5730\u5716",
+        "\u5f31\u9ede",
+        "\u6253\u6cd5",
+        "\u600e\u9ebc",
+        "\u600e\u9ebc\u904e",
+        "\u600e\u9ebc\u7528",
+        "\u54ea\u88e1",
+        "\u5728\u54ea",
+        "\u90a3\u95dc",
+        "\u95dc\u5361",
+        "\u904e\u95dc",
+        "\u4e0b\u4e00\u6b65",
+        "\u63a5\u4e0b\u4f86",
+        "\u61c9\u8a72",
+        "\u8981\u505a\u4ec0\u9ebc",
+        "\u8981\u53bb\u54ea",
+        "\u54ea\u500b",
+        "\u54ea\u96bb",
+        "\u54ea\u908a",
+        "\u4ec0\u9ebc",
+    }
+)
+
+MEMORY_TASK_CONTEXT_RE = re.compile(
+    r"(task|objective|goal|todo|quest log|next step|current goal|"
+    r"\u4efb\u52d9|\u76ee\u6a19|\u5f85\u8fa6|\u4e0b\u4e00\u6b65|\u76ee\u524d\u8981\u505a|\u9032\u5ea6|"
+    r"\u6211\u62ff\u5230|\u6211\u53d6\u5f97|\u6211\u7372\u5f97|\u8ffd\u8e64)",
+    re.IGNORECASE,
+)
+MEMORY_NOTE_CONTEXT_RE = re.compile(
+    r"(memory|remember|note|notes|what did I say|"
+    r"\u8a18\u61b6|\u7b46\u8a18|\u4f60\u8a18\u5f97|\u6211\u4e4b\u524d|\u524d\u9762|\u525b\u525b)",
+    re.IGNORECASE,
+)
 OVERLAY_INTENT_RE = re.compile(
     r"(圈|圈出|圈選|框出|標記|標出|指引|導引|導航|指路|往哪|往哪走|哪邊|路線|路標|目標|目的地|箭頭|提醒|危險|門在哪|在哪裡|where|mark|circle|arrow|route|path|guide|navigate|target|objective|destination)",
     re.IGNORECASE,
@@ -1626,6 +1865,14 @@ IMPLICIT_MEMORY_FACT_RE = re.compile(
 )
 FACT_LOOKUP_RE = re.compile(
     rf"(?P<key>{FACT_KEY_PATTERN}).{{0,12}}(?:是什麼|多少|哪個|叫什麼|\?)",
+    re.IGNORECASE,
+)
+USER_FACT_CONTEXT_RE = re.compile(
+    r"(我的|我目前的|我現在的|玩家|使用者|我叫|我說的|剛剛.*我|前面.*我|上一句.*我|你記得.*我|記得.*我)",
+    re.IGNORECASE,
+)
+GAME_ENTITY_FACT_CONTEXT_RE = re.compile(
+    r"(這個|這兩個|那個|那些|女殭屍|殭屍|僵屍|敵人|怪物|boss|npc|角色|人物|道具|物品|地點|關卡|遊戲)",
     re.IGNORECASE,
 )
 
@@ -1655,6 +1902,10 @@ def cjk_ngrams(text: str) -> list[str]:
         if len(compact) == 1:
             tokens.append(compact)
     return tokens
+
+
+def has_cjk_text(text: Any) -> bool:
+    return bool(CJK_RE.search(str(text or "")))
 
 
 def search_terms(text: str, max_terms: int = 32) -> list[str]:
@@ -2232,6 +2483,178 @@ def spoiler_rank(value: str) -> int:
     return SPOILER_RANKS.get(normalize_spoiler_level(value), 1)
 
 
+def clean_gamepath_metadata_value(value: Any, max_len: int = 80) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = text.strip(" \t\r\n:：,，.。;；'\"「」『』()（）[]【】")
+    return text[:max_len] if text else ""
+
+
+def normalize_gamepath_entity_type(value: Any) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", str(value or "").strip().lower()).strip("_-")
+    if not clean:
+        return ""
+    alias = GAMEPATH_ENTITY_TYPE_ALIASES.get(clean, clean)
+    chinese_aliases = {
+        "\u7269\u54c1": "item",
+        "\u9053\u5177": "item",
+        "\u88dd\u5099": "item",
+        "\u6b66\u5668": "item",
+        "\u7d20\u6750": "material",
+        "\u6750\u6599": "material",
+        "\u4efb\u52d9": "quest",
+        "\u652f\u7dda": "quest",
+        "\u8001\u95c6": "boss",
+        "\u9996\u9818": "boss",
+        "\u5730\u5716": "map",
+        "\u8def\u7dda": "route",
+        "\u89e3\u8b0e": "puzzle",
+        "\u6a5f\u5236": "mechanic",
+        "\u4f4d\u7f6e": "location",
+        "\u5340\u57df": "location",
+        "\u5834\u666f": "location",
+        "\u89d2\u8272": "character",
+        "\u6575\u4eba": "enemy",
+        "\u602a\u7269": "enemy",
+    }
+    alias = chinese_aliases.get(alias, alias)
+    return alias if alias in GAMEPATH_ENTITY_TYPES else ""
+
+
+def infer_gamepath_entity_type(*texts: str, tags: Any = None) -> str:
+    for tag in normalize_tags_value(tags):
+        tag_type = normalize_gamepath_entity_type(tag)
+        if tag_type:
+            return tag_type
+    text = "\n".join(str(item or "") for item in texts).lower()
+    checks = [
+        ("boss", r"(boss|weakness|\u6253\u6cd5|\u600e\u9ebc\u6253|\u5f31\u9ede|\u8001\u95c6|\u9996\u9818)"),
+        ("item", r"(item|usage|use|weapon|equipment|\u7269\u54c1|\u9053\u5177|\u7528\u9014|\u7528\u6cd5|\u6b66\u5668|\u88dd\u5099)"),
+        ("material", r"(material|resource|craft|recipe|\u7d20\u6750|\u6750\u6599|\u914d\u65b9|\u88fd\u4f5c)"),
+        ("quest", r"(quest|objective|\u4efb\u52d9|\u652f\u7dda|\u76ee\u6a19)"),
+        ("mechanic", r"(mechanic|system|\u6a5f\u5236|\u7cfb\u7d71|\u64cd\u4f5c|\u4e92\u52d5|\u555f\u52d5|\u89f8\u767c)"),
+        ("route", r"(route|path|where|walkthrough|\u8def\u7dda|\u6307\u8def|\u5f80\u54ea|\u600e\u9ebc\u8d70)"),
+        ("map", r"(map|\u5730\u5716|\u6a19\u8a18|\u5730\u9ede)"),
+        ("puzzle", r"(puzzle|solve|\u89e3\u8b0e|\u8b0e\u984c|\u6a5f\u95dc)"),
+        ("npc", r"(npc|\u5546\u4eba|\u5c0d\u8a71)"),
+        ("character", r"(character|\u89d2\u8272|\u8eab\u4efd|\u540d\u5b57|\u540d\u7a31)"),
+        ("enemy", r"(enemy|monster|zombie|\u6575\u4eba|\u602a\u7269|\u50f5\u5c4d|\u5973\u58eb\u5c4d)"),
+        ("location", r"(area|zone|location|chapter|stage|\u5340\u57df|\u5834\u666f|\u95dc\u5361|\u7ae0\u7bc0)"),
+    ]
+    for entity_type, pattern in checks:
+        if re.search(pattern, text, re.IGNORECASE):
+            return entity_type
+    return ""
+
+
+def infer_gamepath_version(*texts: str) -> str:
+    text = " ".join(str(item or "") for item in texts)
+    match = re.search(
+        r"(?i)(?:version|patch|ver\.?|v)\s*[:#]?\s*([0-9]+(?:\.[0-9A-Za-z_-]+){0,3})",
+        text,
+    )
+    if match:
+        return clean_gamepath_metadata_value(match.group(1), 40)
+    match = re.search(r"\b([0-9]+\.[0-9]+(?:\.[0-9A-Za-z_-]+){0,2})\b", text)
+    return clean_gamepath_metadata_value(match.group(1), 40) if match else ""
+
+
+def infer_gamepath_area(*texts: str, tags: Any = None) -> str:
+    for tag in normalize_tags_value(tags):
+        if re.search(r"(area|zone|chapter|stage|map|\u5340\u57df|\u5834\u666f|\u5730\u5716|\u95dc\u5361|\u7ae0)", tag, re.IGNORECASE):
+            return clean_gamepath_metadata_value(tag, 80)
+    text = " ".join(str(item or "") for item in texts)
+    patterns = [
+        r"(?i)(?:area|zone|chapter|stage|map)\s*[:：]?\s*([A-Za-z0-9_\- \u4e00-\u9fff]{2,40})",
+        r"([\u4e00-\u9fffA-Za-z0-9_\- ]{1,24}(?:\u5340\u57df|\u5834\u666f|\u5730\u5716|\u95dc\u5361|\u7ae0|\u5c64))",
+        r"([\u4e00-\u9fffA-Za-z0-9_\- ]{0,24}?(?:\u5165\u53e3|\u78bc\u982d|\u5eda\u623f|\u91ab\u9662|\u9152\u7a96|\u4e2d\u5ead|\u5927\u5ef3|\u8d70\u5eca|\u79ae\u62dc\u5802|\u8cc7\u6599\u5ba4|\u934b\u7210\u623f|\u9418\u5854))",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            area_candidate = re.sub(
+                r"^(?:\u6211\u5728|\u76ee\u524d\u5728|\u73fe\u5728\u5728|\u5728|\u53bb|\u5230)",
+                "",
+                str(match.group(1) or "").strip(),
+            )
+            return clean_gamepath_metadata_value(area_candidate, 80)
+    return ""
+
+
+def infer_gamepath_entity_name(question: str, answer_summary: str = "", tags: Any = None) -> str:
+    tag_candidates = [
+        tag
+        for tag in normalize_tags_value(tags)
+        if tag.lower() not in GAMEPATH_GENERIC_TERMS
+        and tag.lower() not in GAMEPATH_SOURCE_TAGS
+        and not normalize_gamepath_entity_type(tag)
+    ]
+    if tag_candidates:
+        return clean_gamepath_metadata_value(tag_candidates[0], 80)
+    text = str(question or "")
+    named_patterns = [
+        r"([\u4e00-\u9fffA-Za-z0-9]{1,24}\s*NPC)",
+        r"([\u4e00-\u9fffA-Za-z0-9]{1,24}(?:\u89d2\u8272|\u602a|\u9470\u5319|\u788e\u7247|\u6a5f\u95dc|\u95a5\u9580|\u8b77\u7b26|\u679d|\u9580))",
+    ]
+    for pattern in named_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return clean_gamepath_metadata_value(match.group(1), 80)
+    quoted = re.search(r"[「『\"']([^」』\"']{2,40})[」』\"']", text)
+    if quoted:
+        return clean_gamepath_metadata_value(quoted.group(1), 80)
+    english = re.search(r"\b([A-Z][A-Za-z0-9_'’.-]{2,}(?:\s+[A-Z][A-Za-z0-9_'’.-]{2,}){0,4})\b", text)
+    if english:
+        return clean_gamepath_metadata_value(english.group(1), 80)
+    return ""
+
+
+def clamp_source_quality(value: Any, *, source_type: str = "", agent_used: bool = False) -> float:
+    try:
+        quality = float(value)
+    except Exception:
+        source = str(source_type or "").lower()
+        if source == "manual":
+            quality = 0.72
+        elif "vision" in source:
+            quality = 0.55
+        elif "web" in source:
+            quality = 0.62
+        elif agent_used:
+            quality = 0.58
+        else:
+            quality = 0.5
+    return max(0.0, min(1.0, quality))
+
+
+def infer_gamepath_metadata(
+    question: str,
+    answer_summary: str = "",
+    tags: Any = None,
+    *,
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+    source_quality: Any = None,
+    source_type: str = "",
+    agent_used: bool = False,
+) -> dict[str, Any]:
+    inferred_type = (
+        normalize_gamepath_entity_type(entity_type)
+        or infer_gamepath_entity_type(question)
+        or infer_gamepath_entity_type(answer_summary)
+        or infer_gamepath_entity_type("", tags=tags)
+    )
+    return {
+        "version": clean_gamepath_metadata_value(version, 40) or infer_gamepath_version(question, answer_summary),
+        "area": clean_gamepath_metadata_value(area, 80) or infer_gamepath_area(question, tags=tags),
+        "entity_type": inferred_type,
+        "entity_name": clean_gamepath_metadata_value(entity_name, 80)
+        or infer_gamepath_entity_name(question, "", tags),
+        "source_quality": clamp_source_quality(source_quality, source_type=source_type, agent_used=agent_used),
+    }
+
+
 def slug_text(value: str, fallback: str = "entry") -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", (value or "").strip()).strip(".-_")
     return (slug or fallback)[:80]
@@ -2247,6 +2670,90 @@ def relative_or_absolute(path: Path) -> str:
 def gamepath_content_hash(game_id: str, question: str) -> str:
     key = re.sub(r"\s+", " ", str(question or "").strip().lower())[:360]
     return hashlib.sha256(f"{game_id}|{key}".encode("utf-8")).hexdigest()
+
+
+def should_fuzzy_dedupe_gamepath_write(source_type: str, agent_used: bool) -> bool:
+    source = str(source_type or "").strip().lower()
+    return bool(agent_used or source.startswith("hermes_agent") or source.startswith("auto"))
+
+
+def can_update_fuzzy_gamepath_duplicate(existing: dict[str, Any], source_type: str, agent_used: bool) -> bool:
+    # Fuzzy matches are intentionally conservative: use them to avoid duplicate
+    # writes, not to overwrite a previously saved hint with another model pass.
+    return False
+
+
+def sqlite_row_to_gamepath_item(row: sqlite3.Row, *, status: str = "") -> dict[str, Any]:
+    item = {key: row[key] for key in row.keys()}
+    if "id" in item:
+        item["id"] = int(item["id"])
+    if "agent_used" in item:
+        item["agent_used"] = bool(item["agent_used"])
+    if "source_quality" in item:
+        item["source_quality"] = float(item.get("source_quality") or 0.5)
+    if "dispute_count" in item:
+        item["dispute_count"] = int(item.get("dispute_count") or 0)
+    if status:
+        item["status"] = status
+    return item
+
+
+def find_fuzzy_gamepath_duplicate_for_write(
+    question: str,
+    answer_summary: str,
+    game_id: str,
+    tags: Any,
+    spoiler_level: str,
+    source_type: str,
+    agent_used: bool,
+) -> Optional[dict[str, Any]]:
+    if not should_fuzzy_dedupe_gamepath_write(source_type, agent_used):
+        return None
+    try:
+        results = search_gamepath_multi_query_sync(
+            question,
+            game_id,
+            8,
+            tags=tags or None,
+            spoiler_level=spoiler_level,
+        )
+    except Exception as exc:
+        print(f"GamePath fuzzy duplicate search failed: {exc}")
+        return None
+    if not results:
+        return None
+
+    question_terms = gamepath_core_terms(question, max_terms=16)
+    answer_terms = gamepath_core_terms(answer_summary, max_terms=16)
+    for item in results:
+        haystack = "\n".join(
+            str(item.get(key) or "")
+            for key in ("title", "question", "answer_summary", "tags", "relevant_excerpt", "snippet")
+        )
+        coverage = gamepath_term_coverage(question, haystack)
+        core_overlap = term_overlap_ratio(question_terms, haystack)
+        answer_overlap = term_overlap_ratio(answer_terms, str(item.get("answer_summary") or ""))
+        scoring = score_gamepath_result(question, game_id, item)
+        retrieval_score = max(float(item.get("retrieval_score") or 0.0), float(scoring.get("score") or 0.0))
+        core_overlap = max(core_overlap, float(scoring.get("core_overlap") or 0.0))
+        coverage = max(coverage, float(scoring.get("coverage") or 0.0))
+        same_game = normalize_game_id(item.get("game_id")) in {normalize_game_id(game_id), "global"}
+        if not same_game:
+            continue
+        if (
+            (
+                coverage >= 0.52
+                and core_overlap >= 0.34
+                and (retrieval_score >= 0.68 or answer_overlap >= 0.38)
+            )
+            or (answer_overlap >= 0.72 and coverage >= 0.25)
+        ):
+            duplicate = dict(item)
+            duplicate["duplicate_coverage"] = round(coverage, 3)
+            duplicate["duplicate_core_overlap"] = round(core_overlap, 3)
+            duplicate["duplicate_answer_overlap"] = round(answer_overlap, 3)
+            return duplicate
+    return None
 
 
 def gamepath_query_text(query: str) -> str:
@@ -2272,6 +2779,7 @@ def ensure_gamepath_db() -> None:
     GAMEPATH_DIR.mkdir(parents=True, exist_ok=True)
     GAMEPATH_NOTES_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(GAMEPATH_DB) as conn:
+        db_user_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gamepath_entries(
@@ -2282,9 +2790,14 @@ def ensure_gamepath_db() -> None:
                 answer_summary TEXT NOT NULL,
                 markdown_path TEXT NOT NULL DEFAULT '',
                 tags TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                area TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                entity_name TEXT NOT NULL DEFAULT '',
                 spoiler_level TEXT NOT NULL DEFAULT 'low',
                 spoiler_rank INTEGER NOT NULL DEFAULT 1,
                 source_type TEXT NOT NULL DEFAULT 'manual',
+                source_quality REAL NOT NULL DEFAULT 0.5,
                 agent_used INTEGER NOT NULL DEFAULT 0,
                 trust_state TEXT NOT NULL DEFAULT 'unverified',
                 dispute_count INTEGER NOT NULL DEFAULT 0,
@@ -2305,6 +2818,11 @@ def ensure_gamepath_db() -> None:
             "dispute_count": "ALTER TABLE gamepath_entries ADD COLUMN dispute_count INTEGER NOT NULL DEFAULT 0",
             "last_feedback": "ALTER TABLE gamepath_entries ADD COLUMN last_feedback TEXT NOT NULL DEFAULT ''",
             "last_feedback_at": "ALTER TABLE gamepath_entries ADD COLUMN last_feedback_at TEXT NOT NULL DEFAULT ''",
+            "version": "ALTER TABLE gamepath_entries ADD COLUMN version TEXT NOT NULL DEFAULT ''",
+            "area": "ALTER TABLE gamepath_entries ADD COLUMN area TEXT NOT NULL DEFAULT ''",
+            "entity_type": "ALTER TABLE gamepath_entries ADD COLUMN entity_type TEXT NOT NULL DEFAULT ''",
+            "entity_name": "ALTER TABLE gamepath_entries ADD COLUMN entity_name TEXT NOT NULL DEFAULT ''",
+            "source_quality": "ALTER TABLE gamepath_entries ADD COLUMN source_quality REAL NOT NULL DEFAULT 0.5",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -2324,7 +2842,95 @@ def ensure_gamepath_db() -> None:
             )
             """
         )
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gamepath_chunks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                game_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                heading TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                token_estimate INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(entry_id, chunk_index)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS gamepath_chunk_fts USING fts5(
+                chunk_id UNINDEXED,
+                entry_id UNINDEXED,
+                game_id UNINDEXED,
+                heading,
+                content,
+                tags,
+                spoiler_level UNINDEXED,
+                search_text,
+                tokenize='unicode61'
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_scope ON gamepath_entries(game_id, spoiler_rank, entity_type, entity_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_version ON gamepath_entries(version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_area ON gamepath_entries(area)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_source_quality ON gamepath_entries(source_quality)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_chunks_entry_id ON gamepath_chunks(entry_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gamepath_chunks_game_id ON gamepath_chunks(game_id)")
+        conn.row_factory = sqlite3.Row
+        if db_user_version < 8:
+            rows = conn.execute("SELECT * FROM gamepath_entries").fetchall()
+            for row in rows:
+                item = dict(row)
+                metadata = infer_gamepath_metadata(
+                    item.get("question") or "",
+                    item.get("answer_summary") or "",
+                    item.get("tags") or "",
+                    version=item.get("version") or "",
+                    area="",
+                    entity_type="",
+                    entity_name="",
+                    source_quality=None,
+                    source_type=item.get("source_type") or "",
+                    agent_used=bool(item.get("agent_used")),
+                )
+                conn.execute(
+                    """
+                    UPDATE gamepath_entries
+                    SET version = ?, area = ?, entity_type = ?, entity_name = ?, source_quality = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        metadata["version"],
+                        metadata["area"],
+                        metadata["entity_type"],
+                        metadata["entity_name"],
+                        metadata["source_quality"],
+                        int(item["id"]),
+                    ),
+                )
+            conn.execute("DELETE FROM gamepath_fts")
+            conn.execute("DELETE FROM gamepath_chunk_fts")
+            conn.execute("DELETE FROM gamepath_chunks")
+            missing_chunk_rows = conn.execute("SELECT e.* FROM gamepath_entries e").fetchall()
+        else:
+            missing_chunk_rows = conn.execute(
+                """
+                SELECT e.*
+                FROM gamepath_entries e
+                LEFT JOIN gamepath_chunks c ON c.entry_id = e.id
+                WHERE c.id IS NULL
+                LIMIT 200
+                """
+            ).fetchall()
+        for row in missing_chunk_rows:
+            write_gamepath_fts(conn, dict(row))
+            write_gamepath_chunks(conn, dict(row))
+        conn.execute("PRAGMA user_version = 8")
         conn.commit()
 
 
@@ -2336,6 +2942,11 @@ def render_gamepath_markdown(row: dict[str, Any]) -> str:
         f"- Game: {row.get('game_id') or 'global'}\n"
         f"- Source: {row.get('source_type') or 'manual'}\n"
         f"- Agent used: {'yes' if row.get('agent_used') else 'no'}\n"
+        f"- Version: {row.get('version') or 'unknown'}\n"
+        f"- Area: {row.get('area') or 'unknown'}\n"
+        f"- Entity type: {row.get('entity_type') or 'unknown'}\n"
+        f"- Entity name: {row.get('entity_name') or 'unknown'}\n"
+        f"- Source quality: {row.get('source_quality') if row.get('source_quality') is not None else 0.5}\n"
         f"- Spoiler level: {row.get('spoiler_level') or 'low'}\n"
         f"- Trust state: {row.get('trust_state') or 'unverified'}\n"
         f"- Dispute count: {row.get('dispute_count') or 0}\n"
@@ -2386,6 +2997,10 @@ def write_gamepath_fts(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         row.get("question") or "",
         row.get("answer_summary") or "",
         row.get("tags") or "",
+        row.get("version") or "",
+        row.get("area") or "",
+        row.get("entity_type") or "",
+        row.get("entity_name") or "",
         gamepath_query_text(row.get("question") or ""),
     )
     conn.execute(
@@ -2406,6 +3021,147 @@ def write_gamepath_fts(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     )
 
 
+def gamepath_markdown_index_content(row: dict[str, Any]) -> str:
+    answer_text = str(row.get("answer_summary") or "").strip()
+    markdown_text = ""
+    note_path = gamepath_markdown_file(str(row.get("markdown_path") or ""))
+    if note_path and note_path.exists():
+        try:
+            markdown_text = note_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            markdown_text = ""
+
+    condensed_match = re.search(
+        r"(?ms)^##\s+Condensed Hint\s*\n(?P<body>.*?)(?=^##\s+|\Z)",
+        markdown_text,
+    )
+    if condensed_match:
+        condensed = condensed_match.group("body").strip()
+        if condensed and (not answer_text or len(condensed) >= max(80, int(len(answer_text) * 0.5))):
+            return condensed
+        return answer_text
+    if markdown_text and len(markdown_text) > max(1200, len(answer_text) * 1.4):
+        return markdown_text.strip()
+    return answer_text
+
+
+def gamepath_chunk_heading(content: str, fallback: str) -> str:
+    for line in str(content or "").splitlines():
+        match = re.match(r"^#{1,4}\s+(?P<title>.+)$", line.strip())
+        if match:
+            return re.sub(r"\s+", " ", match.group("title")).strip()[:120]
+    return re.sub(r"\s+", " ", str(fallback or "GamePath")).strip()[:120]
+
+
+def build_gamepath_chunk_documents(row: dict[str, Any]) -> list[dict[str, Any]]:
+    source = gamepath_markdown_index_content(row)
+    if not source:
+        return []
+    sections = split_gamepath_markdown_sections(source)
+    if not sections:
+        sections = split_gamepath_passage(source)
+    title = str(row.get("title") or row.get("question") or "GamePath").strip()
+    chunks: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    for index, section in enumerate(sections[:200]):
+        content = re.sub(r"\n{3,}", "\n\n", str(section or "").strip())
+        if len(content) < 8:
+            continue
+        content_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+        if content_hash in seen_hashes:
+            continue
+        seen_hashes.add(content_hash)
+        chunks.append(
+            {
+                "chunk_index": len(chunks),
+                "heading": gamepath_chunk_heading(content, title),
+                "content": content,
+                "content_hash": content_hash,
+                "char_count": len(content),
+                "token_estimate": max(1, len(content) // 3),
+            }
+        )
+    return chunks
+
+
+def write_gamepath_chunks(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    entry_id = int(row.get("id") or 0)
+    if entry_id <= 0:
+        return
+    conn.execute("DELETE FROM gamepath_chunk_fts WHERE entry_id = ?", (entry_id,))
+    conn.execute("DELETE FROM gamepath_chunks WHERE entry_id = ?", (entry_id,))
+    chunks = build_gamepath_chunk_documents(row)
+    if not chunks:
+        return
+
+    now = str(row.get("updated_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    created_at = str(row.get("created_at") or now)
+    game_id = str(row.get("game_id") or "global")
+    title = str(row.get("title") or "")
+    question = str(row.get("question") or "")
+    tags = str(row.get("tags") or "")
+    version = str(row.get("version") or "")
+    area = str(row.get("area") or "")
+    entity_type = str(row.get("entity_type") or "")
+    entity_name = str(row.get("entity_name") or "")
+    spoiler_level = str(row.get("spoiler_level") or "low")
+
+    for chunk in chunks:
+        cursor = conn.execute(
+            """
+            INSERT INTO gamepath_chunks(
+                entry_id, game_id, chunk_index, heading, content, content_hash,
+                char_count, token_estimate, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                game_id,
+                int(chunk["chunk_index"]),
+                chunk["heading"],
+                chunk["content"],
+                chunk["content_hash"],
+                int(chunk["char_count"]),
+                int(chunk["token_estimate"]),
+                created_at,
+                now,
+            ),
+        )
+        chunk_id = int(cursor.lastrowid)
+        search_text = expand_search_text(
+            game_id,
+            title,
+            question,
+            chunk["heading"],
+            chunk["content"],
+            tags,
+            version,
+            area,
+            entity_type,
+            entity_name,
+            gamepath_query_text(question),
+        )
+        conn.execute(
+            """
+            INSERT INTO gamepath_chunk_fts(
+                chunk_id, entry_id, game_id, heading, content, tags, spoiler_level, search_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chunk_id,
+                entry_id,
+                game_id,
+                chunk["heading"],
+                chunk["content"],
+                tags,
+                spoiler_level,
+                search_text,
+            ),
+        )
+
+
 def add_gamepath_sync(
     question: str,
     answer_summary: str,
@@ -2416,6 +3172,11 @@ def add_gamepath_sync(
     spoiler_level: str = "low",
     source_type: str = "manual",
     agent_used: bool = False,
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+    source_quality: Any = None,
 ) -> dict[str, Any]:
     ensure_gamepath_db()
     normalized_game_id = normalize_game_id(game_id) or "global"
@@ -2434,8 +3195,29 @@ def add_gamepath_sync(
     safe_source = safe_source or "manual"
     safe_spoiler = normalize_spoiler_level(spoiler_level)
     safe_tags = tags_to_text(tags)
+    metadata = infer_gamepath_metadata(
+        clean_question,
+        clean_answer,
+        safe_tags,
+        version=version,
+        area=area,
+        entity_type=entity_type,
+        entity_name=entity_name,
+        source_quality=source_quality,
+        source_type=safe_source,
+        agent_used=agent_used,
+    )
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     content_hash = gamepath_content_hash(normalized_game_id, clean_question)
+    fuzzy_duplicate = find_fuzzy_gamepath_duplicate_for_write(
+        clean_question,
+        clean_answer,
+        normalized_game_id,
+        safe_tags,
+        safe_spoiler,
+        safe_source,
+        agent_used,
+    )
 
     with sqlite3.connect(GAMEPATH_DB) as conn:
         conn.row_factory = sqlite3.Row
@@ -2443,6 +3225,25 @@ def add_gamepath_sync(
             "SELECT * FROM gamepath_entries WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
+        fuzzy_status = ""
+        if not existing and fuzzy_duplicate:
+            duplicate_id = int(fuzzy_duplicate.get("id") or 0)
+            if duplicate_id > 0:
+                duplicate_row = conn.execute(
+                    "SELECT * FROM gamepath_entries WHERE id = ?",
+                    (duplicate_id,),
+                ).fetchone()
+                if duplicate_row:
+                    duplicate_item = sqlite_row_to_gamepath_item(duplicate_row)
+                    if can_update_fuzzy_gamepath_duplicate(duplicate_item, safe_source, agent_used):
+                        existing = duplicate_row
+                        fuzzy_status = "updated_duplicate"
+                    else:
+                        duplicate_item["status"] = "duplicate_existing"
+                        duplicate_item["duplicate_coverage"] = fuzzy_duplicate.get("duplicate_coverage")
+                        duplicate_item["duplicate_core_overlap"] = fuzzy_duplicate.get("duplicate_core_overlap")
+                        duplicate_item["duplicate_answer_overlap"] = fuzzy_duplicate.get("duplicate_answer_overlap")
+                        return duplicate_item
         if existing:
             entry_id = int(existing["id"])
             markdown_path = existing["markdown_path"] or ""
@@ -2450,8 +3251,10 @@ def add_gamepath_sync(
             conn.execute(
                 """
                 UPDATE gamepath_entries
-                SET title = ?, question = ?, answer_summary = ?, tags = ?, spoiler_level = ?,
-                    spoiler_rank = ?, source_type = ?, agent_used = ?, trust_state = ?,
+                SET title = ?, question = ?, answer_summary = ?, tags = ?,
+                    version = ?, area = ?, entity_type = ?, entity_name = ?,
+                    spoiler_level = ?, spoiler_rank = ?, source_type = ?, source_quality = ?,
+                    agent_used = ?, trust_state = ?,
                     last_feedback = '', last_feedback_at = '', updated_at = ?
                 WHERE id = ?
                 """,
@@ -2460,9 +3263,14 @@ def add_gamepath_sync(
                     clean_question,
                     clean_answer,
                     safe_tags,
+                    metadata["version"],
+                    metadata["area"],
+                    metadata["entity_type"],
+                    metadata["entity_name"],
                     safe_spoiler,
                     spoiler_rank(safe_spoiler),
                     safe_source,
+                    metadata["source_quality"],
                     1 if agent_used else 0,
                     "unverified",
                     now,
@@ -2470,16 +3278,17 @@ def add_gamepath_sync(
                 ),
             )
             created_at = existing["created_at"]
-            status = "updated"
+            status = fuzzy_status or "updated"
         else:
             cursor = conn.execute(
                 """
                 INSERT INTO gamepath_entries(
-                    game_id, title, question, answer_summary, markdown_path, tags, spoiler_level,
-                    spoiler_rank, source_type, agent_used, trust_state, dispute_count, last_feedback,
+                    game_id, title, question, answer_summary, markdown_path, tags,
+                    version, area, entity_type, entity_name, spoiler_level,
+                    spoiler_rank, source_type, source_quality, agent_used, trust_state, dispute_count, last_feedback,
                     last_feedback_at, content_hash, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, 'unverified', 0, '', '', ?, ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unverified', 0, '', '', ?, ?, ?)
                 """,
                 (
                     normalized_game_id,
@@ -2487,9 +3296,14 @@ def add_gamepath_sync(
                     clean_question,
                     clean_answer,
                     safe_tags,
+                    metadata["version"],
+                    metadata["area"],
+                    metadata["entity_type"],
+                    metadata["entity_name"],
                     safe_spoiler,
                     spoiler_rank(safe_spoiler),
                     safe_source,
+                    metadata["source_quality"],
                     1 if agent_used else 0,
                     content_hash,
                     now,
@@ -2511,8 +3325,13 @@ def add_gamepath_sync(
             "answer_summary": clean_answer,
             "markdown_path": relative_or_absolute(note_path),
             "tags": safe_tags,
+            "version": metadata["version"],
+            "area": metadata["area"],
+            "entity_type": metadata["entity_type"],
+            "entity_name": metadata["entity_name"],
             "spoiler_level": safe_spoiler,
             "source_type": safe_source,
+            "source_quality": metadata["source_quality"],
             "agent_used": bool(agent_used),
             "trust_state": "unverified",
             "dispute_count": existing_dispute_count,
@@ -2527,6 +3346,7 @@ def add_gamepath_sync(
             (row["markdown_path"], entry_id),
         )
         write_gamepath_fts(conn, row)
+        write_gamepath_chunks(conn, row)
         conn.commit()
     row["status"] = status
     return row
@@ -2561,6 +3381,8 @@ def delete_gamepath_sync(entry_id: int) -> Optional[dict[str, Any]]:
             "markdown_path": row["markdown_path"],
             "markdown_deleted": False,
         }
+        conn.execute("DELETE FROM gamepath_chunk_fts WHERE entry_id = ?", (safe_entry_id,))
+        conn.execute("DELETE FROM gamepath_chunks WHERE entry_id = ?", (safe_entry_id,))
         conn.execute("DELETE FROM gamepath_fts WHERE entry_id = ?", (safe_entry_id,))
         conn.execute("DELETE FROM gamepath_entries WHERE id = ?", (safe_entry_id,))
         conn.commit()
@@ -2702,6 +3524,17 @@ def gamepath_entry_count_sync() -> int:
         return 0
 
 
+def gamepath_chunk_count_sync() -> int:
+    if not GAMEPATH_DB.exists():
+        return 0
+    try:
+        ensure_gamepath_db()
+        with sqlite3.connect(GAMEPATH_DB) as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM gamepath_chunks").fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
 def gamepath_last_updated_at_sync() -> str:
     if not GAMEPATH_DB.exists():
         return ""
@@ -2734,7 +3567,7 @@ def gamepath_term_coverage(query: str, text: str) -> float:
         return 0.0
     haystack = str(text or "").lower()
     matched = sum(1 for term in terms if term.lower() in haystack)
-    return matched / max(1, min(len(terms), 8))
+    return min(1.0, matched / max(1, min(len(terms), 8)))
 
 
 def gamepath_text_is_large(text: str) -> bool:
@@ -2897,6 +3730,514 @@ def build_gamepath_relevant_context(query: str, item: dict[str, Any]) -> dict[st
     }
 
 
+def normalize_gamepath_scope(
+    query: str,
+    tags: Any = None,
+    *,
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+) -> dict[str, str]:
+    metadata = infer_gamepath_metadata(
+        query,
+        "",
+        tags,
+        version=version,
+        area=area,
+        entity_type=entity_type,
+        entity_name=entity_name,
+    )
+    return {
+        "version": str(metadata.get("version") or ""),
+        "area": str(metadata.get("area") or ""),
+        "entity_type": str(metadata.get("entity_type") or ""),
+        "entity_name": str(metadata.get("entity_name") or ""),
+        "tags": ",".join(normalize_tags_value(tags)),
+    }
+
+
+def append_gamepath_scope_filters(
+    sql: str,
+    params: list[Any],
+    scope: dict[str, str],
+    *,
+    strict_metadata: bool,
+) -> tuple[str, list[Any]]:
+    for key in ("entity_type", "version", "area"):
+        wanted = scope.get(key) or ""
+        if not wanted:
+            continue
+        if strict_metadata:
+            sql += f" AND e.{key} = ?"
+            params.append(wanted)
+        else:
+            sql += f" AND (e.{key} = ? OR e.{key} = '')"
+            params.append(wanted)
+    entity_name = scope.get("entity_name") or ""
+    if entity_name and strict_metadata:
+        sql += " AND e.entity_name = ?"
+        params.append(entity_name)
+    return sql, params
+
+
+def gamepath_metadata_match_score(item: dict[str, Any], scope: dict[str, str], query: str) -> float:
+    score = 0.0
+    for key, weight in (("entity_type", 0.22), ("version", 0.16), ("area", 0.16)):
+        wanted = str(scope.get(key) or "").strip().lower()
+        actual = str(item.get(key) or "").strip().lower()
+        if not wanted:
+            continue
+        if actual == wanted:
+            score += weight
+        elif key == "area" and actual and (wanted in actual or actual in wanted):
+            score += weight * 0.7
+        elif actual:
+            score -= weight * 0.45
+    entity_name = str(scope.get("entity_name") or "").strip().lower()
+    if entity_name:
+        haystack = "\n".join(
+            str(item.get(key) or "")
+            for key in ("entity_name", "title", "question", "answer_summary", "tags", "relevant_excerpt", "snippet")
+        ).lower()
+        compact_entity_name = re.sub(r"\s+", "", entity_name)
+        compact_haystack = re.sub(r"\s+", "", haystack)
+        if entity_name in haystack or (compact_entity_name and compact_entity_name in compact_haystack):
+            score += 0.18
+        elif str(item.get("entity_name") or "").strip():
+            score -= 0.08
+    semantic_hints = gamepath_semantic_hint_text(query)
+    if semantic_hints:
+        haystack = "\n".join(
+            str(item.get(key) or "")
+            for key in ("entity_name", "title", "question", "answer_summary", "tags", "relevant_excerpt", "snippet")
+        )
+        hint_overlap = term_overlap_ratio(gamepath_core_terms(semantic_hints, max_terms=16), haystack)
+        score += min(0.16, hint_overlap * 0.16)
+    requested_tags = {tag.strip().lower() for tag in str(scope.get("tags") or "").split(",") if tag.strip()}
+    if requested_tags:
+        row_tags = {tag.strip().lower() for tag in str(item.get("tags") or "").split(",") if tag.strip()}
+        tag_matches = requested_tags.intersection(row_tags)
+        if tag_matches:
+            score += min(0.12, 0.05 + len(tag_matches) * 0.025)
+        else:
+            score -= 0.025
+    trust = str(item.get("trust_state") or "").lower()
+    if trust == "verified":
+        score += 0.1
+    elif trust in {"disputed", "needs_review"}:
+        score -= 0.16
+    elif trust == "deprecated":
+        score -= 0.3
+    score += max(0.0, min(float(item.get("source_quality") or 0.5), 1.0)) * 0.22
+    score -= min(int(item.get("dispute_count") or 0), 5) * 0.04
+    if gamepath_core_terms(query) and float(item.get("match_coverage") or 0.0) <= 0.2:
+        score -= 0.08
+    return round(score, 4)
+
+
+def rank_gamepath_results(results: list[dict[str, Any]], scope: dict[str, str], query: str) -> list[dict[str, Any]]:
+    for item in results:
+        item["metadata_match_score"] = gamepath_metadata_match_score(item, scope, query)
+    results.sort(
+        key=lambda item: (
+            -float(item.get("match_coverage") or 0.0),
+            -float(item.get("metadata_match_score") or 0.0),
+            float(item.get("score") or 0.0),
+            -float(item.get("source_quality") or 0.5),
+        )
+    )
+    return results
+
+
+def merge_gamepath_results(
+    primary: list[dict[str, Any]],
+    secondary: list[dict[str, Any]],
+    scope: dict[str, str],
+    query: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    merged: dict[int, dict[str, Any]] = {}
+    for item in [*primary, *secondary]:
+        try:
+            entry_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if entry_id <= 0:
+            continue
+        existing = merged.get(entry_id)
+        if existing is None:
+            merged[entry_id] = item
+            continue
+        existing_coverage = float(existing.get("match_coverage") or 0.0)
+        item_coverage = float(item.get("match_coverage") or 0.0)
+        existing_context = int(existing.get("context_char_count") or 0)
+        item_context = int(item.get("context_char_count") or 0)
+        if (item_coverage, item_context) > (existing_coverage, existing_context):
+            merged[entry_id] = item
+    ranked = rank_gamepath_results(list(merged.values()), scope, query)
+    return ranked[: clamp_limit(limit, upper=30)]
+
+
+def gamepath_semantic_hint_text(text: str) -> str:
+    source = str(text or "")
+    hints: list[str] = []
+    elder_dialog = bool(
+        re.search(
+            r"((?:\u78bc\u982d|\u93e1\u6e56).{0,18}(?:\u8001\u4eba|\u8001\u982d))|"
+            r"((?:\u8001\u4eba|\u8001\u982d).{0,18}(?:\u78bc\u982d|\u93e1\u6e56|\u9418\u8072))",
+            source,
+            re.IGNORECASE,
+        )
+    )
+    if elder_dialog:
+        hints.append("\u93e1\u6e56\u78bc\u982d \u8001\u4eba NPC \u5c0d\u8a71 \u9418\u8072 \u56de\u7b54 \u5b89\u5168")
+    hint_patterns = [
+        (r"(拿刀|砍|追我|屠夫)", "屠夫 怪 boss 打法 弱點"),
+        (r"(紅色光|紅光|擋路)", "紅光 機制 互動 電箱 紫外線"),
+        (r"(三個轉盤|轉盤|三個閥門|閥門)", "三閥門 閥門 順序 解謎 鍋爐房"),
+        (r"(鐘聲|四次鐘|四聲鐘|敲)", "鐘塔 鐘聲 四聲鐘 順序 解謎"),
+        (r"(女殭屍|唱歌)", "唱歌女殭屍 敵人 走廊 處理"),
+        (r"(黑帽)", "黑帽角色 酒窖 身份 角色"),
+        (r"(白衣\s*NPC|白衣)", "白衣 NPC 資料室 對話"),
+        (r"(怪門)", "怪門 廚房 路線 開門"),
+        (r"(鐵手臂|鐵臂)", "鐵臂怪 鍋爐房 boss 打法"),
+        (r"(暗門)", "暗門 入口 西翼大廳 位置"),
+        (r"(月銀枝)", "月銀枝 素材 用途"),
+        (r"(保險絲)", "保險絲 舊醫院 用途"),
+        (r"(地圖碎片|碎片)", "地圖碎片 位置 地圖"),
+        (r"(老人|老頭)", "老人 NPC 對話"),
+        (r"(迷路|繞回|路標)", "路線 迷路 路標 下一步"),
+        (r"(下一步|接下來|去哪)", "任務 路線 下一步 目標"),
+    ]
+    for pattern, hint in hint_patterns:
+        if elder_dialog and "\u9418" in hint and "\u9806\u5e8f" in hint:
+            continue
+        if re.search(pattern, source, re.IGNORECASE):
+            hints.append(hint)
+    return " ".join(hints)
+
+
+def build_gamepath_query_variants(
+    query: str,
+    *,
+    tags: Any = None,
+    query_variants: Any = None,
+    max_variants: int = 8,
+) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: Any) -> None:
+        clean = re.sub(r"\s+", " ", str(value or "").strip())
+        if not clean:
+            return
+        if clean not in candidates:
+            candidates.append(clean)
+
+    semantic_sources: list[str] = []
+
+    def remember_source(value: Any) -> None:
+        clean = re.sub(r"\s+", " ", str(value or "").strip())
+        if clean and clean not in semantic_sources:
+            semantic_sources.append(clean)
+
+    remember_source(query)
+    add(query)
+    if isinstance(query_variants, str):
+        remember_source(query_variants)
+        add(query_variants)
+    elif isinstance(query_variants, list):
+        for item in query_variants:
+            remember_source(item)
+            add(item)
+
+    semantic_source = " ".join(semantic_sources).strip() or query
+    semantic_hints = gamepath_semantic_hint_text(semantic_source)
+    if semantic_hints:
+        add(f"{query} {semantic_hints}")
+        cjk_focused_hints = re.sub(
+            r"\b(?:boss|enemy|npc|item|route|map|quest|guide|walkthrough|mechanic|puzzle|location|character)\b",
+            " ",
+            semantic_hints,
+            flags=re.IGNORECASE,
+        )
+        area_hint = infer_gamepath_area(semantic_source)
+        hint_terms: list[str] = []
+        for raw in re.findall(r"[\u4e00-\u9fff]{2,}", cjk_focused_hints):
+            if raw not in hint_terms:
+                hint_terms.append(raw)
+        for term in gamepath_core_terms(cjk_focused_hints, max_terms=12):
+            if has_cjk_text(term) and term not in hint_terms:
+                hint_terms.append(term)
+        if area_hint and hint_terms:
+            add(" ".join([area_hint, *hint_terms[:4]]))
+            for priority_term in (
+                "\u4e0b\u4e00\u6b65",
+                "\u76ee\u6a19",
+                "\u4f4d\u7f6e",
+                "\u7528\u9014",
+                "\u6253\u6cd5",
+                "\u5c0d\u8a71",
+            ):
+                if priority_term in cjk_focused_hints:
+                    add(f"{area_hint} {priority_term}")
+                    break
+        add(cjk_focused_hints)
+        add(semantic_hints)
+
+    core_terms = gamepath_core_terms(query, max_terms=12)
+    if core_terms:
+        add(" ".join(core_terms))
+
+    compact = re.sub(r"[^\w\u3400-\u9fff]+", " ", str(query or ""), flags=re.IGNORECASE)
+    add(compact)
+    return candidates[:max_variants]
+
+
+def search_gamepath_multi_query_sync(
+    query: str,
+    game_id: Optional[str],
+    limit: int = 5,
+    *,
+    tags: Any = None,
+    spoiler_level: str = "low",
+    query_variants: Any = None,
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+    strict_metadata: bool = False,
+) -> list[dict[str, Any]]:
+    query = str(query or "").strip()
+    variants = build_gamepath_query_variants(query, tags=tags, query_variants=query_variants)
+    if not variants:
+        return []
+    merged: dict[int, dict[str, Any]] = {}
+    for variant in variants:
+        results = search_gamepath_sync(
+            variant,
+            game_id,
+            max(limit * 4, 12),
+            tags=tags,
+            spoiler_level=spoiler_level,
+            version=version,
+            area=area,
+            entity_type=entity_type,
+            entity_name=entity_name,
+            strict_metadata=strict_metadata,
+        )
+        for item in results:
+            try:
+                entry_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if entry_id <= 0:
+                continue
+            candidate = dict(item)
+            candidate["matched_query"] = variant
+            candidate["match_coverage"] = max(
+                float(candidate.get("match_coverage") or 0.0),
+                gamepath_term_coverage(query, "\n".join(str(candidate.get(key) or "") for key in ("title", "question", "answer_summary", "tags", "relevant_excerpt", "snippet"))),
+            )
+            existing = merged.get(entry_id)
+            if existing is None:
+                merged[entry_id] = candidate
+                continue
+            if (
+                float(candidate.get("match_coverage") or 0.0),
+                float(candidate.get("metadata_match_score") or 0.0),
+                int(candidate.get("context_char_count") or 0),
+            ) > (
+                float(existing.get("match_coverage") or 0.0),
+                float(existing.get("metadata_match_score") or 0.0),
+                int(existing.get("context_char_count") or 0),
+            ):
+                merged[entry_id] = candidate
+    scope_query = " ".join(item for item in [query, gamepath_semantic_hint_text(query)] if item).strip()
+    scope = normalize_gamepath_scope(
+        scope_query or query,
+        tags,
+        version=version,
+        area=area,
+        entity_type=entity_type,
+        entity_name=entity_name,
+    )
+    ranked = rank_gamepath_results(list(merged.values()), scope, query)
+    return ranked[: clamp_limit(limit, upper=30)]
+
+
+def search_gamepath_chunks_sync(
+    query: str,
+    game_id: Optional[str],
+    limit: int = 5,
+    *,
+    tags: Any = None,
+    spoiler_level: str = "low",
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+    strict_metadata: bool = False,
+    apply_scope_filters: bool = True,
+) -> list[dict[str, Any]]:
+    query = (query or "").strip()
+    if not query:
+        return []
+    match = fts_query(gamepath_query_text(query))
+    if not match:
+        return []
+
+    normalized_game_id = normalize_game_id(game_id)
+    scope = normalize_gamepath_scope(
+        query,
+        tags,
+        version=version,
+        area=area,
+        entity_type=entity_type,
+        entity_name=entity_name,
+    )
+    sql = (
+        "SELECT e.id AS entry_id, e.game_id, e.title, e.question, e.answer_summary, "
+        "e.markdown_path, e.tags, e.version, e.area, e.entity_type, e.entity_name, "
+        "e.spoiler_level, e.source_type, e.source_quality, e.agent_used, "
+        "e.trust_state, e.dispute_count, e.last_feedback, e.last_feedback_at, "
+        "e.created_at, e.updated_at, c.id AS chunk_id, c.chunk_index, c.heading, "
+        "c.content AS chunk_content, c.char_count, bm25(gamepath_chunk_fts) AS chunk_score "
+        "FROM gamepath_chunk_fts "
+        "JOIN gamepath_chunks c ON c.id = gamepath_chunk_fts.chunk_id "
+        "JOIN gamepath_entries e ON e.id = c.entry_id "
+        "WHERE gamepath_chunk_fts MATCH ? AND e.spoiler_rank <= ?"
+    )
+    params: list[Any] = [match, spoiler_rank(spoiler_level)]
+    if normalized_game_id:
+        sql += " AND e.game_id IN (?, 'global')"
+        params.append(normalized_game_id)
+    if apply_scope_filters:
+        sql, params = append_gamepath_scope_filters(
+            sql,
+            params,
+            scope,
+            strict_metadata=strict_metadata,
+        )
+    sql += " ORDER BY chunk_score LIMIT ?"
+    row_limit = max(clamp_limit(limit, upper=30) * 8, 40)
+    params.append(min(row_limit, 240))
+
+    try:
+        with sqlite3.connect(GAMEPATH_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    grouped: dict[int, dict[str, Any]] = {}
+    order: list[int] = []
+    for row in rows:
+        chunk_content = str(row["chunk_content"] or "")
+        chunk_haystack = "\n".join(
+            [
+                chunk_content,
+                str(row["heading"] or ""),
+            ]
+        )
+        coverage = gamepath_term_coverage(query, chunk_haystack)
+        if coverage <= 0.0:
+            continue
+        haystack = "\n".join(
+            [
+                str(row["title"] or ""),
+                str(row["question"] or ""),
+                chunk_content,
+                str(row["tags"] or ""),
+                str(row["heading"] or ""),
+            ]
+        )
+        coverage = max(coverage, gamepath_term_coverage(query, haystack))
+
+        entry_id = int(row["entry_id"])
+        if entry_id not in grouped:
+            grouped[entry_id] = {
+                "id": entry_id,
+                "game_id": row["game_id"],
+                "title": row["title"],
+                "question": row["question"],
+                "answer_summary": row["answer_summary"],
+                "snippet": make_snippet(chunk_content or row["answer_summary"], query),
+                "markdown_path": row["markdown_path"],
+                "tags": row["tags"],
+                "version": row["version"],
+                "area": row["area"],
+                "entity_type": row["entity_type"],
+                "entity_name": row["entity_name"],
+                "spoiler_level": row["spoiler_level"],
+                "source_type": row["source_type"],
+                "source_quality": float(row["source_quality"] or 0.5),
+                "agent_used": bool(row["agent_used"]),
+                "trust_state": row["trust_state"],
+                "dispute_count": int(row["dispute_count"] or 0),
+                "last_feedback": row["last_feedback"],
+                "last_feedback_at": row["last_feedback_at"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "score": float(row["chunk_score"]),
+                "match_coverage": round(coverage, 3),
+                "rag_lite": True,
+                "rag_chunk_hits": [],
+            }
+            order.append(entry_id)
+        item = grouped[entry_id]
+        item["match_coverage"] = round(max(float(item.get("match_coverage") or 0.0), coverage), 3)
+        item["score"] = min(float(item.get("score") or row["chunk_score"]), float(row["chunk_score"]))
+        item["rag_chunk_hits"].append(
+            {
+                "chunk_id": int(row["chunk_id"]),
+                "chunk_index": int(row["chunk_index"]),
+                "heading": row["heading"],
+                "content": chunk_content,
+                "char_count": int(row["char_count"] or len(chunk_content)),
+                "score": float(row["chunk_score"]),
+                "coverage": round(coverage, 3),
+            }
+        )
+
+    results: list[dict[str, Any]] = []
+    for entry_id in order:
+        item = grouped[entry_id]
+        chunks = list(item.pop("rag_chunk_hits", []))
+        chunks.sort(key=lambda chunk: (-float(chunk.get("coverage") or 0.0), float(chunk.get("score") or 0.0)))
+        excerpts: list[str] = []
+        total_chars = 0
+        best_coverage = float(chunks[0].get("coverage") or 0.0) if chunks else 0.0
+        min_coverage = max(0.25, best_coverage * 0.62) if best_coverage else 0.0
+        for chunk in chunks[:5]:
+            if excerpts and float(chunk.get("coverage") or 0.0) < min_coverage:
+                continue
+            heading = str(chunk.get("heading") or "").strip()
+            snippet = make_snippet(str(chunk.get("content") or ""), query, max_len=GAMEPATH_PASSAGE_MAX_CHARS)
+            if heading and heading.lower() not in snippet[:160].lower():
+                snippet = f"### {heading}\n{snippet}"
+            next_total = total_chars + len(snippet) + (5 if excerpts else 0)
+            if excerpts and next_total > GAMEPATH_CONTEXT_MAX_CHARS:
+                break
+            excerpts.append(snippet)
+            total_chars = next_total
+            if len(excerpts) >= 3:
+                break
+        relevant_excerpt = "\n\n---\n\n".join(excerpts).strip()
+        answer_len = len(str(item.get("answer_summary") or ""))
+        item["relevant_excerpt"] = relevant_excerpt
+        item["context_char_count"] = len(relevant_excerpt)
+        item["source_char_count"] = answer_len
+        item["passage_count"] = max(len(chunks), 1)
+        item["rag_chunk_count"] = len(chunks)
+        item["rag_chunk_ids"] = [int(chunk["chunk_id"]) for chunk in chunks[:5]]
+        item["large_entry"] = gamepath_text_is_large(str(item.get("answer_summary") or "")) or len(chunks) > 1
+        results.append(item)
+        if len(results) >= clamp_limit(limit, upper=30):
+            break
+    return rank_gamepath_results(results, scope, query)
+
+
 def search_gamepath_sync(
     query: str,
     game_id: Optional[str],
@@ -2904,11 +4245,64 @@ def search_gamepath_sync(
     *,
     tags: Any = None,
     spoiler_level: str = "low",
+    use_rag_lite: bool = True,
+    version: Any = None,
+    area: Any = None,
+    entity_type: Any = None,
+    entity_name: Any = None,
+    strict_metadata: bool = False,
 ) -> list[dict[str, Any]]:
     query = (query or "").strip()
     if not query:
         return []
     ensure_gamepath_db()
+    scope = normalize_gamepath_scope(
+        query,
+        tags,
+        version=version,
+        area=area,
+        entity_type=entity_type,
+        entity_name=entity_name,
+    )
+    if use_rag_lite:
+        chunk_results = search_gamepath_chunks_sync(
+            query,
+            game_id,
+            limit,
+            tags=tags,
+            spoiler_level=spoiler_level,
+            version=scope.get("version"),
+            area=scope.get("area"),
+            entity_type=scope.get("entity_type"),
+            entity_name=scope.get("entity_name"),
+            strict_metadata=strict_metadata,
+        )
+        if chunk_results and strict_metadata:
+            return chunk_results
+        if not strict_metadata:
+            broad_chunk_results = search_gamepath_chunks_sync(
+                query,
+                game_id,
+                limit,
+                tags=tags,
+                spoiler_level=spoiler_level,
+                version=scope.get("version"),
+                area=scope.get("area"),
+                entity_type=scope.get("entity_type"),
+                entity_name=scope.get("entity_name"),
+                strict_metadata=False,
+                apply_scope_filters=False,
+            )
+            if chunk_results or broad_chunk_results:
+                return merge_gamepath_results(
+                    chunk_results,
+                    broad_chunk_results,
+                    scope,
+                    query,
+                    limit,
+                )
+        if chunk_results:
+            return chunk_results
     match = fts_query(gamepath_query_text(query))
     if not match:
         return []
@@ -2922,8 +4316,14 @@ def search_gamepath_sync(
     if normalized_game_id:
         sql += " AND e.game_id IN (?, 'global')"
         params.append(normalized_game_id)
+    sql, params = append_gamepath_scope_filters(
+        sql,
+        params,
+        scope,
+        strict_metadata=strict_metadata,
+    )
     sql += " ORDER BY score LIMIT ?"
-    params.append(clamp_limit(limit, upper=10))
+    params.append(clamp_limit(limit, upper=30))
     try:
         with sqlite3.connect(GAMEPATH_DB) as conn:
             conn.row_factory = sqlite3.Row
@@ -2931,12 +4331,8 @@ def search_gamepath_sync(
     except sqlite3.OperationalError:
         return []
 
-    requested_tags = {tag.lower() for tag in normalize_tags_value(tags)}
     results: list[dict[str, Any]] = []
     for row in rows:
-        row_tags = {tag.strip().lower() for tag in str(row["tags"] or "").split(",") if tag.strip()}
-        if requested_tags and not requested_tags.intersection(row_tags):
-            continue
         haystack = "\n".join(
             str(row[key] or "")
             for key in ("title", "question", "answer_summary", "tags")
@@ -2953,8 +4349,13 @@ def search_gamepath_sync(
             "snippet": make_snippet(row["answer_summary"], query),
             "markdown_path": row["markdown_path"],
             "tags": row["tags"],
+            "version": row["version"],
+            "area": row["area"],
+            "entity_type": row["entity_type"],
+            "entity_name": row["entity_name"],
             "spoiler_level": row["spoiler_level"],
             "source_type": row["source_type"],
+            "source_quality": float(row["source_quality"] or 0.5),
             "agent_used": bool(row["agent_used"]),
             "trust_state": row["trust_state"],
             "dispute_count": int(row["dispute_count"] or 0),
@@ -2967,7 +4368,7 @@ def search_gamepath_sync(
         }
         item.update(build_gamepath_relevant_context(query, item))
         results.append(item)
-    return results
+    return rank_gamepath_results(results, scope, query)
 
 
 def recent_gamepath_sync(game_id: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
@@ -2975,8 +4376,9 @@ def recent_gamepath_sync(game_id: Optional[str] = None, limit: int = 10) -> list
         return []
     normalized_game_id = normalize_game_id(game_id)
     sql = (
-        "SELECT id, game_id, title, question, answer_summary, markdown_path, tags, spoiler_level, "
-        "source_type, agent_used, trust_state, dispute_count, last_feedback, last_feedback_at, "
+        "SELECT id, game_id, title, question, answer_summary, markdown_path, tags, "
+        "version, area, entity_type, entity_name, spoiler_level, source_type, source_quality, "
+        "agent_used, trust_state, dispute_count, last_feedback, last_feedback_at, "
         "created_at, updated_at FROM gamepath_entries"
     )
     params: list[Any] = []
@@ -2997,8 +4399,13 @@ def recent_gamepath_sync(game_id: Optional[str] = None, limit: int = 10) -> list
             "answer_summary": row["answer_summary"],
             "markdown_path": row["markdown_path"],
             "tags": row["tags"],
+            "version": row["version"],
+            "area": row["area"],
+            "entity_type": row["entity_type"],
+            "entity_name": row["entity_name"],
             "spoiler_level": row["spoiler_level"],
             "source_type": row["source_type"],
+            "source_quality": float(row["source_quality"] or 0.5),
             "agent_used": bool(row["agent_used"]),
             "trust_state": row["trust_state"],
             "dispute_count": int(row["dispute_count"] or 0),
@@ -3015,12 +4422,576 @@ def should_use_gamepath(prompt: str, guide_requested: bool) -> bool:
     text = str(prompt or "").strip()
     if not text:
         return False
+    if GAMEPATH_NEGATED_GUIDE_RE.search(text):
+        return False
+    if GAMEPATH_SAVE_ONLY_RE.search(text):
+        return False
     has_gamepath_intent = bool(guide_requested or GAMEPATH_STORE_INTENT_RE.search(text))
     if not has_gamepath_intent:
         return False
     if GAMEPATH_UI_SKIP_RE.search(text) and not GUIDE_INTENT_RE.search(text):
         return False
     return True
+
+
+def backend_hard_skips_gamepath(prompt: str) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return True
+    if GAMEPATH_WEB_INTENT_RE.search(text) or GAMEPATH_VERSION_COMPARE_RE.search(text):
+        return False
+    if GAMEPATH_NEGATED_GUIDE_RE.search(text):
+        return True
+    if GAMEPATH_SAVE_ONLY_RE.search(text):
+        return True
+    return bool(GAMEPATH_UI_SKIP_RE.search(text))
+
+
+def local_router_cache_key(kind: str, game_id: Optional[str], text: str, extra: str = "") -> str:
+    raw = "\n".join(
+        [
+            LOCAL_ROUTER_MODEL,
+            kind,
+            normalize_game_id(game_id) or "",
+            str(text or "").strip(),
+            extra,
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def local_router_cache_get(key: str) -> Optional[dict[str, Any]]:
+    if LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS <= 0:
+        return None
+    cached = local_router_decision_cache.get(key)
+    if not cached:
+        return None
+    created_at, value = cached
+    if time.time() - created_at > LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS:
+        local_router_decision_cache.pop(key, None)
+        return None
+    result = dict(value)
+    result["cache_hit"] = True
+    return result
+
+
+def local_router_cache_set(key: str, value: dict[str, Any]) -> None:
+    if LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS <= 0:
+        return
+    if len(local_router_decision_cache) > 256:
+        oldest = sorted(local_router_decision_cache.items(), key=lambda item: item[1][0])[:64]
+        for old_key, _ in oldest:
+            local_router_decision_cache.pop(old_key, None)
+    local_router_decision_cache[key] = (time.time(), dict(value))
+
+
+def normalize_router_tags(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value
+    if isinstance(value, str):
+        raw_items = re.split(r"[,，、\s]+", value)
+    if not isinstance(raw_items, list):
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        tag = re.sub(r"[^0-9A-Za-z_\-\u3400-\u9fff]+", "", str(item or "").strip().lower())
+        if not tag or len(tag) > 24 or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+        if len(tags) >= 6:
+            break
+    return tags
+
+
+def normalize_router_spoiler(value: Any) -> str:
+    clean = str(value or "low").strip().lower()
+    if clean in SPOILER_RANKS and SPOILER_RANKS[clean] <= SPOILER_RANKS["medium"]:
+        return clean
+    return "low"
+
+
+def gamepath_explicit_spoiler_fallback_level(prompt: str, query: str, current_level: str) -> str:
+    current = normalize_spoiler_level(current_level)
+    text = f"{prompt or ''} {query or ''}"
+    if not text.strip():
+        return current
+    if re.search(r"(結局|真結局|壞結局|好結局|全結局|最終謎題|完整解謎|final|ending|true ending)", text, re.I):
+        target = "high"
+    elif re.search(r"(弱點|密碼|答案|解法|怎麼解|怎麼打|打法|保險箱|代碼|謎題|boss|weakness|password|code|solution)", text, re.I):
+        target = "medium"
+    else:
+        return current
+    return target if spoiler_rank(target) > spoiler_rank(current) else current
+
+
+GAMEPATH_ADAPTIVE_FOLLOWUP_RE = re.compile(
+    r"(還是|仍然|依然|可是|但是|不過|我覺得|我是說|換個|更簡單|更安全|保守|省資源|"
+    r"很難|太難|有點難|有難度|打不過|打不動|一直死|不行|做不到|卡住|難打|不好打)",
+    re.IGNORECASE,
+)
+GAMEPATH_COMBAT_FOLLOWUP_RE = re.compile(
+    r"(怪物|敵人|喪屍|殭屍|boss|主廚|暴君|泰坦|舔食者|怎麼打|打法|弱點|打不過|難打|戰鬥)",
+    re.IGNORECASE,
+)
+GAMEPATH_FOLLOWUP_ANCHOR_RE = re.compile(
+    r"(廚房|餐廳|旅館|療養院|警局|方舟|地下|東側|西側|一樓|二樓|三樓|房|室|門|保險箱|"
+    r"鑰匙|門禁卡|怪物|敵人|喪屍|殭屍|boss|主廚|暴君|泰坦|舔食者|謎題|密碼|弱點|答案|怎麼|哪)",
+    re.IGNORECASE,
+)
+
+
+def is_gamepath_adaptive_followup(prompt: str) -> bool:
+    return bool(GAMEPATH_ADAPTIVE_FOLLOWUP_RE.search(str(prompt or "")))
+
+
+def is_gamepath_vague_adaptive_followup(prompt: str) -> bool:
+    text = re.sub(r"\s+", "", str(prompt or ""))
+    if not text or not is_gamepath_adaptive_followup(text):
+        return False
+    return len(text) <= 18 and not GAMEPATH_FOLLOWUP_ANCHOR_RE.search(text)
+
+
+def is_gamepath_tactical_reframe(prompt: str) -> bool:
+    text = str(prompt or "")
+    if is_gamepath_adaptive_followup(text):
+        return True
+    return bool(
+        GAMEPATH_COMBAT_FOLLOWUP_RE.search(text)
+        and re.search(r"(怎麼打|打法|打不過|打不動|難打|有難度|戰鬥|更安全|保守|省資源)", text, re.IGNORECASE)
+    )
+
+
+def augment_adaptive_gamepath_query_variants(prompt: str, query: str, variants: list[str]) -> list[str]:
+    text = f"{prompt or ''} {query or ''}"
+    output = list(variants or [])
+    extras: list[str] = []
+    if "廚房" in text and GAMEPATH_COMBAT_FOLLOWUP_RE.search(text):
+        extras.extend(
+            [
+                "主廚喪屍 廚房 怎麼打",
+                "廚房 主廚喪屍 食品儲藏室鑰匙",
+                "療養院 一樓西側 遊樂室 主廚喪屍 打法",
+            ]
+        )
+    for item in [query, prompt, *extras]:
+        clean = re.sub(r"\s+", " ", str(item or "").strip())
+        if clean and clean not in output:
+            output.append(clean)
+    return output[:8]
+
+
+def should_search_gamepath_after_router_failure(prompt: str, guide_requested: bool) -> bool:
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if GAMEPATH_WEB_INTENT_RE.search(text) or GAMEPATH_VERSION_COMPARE_RE.search(text):
+        return False
+    if backend_hard_skips_gamepath(text):
+        return False
+    if should_use_gamepath(text, guide_requested):
+        return True
+    return bool(LOCAL_ROUTER_GAMEPATH_CANDIDATE_RE.search(text))
+
+
+def fallback_gamepath_decision(
+    prompt: str,
+    game_id: Optional[str],
+    guide_requested: bool,
+    reason: str,
+) -> dict[str, Any]:
+    should_search = should_use_gamepath(prompt, guide_requested)
+    if not should_search and str(reason or "").startswith("router_failed:"):
+        should_search = should_search_gamepath_after_router_failure(prompt, guide_requested)
+    return {
+        "used": False,
+        "search_gamepath": should_search,
+        "query": str(prompt or "").strip(),
+        "tags": [],
+        "spoiler_level": "low",
+        "confidence": "fallback" if should_search else "none",
+        "reason": reason,
+        "model": None,
+        "intent_route": "gamepath_query" if should_search else "general_chat",
+    }
+
+
+def web_preferred_gamepath_decision(prompt: str, game_id: Optional[str]) -> dict[str, Any]:
+    return {
+        "used": False,
+        "search_gamepath": False,
+        "query": str(prompt or "").strip(),
+        "tags": [],
+        "spoiler_level": "low",
+        "confidence": "web",
+        "reason": "web_current_intent",
+        "model": None,
+        "prefer_hermes_agent": True,
+    }
+
+
+def should_ask_local_router_for_gamepath(prompt: str, guide_requested: bool) -> bool:
+    if not LOCAL_ROUTER_ENABLED or not LOCAL_ROUTER_GAMEPATH_GATE:
+        return False
+    text = str(prompt or "").strip()
+    if not text or len(text) > LOCAL_ROUTER_GAMEPATH_MAX_CHARS:
+        return False
+    if detect_fact_lookup_key(text):
+        return False
+    if backend_hard_skips_gamepath(text):
+        return False
+    if should_use_gamepath(text, guide_requested):
+        return False
+    return bool(LOCAL_ROUTER_GAMEPATH_CANDIDATE_RE.search(text))
+
+
+LOCAL_ROUTER_INTENT_ROUTES = {
+    "gamepath_query",
+    "hermes_web",
+    "general_chat",
+    "ui_command",
+    "task_memory",
+    "screenshot_hud",
+    "skip",
+    "clarify",
+}
+
+
+def normalize_local_router_intent_route(value: Any, parsed: Optional[dict[str, Any]] = None) -> str:
+    route = re.sub(r"[^a-z0-9_\-]+", "_", str(value or "").strip().lower()).strip("_-")
+    aliases = {
+        "gamepath": "gamepath_query",
+        "guide": "gamepath_query",
+        "guide_query": "gamepath_query",
+        "local_guide": "gamepath_query",
+        "web": "hermes_web",
+        "web_search": "hermes_web",
+        "hermes": "hermes_web",
+        "hermes_agent": "hermes_web",
+        "chat": "general_chat",
+        "general": "general_chat",
+        "casual": "general_chat",
+        "ui": "ui_command",
+        "system": "ui_command",
+        "app_command": "ui_command",
+        "memory": "task_memory",
+        "task": "task_memory",
+        "screenshot": "screenshot_hud",
+        "hud": "screenshot_hud",
+        "none": "skip",
+    }
+    route = aliases.get(route, route)
+    if route in LOCAL_ROUTER_INTENT_ROUTES:
+        return route
+    if parsed:
+        if bool(parsed.get("search_gamepath", parsed.get("s", parsed.get("search", False)))):
+            return "gamepath_query"
+        if bool(parsed.get("prefer_hermes_agent") or parsed.get("web")):
+            return "hermes_web"
+    return "general_chat"
+
+
+def local_router_gamepath_decision(
+    prompt: str,
+    game_id: Optional[str],
+    guide_requested: bool = False,
+) -> dict[str, Any]:
+    text = str(prompt or "").strip()
+    if not LOCAL_ROUTER_ENABLED or not LOCAL_ROUTER_GAMEPATH_GATE:
+        if GAMEPATH_WEB_INTENT_RE.search(prompt or "") or GAMEPATH_VERSION_COMPARE_RE.search(prompt or ""):
+            return web_preferred_gamepath_decision(prompt, game_id)
+        if backend_hard_skips_gamepath(prompt):
+            return fallback_gamepath_decision(prompt, game_id, False, "backend_hard_skip")
+        return fallback_gamepath_decision(prompt, game_id, guide_requested, "router_disabled")
+    if not text or len(text) > LOCAL_ROUTER_GAMEPATH_MAX_CHARS:
+        return fallback_gamepath_decision(prompt, game_id, guide_requested, "router_input_out_of_range")
+    if not LOCAL_ROUTER_ALWAYS_ROUTE:
+        if GAMEPATH_WEB_INTENT_RE.search(prompt or "") or GAMEPATH_VERSION_COMPARE_RE.search(prompt or ""):
+            return web_preferred_gamepath_decision(prompt, game_id)
+        if backend_hard_skips_gamepath(prompt):
+            return fallback_gamepath_decision(prompt, game_id, False, "backend_hard_skip")
+        if should_use_gamepath(prompt, guide_requested):
+            return fallback_gamepath_decision(prompt, game_id, True, "explicit_guide_intent")
+        if not should_ask_local_router_for_gamepath(prompt, guide_requested):
+            return fallback_gamepath_decision(prompt, game_id, guide_requested, "router_unavailable")
+
+    cache_kind = "user-intent-route" if LOCAL_ROUTER_ALWAYS_ROUTE else "gamepath-route"
+    cache_key = local_router_cache_key(cache_kind, game_id, prompt)
+    cached = local_router_cache_get(cache_key)
+    if cached:
+        return cached
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the Game Companion user-intent router. JSON only, no prose. "
+                "Schema: {\"route\":\"gamepath_query|hermes_web|general_chat|ui_command|task_memory|screenshot_hud|skip|clarify\","
+                "\"q\":\"short search query\",\"t\":[\"item|quest|boss|map|route|puzzle|mechanic|enemy|npc|character|material|location\"],"
+                "\"sp\":\"none|low|medium\",\"c\":\"low|medium|high\",\"ui_action\":\"optional_action\",\"reason\":\"short\"}. "
+                "Use gamepath_query for game guides: item use, quest, location, boss, puzzle, route, enemy/NPC/character names, stuck/next-step help. "
+                "Use hermes_web for web/current/latest/patch/version difference/community/speedrun/meta or when user explicitly asks to search online. "
+                "Use ui_command for app/window/system controls: open/close GamePath/Task/Game Search, opacity, voice mode, content protection, restart, screenshot screen selection, virtual cursor. "
+                "Use task_memory for player objectives, inventory/task records, or remembering what the player has. "
+                "Use screenshot_hud for seeing/circling/marking current screen. "
+                "Use general_chat for normal conversation or technical explanation. Use skip for negated requests like 'do not search guide'. "
+                "If player_message is Chinese, keep q in Chinese. Do not translate Chinese to English. Qwen only routes; backend executes allowlisted actions."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"game_id: {game_id or 'unknown'}\n"
+                f"player_message: {text[:LOCAL_ROUTER_GAMEPATH_MAX_CHARS]}"
+            ),
+        },
+    ]
+    started = time.perf_counter()
+    output = call_local_router_once(messages, max_tokens=80)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    try:
+        parsed = extract_json_object(output)
+    except Exception:
+        lowered = output.strip().lower()
+        parsed = {"route": "gamepath_query" if "gamepath" in lowered or ("true" in lowered and "false" not in lowered) else "general_chat"}
+    route = normalize_local_router_intent_route(parsed.get("route", parsed.get("r")), parsed)
+    should_search = route == "gamepath_query"
+    prefer_hermes_agent = route == "hermes_web"
+    query = str(parsed.get("query") or parsed.get("q") or prompt or "").strip()
+    if not query:
+        query = str(prompt or "").strip()
+    query_variants = [str(prompt or "").strip()]
+    if query and query not in query_variants:
+        query_variants.append(query)
+    if has_cjk_text(prompt) and query and not has_cjk_text(query):
+        query = str(prompt or "").strip()
+    result = {
+        "used": True,
+        "search_gamepath": should_search,
+        "query": query[:LOCAL_ROUTER_GAMEPATH_MAX_CHARS],
+        "query_variants": [item[:LOCAL_ROUTER_GAMEPATH_MAX_CHARS] for item in query_variants if item],
+        "tags": normalize_router_tags(parsed.get("tags", parsed.get("t"))),
+        "spoiler_level": normalize_router_spoiler(parsed.get("spoiler_level", parsed.get("sp"))),
+        "confidence": str(parsed.get("confidence") or parsed.get("c") or ("medium" if should_search else "low")).strip().lower()[:16],
+        "reason": "qwen_user_intent_route" if LOCAL_ROUTER_ALWAYS_ROUTE else "qwen_semantic_route",
+        "intent_route": route,
+        "ui_action": re.sub(r"[^a-z0-9_\-]+", "_", str(parsed.get("ui_action") or "").strip().lower()).strip("_-")[:48],
+        "prefer_hermes_agent": prefer_hermes_agent,
+        "raw_reason": str(parsed.get("reason") or "").strip()[:160],
+        "model": LOCAL_ROUTER_MODEL,
+        "latency_ms": latency_ms,
+        "cache_hit": False,
+    }
+    local_router_cache_set(cache_key, result)
+    return result
+
+
+SCREENSHOT_INTENT_ROUTES = {
+    "screenshot_gamepath_query",
+    "screenshot_hud",
+    "screenshot_visual",
+    "general_chat",
+    "hermes_web",
+}
+
+
+def normalize_screenshot_intent_route(value: Any, parsed: Optional[dict[str, Any]] = None) -> str:
+    route = re.sub(r"[^a-z0-9_\-]+", "_", str(value or "").strip().lower()).strip("_-")
+    aliases = {
+        "gamepath": "screenshot_gamepath_query",
+        "gamepath_query": "screenshot_gamepath_query",
+        "guide": "screenshot_gamepath_query",
+        "guide_query": "screenshot_gamepath_query",
+        "local_guide": "screenshot_gamepath_query",
+        "walkthrough": "screenshot_gamepath_query",
+        "screenshot_guide": "screenshot_gamepath_query",
+        "screenshot_guide_query": "screenshot_gamepath_query",
+        "hud": "screenshot_hud",
+        "hud_overlay": "screenshot_hud",
+        "overlay": "screenshot_hud",
+        "mark": "screenshot_hud",
+        "circle": "screenshot_hud",
+        "visual": "screenshot_visual",
+        "vision": "screenshot_visual",
+        "visual_inspect": "screenshot_visual",
+        "inspect": "screenshot_visual",
+        "describe": "screenshot_visual",
+        "chat": "general_chat",
+        "general": "general_chat",
+        "web": "hermes_web",
+        "web_search": "hermes_web",
+        "hermes": "hermes_web",
+        "hermes_agent": "hermes_web",
+    }
+    route = aliases.get(route, route)
+    if route in SCREENSHOT_INTENT_ROUTES:
+        return route
+    if parsed:
+        if bool(parsed.get("needs_hud") or parsed.get("hud")):
+            return "screenshot_hud"
+        if bool(parsed.get("search_gamepath") or parsed.get("guide")):
+            return "screenshot_gamepath_query"
+        if bool(parsed.get("prefer_hermes_agent") or parsed.get("web")):
+            return "hermes_web"
+    return "screenshot_visual"
+
+
+def fallback_screenshot_intent_decision(
+    prompt: str,
+    game_id: Optional[str],
+    guide_requested: bool,
+    reason: str,
+) -> dict[str, Any]:
+    route = "screenshot_visual"
+    if should_use_overlay(prompt, "image"):
+        route = "screenshot_hud"
+    elif should_use_gamepath(prompt, guide_requested):
+        route = "screenshot_gamepath_query"
+    query = str(prompt or "").strip()
+    return {
+        "used": False,
+        "route_source": "vision",
+        "intent_route": route,
+        "search_gamepath": route == "screenshot_gamepath_query",
+        "query": query,
+        "query_variants": [query] if query else [],
+        "tags": [],
+        "spoiler_level": "low",
+        "confidence": "fallback" if route == "screenshot_gamepath_query" else "low",
+        "reason": reason,
+        "raw_reason": reason,
+        "model": None,
+        "latency_ms": 0.0,
+        "cache_hit": False,
+    }
+
+
+def screenshot_intent_messages(
+    prompt: str,
+    game_id: Optional[str],
+    image_base64: str,
+    ocr_text: str = "",
+) -> list[dict[str, Any]]:
+    user_text = (
+        "Decide how this screenshot request should be handled. JSON only, no Markdown.\n"
+        "Schema: {\"route\":\"screenshot_gamepath_query|screenshot_hud|screenshot_visual|general_chat|hermes_web\","
+        "\"q\":\"short GamePath search query in the player's language\","
+        "\"t\":[\"item|quest|boss|map|route|puzzle|mechanic|enemy|npc|character|material|location\"],"
+        "\"sp\":\"none|low|medium\",\"c\":\"low|medium|high\","
+        "\"scene\":\"visible area or level if recognizable\","
+        "\"objects\":[\"important visible objects/enemies/items\"],"
+        "\"reason\":\"short reason\"}.\n"
+        "Infer intent from both player text and screenshot. Do not depend on fixed keywords.\n"
+        "Use screenshot_gamepath_query when the player wants help deciding what to do, how to pass, solve, fight, use an item, open a door, find a route, understand an objective, or recover from being stuck.\n"
+        "Use screenshot_hud only when the player wants visible marking/circling/pointing on the current screen.\n"
+        "Use screenshot_visual when the player mainly asks what is visible or asks for plain image description.\n"
+        "Use hermes_web when the player explicitly wants online/latest/community/version info.\n"
+        "For q, combine visible scene/object clues with the player's question so SQLite can search local guides. Keep q concise and Traditional Chinese when the player uses Chinese.\n"
+        f"game_id: {game_id or 'unknown'}\n"
+        f"player_message: {status_text(prompt, 260)}"
+    )
+    if ocr_text:
+        user_text += f"\nvisible_text_hint: {status_text(ocr_text, 600)}"
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a screenshot intent router for an in-game companion. "
+                "You inspect the image and the player's message, then choose the route. "
+                "Return exactly one JSON object."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_to_data_url(image_base64)}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+
+def screenshot_intent_decision(
+    prompt: str,
+    game_id: Optional[str],
+    image_base64: str,
+    guide_requested: bool = False,
+    ocr_text: str = "",
+) -> dict[str, Any]:
+    if not image_base64:
+        return fallback_screenshot_intent_decision(prompt, game_id, guide_requested, "no_image")
+    messages = screenshot_intent_messages(prompt, game_id, image_base64, ocr_text)
+    started = time.perf_counter()
+    if CHAT_BACKEND == "hermes" and HERMES_USE_CONFIG_MODEL:
+        output = call_hermes_messages(messages, image_file=LATEST_VISION_INPUT, max_tokens=220)
+        model_name = "hermes_vision"
+    else:
+        output = call_llama_once(messages, max_tokens=220)
+        model_name = MODEL_ALIAS
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    try:
+        parsed = extract_json_object(output)
+    except Exception:
+        parsed = {"route": "screenshot_visual", "reason": "invalid_json"}
+
+    route = normalize_screenshot_intent_route(parsed.get("route", parsed.get("r")), parsed)
+    query = str(parsed.get("query") or parsed.get("q") or "").strip()
+    scene = str(parsed.get("scene") or "").strip()
+    objects_raw = parsed.get("objects") or parsed.get("visible_objects") or []
+    objects: list[str] = []
+    if isinstance(objects_raw, str):
+        objects_raw = re.split(r"[,，、\n]+", objects_raw)
+    if isinstance(objects_raw, list):
+        for item in objects_raw:
+            clean = re.sub(r"\s+", " ", str(item or "").strip())
+            if clean and clean not in objects:
+                objects.append(clean[:60])
+            if len(objects) >= 6:
+                break
+    if not query:
+        query = " ".join([scene, *objects[:4], str(prompt or "").strip()]).strip()
+    if has_cjk_text(prompt) and query and not has_cjk_text(query):
+        query = " ".join([scene, *objects[:3], str(prompt or "").strip()]).strip()
+    query = status_text(query or prompt, LOCAL_ROUTER_GAMEPATH_MAX_CHARS)
+    variants = [str(prompt or "").strip(), query, scene, " ".join(objects[:4])]
+    variants = [status_text(item, LOCAL_ROUTER_GAMEPATH_MAX_CHARS) for item in variants if item]
+    deduped_variants: list[str] = []
+    for item in variants:
+        if item and item not in deduped_variants:
+            deduped_variants.append(item)
+
+    return {
+        "used": True,
+        "route_source": "vision",
+        "search_gamepath": route == "screenshot_gamepath_query",
+        "query": query,
+        "query_variants": deduped_variants,
+        "tags": normalize_router_tags(parsed.get("tags", parsed.get("t"))),
+        "spoiler_level": normalize_router_spoiler(parsed.get("spoiler_level", parsed.get("sp"))),
+        "confidence": str(parsed.get("confidence") or parsed.get("c") or "medium").strip().lower()[:16],
+        "reason": "vision_screenshot_intent_route",
+        "intent_route": route,
+        "prefer_hermes_agent": route == "hermes_web",
+        "needs_hud": route == "screenshot_hud",
+        "scene": status_text(scene, 120),
+        "objects": objects,
+        "raw_reason": str(parsed.get("reason") or "").strip()[:180],
+        "model": model_name,
+        "latency_ms": latency_ms,
+        "cache_hit": False,
+    }
+
+
+def screenshot_gamepath_prompt(prompt: str, decision: Optional[dict[str, Any]]) -> str:
+    if not decision:
+        return prompt
+    parts = [str(prompt or "").strip()]
+    query = str(decision.get("query") or "").strip()
+    if query and query not in parts[0]:
+        parts.append(f"GamePath 搜尋意圖：{query}")
+    return "\n".join(item for item in parts if item)
 
 
 def gamepath_core_terms(text: str, max_terms: int = 14) -> list[str]:
@@ -3046,7 +5017,7 @@ def term_overlap_ratio(terms: list[str], text: str) -> float:
         return 0.0
     haystack = str(text or "").lower()
     matched = sum(1 for term in terms if term.lower() in haystack)
-    return matched / max(1, min(len(terms), 8))
+    return min(1.0, matched / max(1, min(len(terms), 8)))
 
 
 def parse_gamepath_time(value: Any) -> Optional[datetime]:
@@ -3082,7 +5053,7 @@ def score_gamepath_result(query: str, game_id: Optional[str], result: dict[str, 
     result_game_id = normalize_game_id(result.get("game_id"))
     haystack = "\n".join(
         str(result.get(key) or "")
-        for key in ("title", "question", "answer_summary", "tags")
+        for key in ("title", "question", "answer_summary", "relevant_excerpt", "tags")
     )
     core_terms = gamepath_core_terms(query)
     core_overlap = term_overlap_ratio(core_terms, haystack)
@@ -3107,16 +5078,17 @@ def score_gamepath_result(query: str, game_id: Optional[str], result: dict[str, 
 
     answer_score = 0.0
     if answer_len >= 180:
-        answer_score = 0.12
+        answer_score = 0.08
     elif answer_len >= 80:
-        answer_score = 0.09
+        answer_score = 0.07
     elif answer_len >= 40:
-        answer_score = 0.06
+        answer_score = 0.05
     elif answer_len >= 20:
         answer_score = 0.03
 
     spoiler_score = 0.05 if result_spoiler_rank <= spoiler_rank("low") else 0.02
-    source_score = 0.04 if result.get("agent_used") else 0.03
+    source_quality = max(0.0, min(float(result.get("source_quality") or 0.5), 1.0))
+    source_score = (0.03 if result.get("agent_used") else 0.02) + source_quality * 0.16
     recency_score = gamepath_recency_score(result.get("updated_at") or result.get("created_at"))
     trust_state = str(result.get("trust_state") or "unverified").strip().lower()
     dispute_count = int(result.get("dispute_count") or 0)
@@ -3128,8 +5100,21 @@ def score_gamepath_result(query: str, game_id: Optional[str], result: dict[str, 
         "deprecated": -0.4,
     }.get(trust_state, 0.0)
     dispute_penalty = min(0.18, max(0, dispute_count) * 0.06)
-    core_score = 0.28 * core_overlap
+    core_score = 0.24 * core_overlap
     coverage_score = 0.23 * coverage
+    metadata_score = max(-0.12, min(0.16, float(result.get("metadata_match_score") or 0.0) * 0.25))
+    semantic_hint_score = 0.0
+    semantic_hints = gamepath_semantic_hint_text(query)
+    if semantic_hints:
+        semantic_terms = gamepath_core_terms(semantic_hints, max_terms=12)
+        semantic_hint_score = 0.12 * term_overlap_ratio(semantic_terms, haystack)
+    area_overlap_score = 0.0
+    actual_area = str(result.get("area") or "").strip()
+    if actual_area and has_cjk_text(actual_area):
+        compact_query = re.sub(r"\s+", "", query)
+        area_terms = [term for term in search_terms(actual_area, max_terms=12) if has_cjk_text(term)]
+        if any(term and term in compact_query for term in area_terms):
+            area_overlap_score = 0.08
 
     score = min(
         1.0,
@@ -3138,6 +5123,9 @@ def score_gamepath_result(query: str, game_id: Optional[str], result: dict[str, 
             game_score
             + core_score
             + coverage_score
+            + metadata_score
+            + semantic_hint_score
+            + area_overlap_score
             + answer_score
             + spoiler_score
             + source_score
@@ -3150,10 +5138,14 @@ def score_gamepath_result(query: str, game_id: Optional[str], result: dict[str, 
         game_reason,
         f"core_overlap:{core_overlap:.2f}",
         f"coverage:{coverage:.2f}",
+        f"metadata:{metadata_score:.2f}",
+        f"semantic_hint:{semantic_hint_score:.2f}",
+        f"area_overlap:{area_overlap_score:.2f}",
         f"answer_len:{answer_len}",
         f"context_len:{context_len}",
         f"large_entry:{int(large_entry)}",
         f"spoiler:{result.get('spoiler_level') or 'low'}",
+        f"source_quality:{source_quality:.2f}",
         f"trust:{trust_state}",
         f"disputes:{dispute_count}",
     ]
@@ -3196,7 +5188,9 @@ def evaluate_gamepath_retrieval(
     evaluated_results.sort(
         key=lambda item: (
             float(item.get("retrieval_score") or 0.0),
+            float(item.get("core_overlap") or 0.0),
             float(item.get("match_coverage") or 0.0),
+            float(item.get("metadata_match_score") or 0.0),
         ),
         reverse=True,
     )
@@ -3243,6 +5237,107 @@ def evaluate_gamepath_retrieval(
     }
 
 
+def local_router_retrieval_decision(
+    query: str,
+    game_id: Optional[str],
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    if not LOCAL_ROUTER_ENABLED or not LOCAL_ROUTER_RETRIEVAL_EVAL:
+        return {"used": False, "reason": "disabled"}
+    results = list(evaluation.get("results") or [])
+    if not results:
+        return {"used": False, "reason": "no_results"}
+
+    candidate_lines: list[str] = []
+    cache_parts: list[str] = []
+    for index, item in enumerate(results[:3], 1):
+        entry_id = int(item.get("id") or 0)
+        title = str(item.get("title") or "").strip()[:100]
+        question = str(item.get("question") or "").strip()[:120]
+        excerpt = str(item.get("relevant_excerpt") or item.get("snippet") or item.get("answer_summary") or "")
+        excerpt = re.sub(r"\s+", " ", excerpt).strip()[:320]
+        score = item.get("retrieval_score", item.get("score", 0.0))
+        candidate_lines.append(
+            f"{index}. id={entry_id}; score={score}; title={title}; question={question}; excerpt={excerpt}"
+        )
+        cache_parts.append(f"{entry_id}:{item.get('updated_at') or ''}:{score}")
+
+    cache_key = local_router_cache_key(
+        "gamepath-retrieval-eval",
+        game_id,
+        query,
+        "|".join(cache_parts),
+    )
+    cached = local_router_cache_get(cache_key)
+    if cached:
+        return cached
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Judge GamePath candidates. JSON only: "
+                "{\"confidence\":\"direct|summarize|miss\",\"top_id\":number}. "
+                "direct=exact short answer, summarize=relevant needs condensing, miss=not enough/wrong."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"game_id: {game_id or 'unknown'}\n"
+                f"player_query: {query[:LOCAL_ROUTER_GAMEPATH_MAX_CHARS]}\n"
+                "candidates:\n" + "\n".join(candidate_lines)
+            ),
+        },
+    ]
+    started = time.perf_counter()
+    output = call_local_router_once(messages, max_tokens=32)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    parsed = extract_json_object(output)
+    confidence = str(parsed.get("confidence") or "").strip().lower()
+    if confidence not in {"direct", "summarize", "miss"}:
+        confidence = "summarize" if str(parsed.get("route") or "").lower() == "hit" else "miss"
+    try:
+        top_id = int(parsed.get("top_id") or results[0].get("id") or 0)
+    except Exception:
+        top_id = int(results[0].get("id") or 0)
+    result = {
+        "used": True,
+        "confidence": confidence,
+        "top_id": top_id,
+        "reason": str(parsed.get("reason") or "qwen_retrieval_eval").strip()[:120],
+        "model": LOCAL_ROUTER_MODEL,
+        "latency_ms": latency_ms,
+        "cache_hit": False,
+    }
+    local_router_cache_set(cache_key, result)
+    return result
+
+
+def apply_local_router_retrieval_decision(
+    evaluation: dict[str, Any],
+    router_decision: dict[str, Any],
+) -> dict[str, Any]:
+    if not router_decision.get("used"):
+        return evaluation
+    confidence = str(router_decision.get("confidence") or "").strip().lower()
+    if confidence not in {"direct", "summarize", "miss"}:
+        return evaluation
+    updated = dict(evaluation)
+    results = list(updated.get("results") or [])
+    top_id = int(router_decision.get("top_id") or 0)
+    if top_id:
+        results.sort(key=lambda item: 0 if int(item.get("id") or 0) == top_id else 1)
+        updated["top_id"] = top_id
+        if results:
+            updated["top_title"] = results[0].get("title")
+    updated["results"] = results
+    updated["confidence"] = confidence
+    updated["reason"] = f"local_router_retrieval:{router_decision.get('reason') or confidence}"
+    updated["local_router_retrieval"] = router_decision
+    return updated
+
+
 def classify_gamepath_hit(results: list[dict[str, Any]]) -> str:
     if not results:
         return "miss"
@@ -3268,8 +5363,149 @@ def build_gamepath_answer(result: dict[str, Any]) -> str:
     return f"GamePath 已有紀錄：{title}\n{summary}"
 
 
+def strip_model_thinking(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.IGNORECASE | re.DOTALL).strip()
+    return cleaned
+
+
+def build_gamepath_hint_answer(prompt: str, result: dict[str, Any]) -> str:
+    fallback = build_gamepath_answer(result)
+    if not LOCAL_ROUTER_ENABLED:
+        return fallback
+    title = status_text(result.get("title") or result.get("question") or "GamePath", 120)
+    source_text = "\n".join(
+        str(result.get(key) or "").strip()
+        for key in ("relevant_excerpt", "snippet", "answer_summary")
+        if str(result.get(key) or "").strip()
+    )
+    source_text = re.sub(r"\s+", " ", source_text).strip()[:1100]
+    if not source_text:
+        return fallback
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是遊戲攻略提示整理器。只能使用提供的 GamePath 本地資料，不要新增未提供事實，"
+                "不要列來源網址，不要貼原文全文。用繁體中文，輸出給玩家看的簡短 hint ladder。"
+                "弱點、密碼、道具名稱、地點名稱必須沿用資料原詞；不要改寫成資料裡沒有的部位或名詞。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"玩家問題：{status_text(prompt, 180)}\n"
+                f"GamePath 標題：{title}\n"
+                f"GamePath 本地資料：{source_text}\n\n"
+                "請只輸出下面 4 行，不要前言，不要來源：\n"
+                "GamePath 已有紀錄：<短標題>\n"
+                "Hint 1：<最保守、不劇透的一步>\n"
+                "Hint 2：<更明確的路線/站位/操作>\n"
+                "Hint 3：<玩家真的卡住時的具體解法>\n"
+                "注意：如果是戰鬥問題，要給站位、迴避或省資源打法；如果是謎題/密碼，先提示再給明確答案。"
+                "禁止使用資料中沒有出現的弱點部位，例如不要把「屁股」改成「關節、核心、腹部」。"
+            ),
+        },
+    ]
+    try:
+        output = strip_model_thinking(call_local_router_once(messages, max_tokens=180, timeout_seconds=60))
+    except Exception as exc:
+        print(f"GamePath Qwen hint format failed: {exc}")
+        return fallback
+    output = condense_agent_answer(output, prompt).strip()
+    if not output or "Hint" not in output:
+        return fallback
+    return output[:1800]
+
+
+def status_text(value: Any, max_chars: int = 140) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if max_chars > 0 and len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def gamepath_markdown_abs_path(markdown_path: Any) -> str:
+    text = str(markdown_path or "").strip()
+    if not text:
+        return ""
+    path = Path(text)
+    if not path.is_absolute():
+        if path.parts and path.parts[0].lower() == GAMEPATH_DIR.name.lower():
+            path = PROJECT_ROOT / path
+        else:
+            path = GAMEPATH_DIR / path
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path)
+
+
+def gamepath_status_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    markdown_path = str(item.get("markdown_path") or "")
+    return {
+        "id": item.get("id"),
+        "game_id": item.get("game_id"),
+        "title": status_text(item.get("title"), 90),
+        "question": status_text(item.get("question"), 110),
+        "matched_query": status_text(item.get("matched_query"), 90),
+        "markdown_path": markdown_path,
+        "markdown_abs_path": gamepath_markdown_abs_path(markdown_path),
+        "retrieval_score": item.get("retrieval_score"),
+        "match_coverage": item.get("match_coverage"),
+        "metadata_match_score": item.get("metadata_match_score"),
+        "bm25_score": item.get("score"),
+        "trust_state": item.get("trust_state"),
+        "dispute_count": item.get("dispute_count"),
+        "spoiler_level": item.get("spoiler_level"),
+        "source_type": item.get("source_type"),
+        "source_quality": item.get("source_quality"),
+        "agent_used": bool(item.get("agent_used")),
+        "version": item.get("version"),
+        "area": item.get("area"),
+        "entity_type": item.get("entity_type"),
+        "entity_name": item.get("entity_name"),
+        "answer_len": item.get("answer_len"),
+        "context_len": item.get("context_len"),
+        "large_entry": bool(item.get("large_entry")),
+        "rag_lite": bool(item.get("rag_lite")),
+        "rag_chunk_count": item.get("rag_chunk_count"),
+        "rag_chunk_ids": item.get("rag_chunk_ids"),
+        "updated_at": item.get("updated_at"),
+        "retrieval_reasons": list(item.get("retrieval_reasons") or [])[:8],
+    }
+
+
+def gamepath_lookup_status_details(
+    game_id: Optional[str],
+    evaluation: dict[str, Any],
+    *,
+    query_variants: Optional[list[str]] = None,
+    search_elapsed_ms: Optional[float] = None,
+) -> dict[str, Any]:
+    results = list(evaluation.get("results") or [])
+    if search_elapsed_ms is None:
+        search_elapsed_ms = evaluation.get("search_elapsed_ms")
+    return {
+        "game_id": normalize_game_id(game_id) or "global",
+        "gamepath_db_path": str(GAMEPATH_DB.resolve()),
+        "gamepath_notes_path": str(GAMEPATH_NOTES_DIR.resolve()),
+        "rag_backend": "gamepath_rag_lite_sqlite_fts5_chunks",
+        "search_query": evaluation.get("search_query"),
+        "query_variants": list(query_variants or evaluation.get("query_variants") or []),
+        "search_tags": list(evaluation.get("search_tags") or []),
+        "spoiler_level": evaluation.get("spoiler_level"),
+        "search_scope": evaluation.get("search_scope") or {},
+        "search_elapsed_ms": search_elapsed_ms,
+        "candidate_count": len(results),
+        "top_id": evaluation.get("top_id"),
+        "top_title": evaluation.get("top_title"),
+        "candidates": [gamepath_status_candidate(item) for item in results[:5]],
+    }
+
+
 def lookup_route_stage(
     *,
+    game_id: Optional[str],
     hermes_agent_web_enabled: bool,
     gamepath_requested: bool,
     gamepath_raw_hits: int,
@@ -3278,8 +5514,10 @@ def lookup_route_stage(
     guide_results: list[dict[str, Any]],
     memory_results: list[dict[str, Any]],
 ) -> tuple[str, str, dict[str, Any]]:
+    evaluation = gamepath_evaluation or {}
+    router_info = evaluation.get("local_router")
+    gamepath_details = gamepath_lookup_status_details(game_id, evaluation)
     if gamepath_results:
-        evaluation = gamepath_evaluation or {}
         return (
             "gamepath_summarizing",
             "GamePath 找到相關本地紀錄，正在交給模型濃縮成玩家提示。",
@@ -3291,6 +5529,30 @@ def lookup_route_stage(
                 "retrieval_score": evaluation.get("score", 0.0),
                 "retrieval_gap": evaluation.get("gap", 0.0),
                 "retrieval_reason": evaluation.get("reason", ""),
+                "local_router": evaluation.get("local_router"),
+                "local_router_retrieval": evaluation.get("local_router_retrieval"),
+                "search_query": evaluation.get("search_query"),
+                **gamepath_details,
+            },
+        )
+    if gamepath_requested:
+        return (
+            "gamepath_miss",
+            "GamePath 沒有足夠高信心命中，交給 Hermes Agent 判斷是否需要 Tavily。",
+            {
+                "source": "gamepath",
+                "web_search": "possible" if hermes_agent_web_enabled else False,
+                "fast_path": False,
+                "gamepath_hits": gamepath_raw_hits,
+                "guide_hits": len(guide_results),
+                "memory_hits": len(memory_results),
+                "retrieval_score": evaluation.get("score", 0.0),
+                "retrieval_gap": evaluation.get("gap", 0.0),
+                "retrieval_reason": evaluation.get("reason", ""),
+                "local_router": evaluation.get("local_router"),
+                "local_router_retrieval": evaluation.get("local_router_retrieval"),
+                "search_query": evaluation.get("search_query"),
+                **gamepath_details,
             },
         )
     if guide_results:
@@ -3302,6 +5564,7 @@ def lookup_route_stage(
                 "web_search": "possible" if hermes_agent_web_enabled else False,
                 "fast_path": False,
                 "guide_hits": len(guide_results),
+                "local_router": router_info,
             },
         )
     if memory_results:
@@ -3313,32 +5576,25 @@ def lookup_route_stage(
                 "web_search": "possible" if hermes_agent_web_enabled else False,
                 "fast_path": False,
                 "memory_hits": len(memory_results),
-            },
-        )
-    if gamepath_requested:
-        evaluation = gamepath_evaluation or {}
-        return (
-            "gamepath_miss",
-            "GamePath 沒有足夠高信心命中，交給 Hermes Agent 判斷是否需要 Tavily。",
-            {
-                "source": "gamepath",
-                "web_search": "possible" if hermes_agent_web_enabled else False,
-                "fast_path": False,
-                "gamepath_hits": gamepath_raw_hits,
-                "retrieval_score": evaluation.get("score", 0.0),
-                "retrieval_gap": evaluation.get("gap", 0.0),
-                "retrieval_reason": evaluation.get("reason", ""),
+                "local_router": router_info,
             },
         )
     if not guide_results and not memory_results:
+        route = str((router_info or {}).get("intent_route") or "").strip()
+        message = (
+            f"Qwen 判斷意圖：{route}，已跳過 GamePath SQLite 查詢。"
+            if route
+            else "這不是攻略型問題，已跳過 GamePath SQLite 查詢。"
+        )
         return (
             "gamepath_skipped",
-            "這不是攻略型問題，已跳過 GamePath SQLite 查詢。",
+            message,
             {
                 "source": "chat",
                 "web_search": "possible" if hermes_agent_web_enabled else False,
                 "fast_path": True,
                 "gamepath_checked": False,
+                "local_router": router_info,
             },
         )
     if hermes_agent_web_enabled:
@@ -3350,6 +5606,7 @@ def lookup_route_stage(
                 "web_search": "possible",
                 "fast_path": False,
                 "gamepath_hits": 0,
+                "local_router": router_info,
             },
         )
     return (
@@ -3360,6 +5617,7 @@ def lookup_route_stage(
             "web_search": False,
             "fast_path": False,
             "gamepath_hits": 0,
+            "local_router": router_info,
         },
     )
 
@@ -3375,12 +5633,25 @@ def gamepath_store_skip_reason(
     clean_answer = str(answer or "").strip()
     if len(clean_answer) < 40:
         return "answer_too_short"
+    if backend_hard_skips_gamepath(prompt):
+        return "backend_hard_skip"
     if not should_use_gamepath(prompt, bool(GUIDE_INTENT_RE.search(prompt or ""))):
         return "not_guide_intent"
     uncertain_near_start = GAMEPATH_UNCERTAIN_RE.search(clean_answer[:220])
     has_actionable_hint = re.search(r"(Hint|提示|直接答案|建議|下一步|步驟|做法|打法)", clean_answer, re.IGNORECASE)
     if uncertain_near_start and not has_actionable_hint:
         return f"uncertain_answer:{uncertain_near_start.group(0)}"
+    if re.search(
+        r"(需要.*(道具名稱|哪個道具)|告訴我.*(道具名稱|物品描述)|直接回我.*道具名稱|你把.*道具名稱|"
+        r"(道具名稱|物品描述|所在房間).{0,80}(貼|回|告訴|提供))",
+        clean_answer[:780],
+    ):
+        return "needs_specific_item"
+    if re.search(r"(這個道具|哪個道具|不知道.*道具|道具.*做什麼)", str(prompt or "")) and re.search(
+        r"(道具名稱|物品描述|所在房間|貼給我|回我)",
+        clean_answer[:780],
+    ):
+        return "needs_specific_item"
     if re.search(r"https?://", clean_answer):
         clean_answer = re.sub(r"https?://\S+", "", clean_answer)
     if not clean_answer:
@@ -3408,6 +5679,8 @@ def resolve_gamepath_store_game_id(
 def should_use_guides(prompt: str, explicit: Optional[bool]) -> bool:
     if explicit is not None:
         return explicit
+    if GAMEPATH_NEGATED_GUIDE_RE.search(prompt or ""):
+        return False
     return bool(GUIDE_INTENT_RE.search(prompt or ""))
 
 
@@ -3452,6 +5725,8 @@ def detect_implicit_memory_fact(prompt: str) -> Optional[dict[str, str]]:
     match = IMPLICIT_MEMORY_FACT_RE.search(text)
     if not match:
         return None
+    if not USER_FACT_CONTEXT_RE.search(text):
+        return None
     key = match.group("key").strip()
     value = match.group("value").strip(" ：:，,。.!?？；;「」'\"")
     if any(marker in value for marker in ("什麼", "多少", "哪個", "嗎", "?")):
@@ -3471,12 +5746,33 @@ def detect_fact_lookup_key(prompt: str) -> Optional[str]:
     text = re.sub(r"\s+", " ", (prompt or "").strip())
     match = FACT_LOOKUP_RE.search(text)
     if match:
-        return match.group("key").strip()
+        key = match.group("key").strip()
+        if GAME_ENTITY_FACT_CONTEXT_RE.search(text) and not USER_FACT_CONTEXT_RE.search(text):
+            return None
+        if not USER_FACT_CONTEXT_RE.search(text):
+            return None
+        return key
     if any(marker in text for marker in ("剛剛", "前面", "上一句", "我說的")):
         fact = IMPLICIT_MEMORY_FACT_RE.search(text)
         if fact:
             return fact.group("key").strip()
     return None
+
+
+def memory_kinds_for_chat(prompt: str, *, has_image: bool = False) -> list[str]:
+    kinds = ["state", "preference"]
+    text = str(prompt or "")
+    if has_image or MEMORY_TASK_CONTEXT_RE.search(text):
+        kinds.append("task")
+    if MEMORY_NOTE_CONTEXT_RE.search(text):
+        kinds.append("note")
+    if detect_fact_lookup_key(text):
+        kinds.extend(["task", "note"])
+    deduped: list[str] = []
+    for kind in kinds:
+        if kind not in deduped:
+            deduped.append(kind)
+    return deduped
 
 
 def answer_fact_lookup(prompt: str, memory_results: list[dict[str, Any]]) -> Optional[str]:
@@ -4079,10 +6375,22 @@ async def health():
         "hermes_context_length": HERMES_CONTEXT_LENGTH,
         "openai_max_tokens_cap": OPENAI_MAX_TOKENS_CAP or None,
         "local_tools": ENABLE_LOCAL_TOOLS,
-        "rag_backend": "cpu_sqlite_fts5",
+        "local_router_enabled": LOCAL_ROUTER_ENABLED,
+        "local_router_url": LOCAL_ROUTER_URL if LOCAL_ROUTER_ENABLED else None,
+        "local_router_model": LOCAL_ROUTER_MODEL if LOCAL_ROUTER_ENABLED else None,
+        "local_router_role": LOCAL_ROUTER_ROLE if LOCAL_ROUTER_ENABLED else None,
+        "local_router_ready": local_router_ready(),
+        "local_router_timeout_seconds": LOCAL_ROUTER_TIMEOUT_SECONDS if LOCAL_ROUTER_ENABLED else None,
+        "local_router_gamepath_gate": LOCAL_ROUTER_GAMEPATH_GATE if LOCAL_ROUTER_ENABLED else False,
+        "local_router_always_route": LOCAL_ROUTER_ALWAYS_ROUTE if LOCAL_ROUTER_ENABLED else False,
+        "local_router_gamepath_max_chars": LOCAL_ROUTER_GAMEPATH_MAX_CHARS if LOCAL_ROUTER_ENABLED else None,
+        "local_router_retrieval_eval": LOCAL_ROUTER_RETRIEVAL_EVAL if LOCAL_ROUTER_ENABLED else False,
+        "local_router_cache_ttl_seconds": LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS if LOCAL_ROUTER_ENABLED else None,
+        "rag_backend": "gamepath_rag_lite_sqlite_fts5_chunks",
         "gamepath_enabled": True,
         "gamepath_db_exists": GAMEPATH_DB.exists(),
         "gamepath_entry_count": gamepath_entry_count_sync(),
+        "gamepath_chunk_count": gamepath_chunk_count_sync(),
         "gamepath_last_updated_at": gamepath_last_updated_at_sync(),
     }
 
@@ -4184,6 +6492,11 @@ async def gamepath_add(request: GamePathAddRequest):
             spoiler_level=request.spoiler_level,
             source_type=request.source_type,
             agent_used=request.agent_used,
+            version=request.version,
+            area=request.area,
+            entity_type=request.entity_type,
+            entity_name=request.entity_name,
+            source_quality=request.source_quality,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -4199,6 +6512,11 @@ async def gamepath_search(request: GamePathSearchRequest):
         request.limit,
         tags=request.tags,
         spoiler_level=request.spoiler_level,
+        version=request.version,
+        area=request.area,
+        entity_type=request.entity_type,
+        entity_name=request.entity_name,
+        strict_metadata=request.strict_metadata,
     )
     evaluation = await asyncio.to_thread(
         evaluate_gamepath_retrieval,
@@ -4209,6 +6527,14 @@ async def gamepath_search(request: GamePathSearchRequest):
     return {
         "game_id": normalize_game_id(request.game_id),
         "query": request.query,
+        "search_scope": normalize_gamepath_scope(
+            request.query,
+            request.tags,
+            version=request.version,
+            area=request.area,
+            entity_type=request.entity_type,
+            entity_name=request.entity_name,
+        ),
         "evaluation": {key: value for key, value in evaluation.items() if key != "results"},
         "results": evaluation.get("results") or results,
     }
@@ -5121,10 +7447,99 @@ async def screenshot_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/intent/route")
+async def intent_route_endpoint(request: IntentRouteRequest):
+    prompt = request.message or ""
+    game_id = normalize_game_id(request.game_id)
+    guide_was_requested = should_use_guides(prompt, request.use_guides)
+    started = time.perf_counter()
+    try:
+        decision = await asyncio.to_thread(
+            local_router_gamepath_decision,
+            prompt,
+            game_id,
+            guide_was_requested,
+        )
+    except Exception as exc:
+        decision = fallback_gamepath_decision(
+            prompt,
+            game_id,
+            guide_was_requested,
+            f"router_failed:{type(exc).__name__}",
+        )
+        print(f"Local router intent endpoint failed: {exc}")
+    route = str(decision.get("intent_route") or "").strip()
+    if not route:
+        if decision.get("prefer_hermes_agent"):
+            route = "hermes_web"
+        elif decision.get("search_gamepath"):
+            route = "gamepath_query"
+        else:
+            route = "general_chat"
+    return {
+        "status": "ok",
+        "route": route,
+        "decision": decision,
+        "game_id": game_id,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
 @app.post("/chat")
 async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
     prompt = chat_request.message or "請分析這張截圖。"
     game_id = normalize_game_id(chat_request.game_id)
+    guide_was_requested = should_use_guides(prompt, chat_request.use_guides)
+    preflight_router_gamepath_result: Optional[dict[str, Any]] = None
+    screenshot_intent_result: Optional[dict[str, Any]] = None
+    if not chat_request.image_base64:
+        try:
+            preflight_router_gamepath_result = await asyncio.to_thread(
+                local_router_gamepath_decision,
+                prompt,
+                game_id,
+                guide_was_requested,
+            )
+        except Exception as exc:
+            preflight_router_gamepath_result = fallback_gamepath_decision(
+                prompt,
+                game_id,
+                guide_was_requested,
+                f"router_failed:{type(exc).__name__}",
+            )
+            print(f"Local router user intent preflight failed: {exc}")
+    else:
+        if should_use_overlay(prompt, chat_request.image_base64):
+            screenshot_intent_result = fallback_screenshot_intent_decision(
+                prompt,
+                game_id,
+                guide_was_requested,
+                "explicit_hud_overlay",
+            )
+        elif should_use_visual_scene(prompt) and not should_use_gamepath(prompt, guide_was_requested):
+            screenshot_intent_result = fallback_screenshot_intent_decision(
+                prompt,
+                game_id,
+                guide_was_requested,
+                "explicit_visual_scene",
+            )
+        else:
+            try:
+                screenshot_intent_result = await asyncio.to_thread(
+                    screenshot_intent_decision,
+                    prompt,
+                    game_id,
+                    chat_request.image_base64,
+                    guide_was_requested,
+                )
+            except Exception as exc:
+                screenshot_intent_result = fallback_screenshot_intent_decision(
+                    prompt,
+                    game_id,
+                    guide_was_requested,
+                    f"vision_router_failed:{type(exc).__name__}",
+                )
+                print(f"Screenshot intent route failed: {exc}")
 
     memory_add = detect_memory_add(prompt)
     if memory_add and not chat_request.image_base64:
@@ -5197,24 +7612,187 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
             return StreamingResponse(gamepath_dispute_event_generator(), media_type="text/event-stream")
 
-    guide_was_requested = should_use_guides(prompt, chat_request.use_guides)
-    gamepath_was_requested = should_use_gamepath(prompt, guide_was_requested)
+    local_router_gamepath_result: dict[str, Any] = {
+        "used": False,
+        "search_gamepath": False,
+        "query": str(prompt or "").strip(),
+        "tags": [],
+        "spoiler_level": "low",
+        "confidence": "none",
+        "reason": "not_needed",
+    }
+    if preflight_router_gamepath_result is not None:
+        local_router_gamepath_result = preflight_router_gamepath_result
+    elif not chat_request.image_base64:
+        try:
+            local_router_gamepath_result = await asyncio.to_thread(
+                local_router_gamepath_decision,
+                prompt,
+                game_id,
+                guide_was_requested,
+            )
+        except Exception as exc:
+            local_router_gamepath_result = fallback_gamepath_decision(
+                prompt,
+                game_id,
+                guide_was_requested,
+                f"router_failed:{type(exc).__name__}",
+            )
+            print(f"Local router GamePath gate failed: {exc}")
+    else:
+        local_router_gamepath_result = screenshot_intent_result or fallback_screenshot_intent_decision(
+            prompt,
+            game_id,
+            guide_was_requested,
+            "image_route_skipped",
+        )
+    gamepath_was_requested = bool(local_router_gamepath_result.get("search_gamepath"))
+    gamepath_search_query = str(local_router_gamepath_result.get("query") or prompt or "").strip()
+    gamepath_query_variants = list(local_router_gamepath_result.get("query_variants") or [])
+    gamepath_answer_prompt = (
+        screenshot_gamepath_prompt(prompt, screenshot_intent_result)
+        if chat_request.image_base64 and screenshot_intent_result
+        else prompt
+    )
+    adaptive_gamepath_followup = is_gamepath_adaptive_followup(prompt)
+    tactical_gamepath_reframe = is_gamepath_tactical_reframe(prompt)
+    vague_gamepath_followup = is_gamepath_vague_adaptive_followup(prompt)
+    if tactical_gamepath_reframe:
+        gamepath_query_variants = augment_adaptive_gamepath_query_variants(
+            prompt,
+            gamepath_search_query,
+            gamepath_query_variants,
+        )
+    gamepath_search_tags = normalize_router_tags(local_router_gamepath_result.get("tags"))
+    gamepath_spoiler_level = normalize_router_spoiler(local_router_gamepath_result.get("spoiler_level"))
+    if gamepath_was_requested and gamepath_spoiler_level == "none":
+        gamepath_spoiler_level = "low"
+        local_router_gamepath_result["spoiler_search_floor"] = "none->low"
+    if gamepath_was_requested:
+        guide_was_requested = True
+    gamepath_search_elapsed_ms: Optional[float] = None
     memory_results: list[dict[str, Any]] = []
     guide_results: list[dict[str, Any]] = []
     gamepath_results: list[dict[str, Any]] = []
     if chat_request.use_memory:
-        memory_results = await asyncio.to_thread(search_memory_sync, prompt, game_id, None, 8)
+        memory_kinds = memory_kinds_for_chat(prompt, has_image=bool(chat_request.image_base64))
+        memory_results = await asyncio.to_thread(search_memory_sync, prompt, game_id, memory_kinds, 8)
     gamepath_evaluation: dict[str, Any] = {
         "confidence": "skipped",
         "score": 0.0,
         "gap": 0.0,
         "reason": "intent_gate_skipped",
         "results": [],
+        "local_router": local_router_gamepath_result,
+        "search_query": gamepath_search_query,
+        "query_variants": gamepath_query_variants,
+        "search_tags": gamepath_search_tags,
+        "spoiler_level": gamepath_spoiler_level,
+        "game_id": game_id,
     }
     if gamepath_was_requested:
-        gamepath_results = await asyncio.to_thread(search_gamepath_sync, prompt, game_id, 5)
-        gamepath_evaluation = evaluate_gamepath_retrieval(prompt, game_id, gamepath_results)
+        gamepath_search_started = time.perf_counter()
+        recent_ref = recent_gamepath_reference(game_id) if vague_gamepath_followup else None
+        if recent_ref:
+            recent_item = await asyncio.to_thread(get_gamepath_entry_sync, int(recent_ref.get("entry_id") or 0))
+            if recent_item:
+                recent_item.update(build_gamepath_relevant_context(gamepath_search_query or prompt, recent_item))
+                recent_item["matched_query"] = "recent_followup"
+                recent_item["match_coverage"] = max(float(recent_item.get("match_coverage") or 0.0), 0.35)
+                gamepath_results = [recent_item]
+                local_router_gamepath_result["recent_followup_entry_id"] = recent_ref.get("entry_id")
+                local_router_gamepath_result["recent_followup"] = True
+        if not gamepath_results:
+            gamepath_results = await asyncio.to_thread(
+                search_gamepath_multi_query_sync,
+                gamepath_search_query,
+                game_id,
+                5,
+                tags=gamepath_search_tags or None,
+                spoiler_level=gamepath_spoiler_level,
+                query_variants=gamepath_query_variants,
+            )
+        if not gamepath_results and gamepath_search_tags:
+            gamepath_results = await asyncio.to_thread(
+                search_gamepath_multi_query_sync,
+                gamepath_search_query,
+                game_id,
+                5,
+                spoiler_level=gamepath_spoiler_level,
+                query_variants=gamepath_query_variants,
+            )
+            local_router_gamepath_result["tag_filter_fallback"] = True
+        relaxed_spoiler_level = gamepath_explicit_spoiler_fallback_level(
+            prompt,
+            gamepath_search_query,
+            gamepath_spoiler_level,
+        )
+        if not gamepath_results and relaxed_spoiler_level != gamepath_spoiler_level:
+            gamepath_results = await asyncio.to_thread(
+                search_gamepath_multi_query_sync,
+                gamepath_search_query,
+                game_id,
+                5,
+                tags=gamepath_search_tags or None,
+                spoiler_level=relaxed_spoiler_level,
+                query_variants=gamepath_query_variants,
+            )
+            if not gamepath_results and gamepath_search_tags:
+                gamepath_results = await asyncio.to_thread(
+                    search_gamepath_multi_query_sync,
+                    gamepath_search_query,
+                    game_id,
+                    5,
+                    spoiler_level=relaxed_spoiler_level,
+                    query_variants=gamepath_query_variants,
+                )
+            if gamepath_results:
+                local_router_gamepath_result["spoiler_fallback"] = f"{gamepath_spoiler_level}->{relaxed_spoiler_level}"
+                gamepath_spoiler_level = relaxed_spoiler_level
+        gamepath_search_elapsed_ms = round((time.perf_counter() - gamepath_search_started) * 1000, 1)
+        gamepath_evaluation = evaluate_gamepath_retrieval(gamepath_search_query, game_id, gamepath_results)
         gamepath_results = list(gamepath_evaluation.get("results") or gamepath_results)
+        gamepath_evaluation["local_router"] = local_router_gamepath_result
+        gamepath_evaluation["search_query"] = gamepath_search_query
+        gamepath_evaluation["query_variants"] = gamepath_query_variants
+        gamepath_evaluation["search_tags"] = gamepath_search_tags
+        gamepath_evaluation["spoiler_level"] = gamepath_spoiler_level
+        gamepath_evaluation["game_id"] = game_id
+        gamepath_evaluation["search_elapsed_ms"] = gamepath_search_elapsed_ms
+        gamepath_evaluation["search_scope"] = normalize_gamepath_scope(
+            gamepath_search_query,
+            gamepath_search_tags,
+        )
+        if (
+            gamepath_results
+            and LOCAL_ROUTER_RETRIEVAL_EVAL
+            and not chat_request.image_base64
+            and str(gamepath_evaluation.get("confidence") or "") != "direct"
+        ):
+            try:
+                retrieval_decision = await asyncio.to_thread(
+                    local_router_retrieval_decision,
+                    gamepath_search_query,
+                    game_id,
+                    gamepath_evaluation,
+                )
+                gamepath_evaluation = apply_local_router_retrieval_decision(
+                    gamepath_evaluation,
+                    retrieval_decision,
+                )
+                gamepath_results = list(gamepath_evaluation.get("results") or gamepath_results)
+            except Exception as exc:
+                gamepath_evaluation["local_router_retrieval"] = {
+                    "used": True,
+                    "reason": f"retrieval_router_failed:{type(exc).__name__}",
+                }
+                print(f"Local router GamePath retrieval eval failed: {exc}")
+        if tactical_gamepath_reframe and gamepath_results:
+            gamepath_evaluation["confidence"] = "summarize"
+            gamepath_evaluation["reason"] = "tactical_followup_requires_model_reframe"
+            gamepath_evaluation["score"] = max(0.5, float(gamepath_evaluation.get("score") or 0.0))
+            local_router_gamepath_result["adaptive_followup"] = adaptive_gamepath_followup
+            local_router_gamepath_result["tactical_reframe"] = True
     gamepath_route = str(gamepath_evaluation.get("confidence") or "skipped") if gamepath_was_requested else "skipped"
     gamepath_context_results = gamepath_results if gamepath_route in {"direct", "summarize"} else []
     if guide_was_requested:
@@ -5229,14 +7807,13 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(fact_answer_event_generator(), media_type="text/event-stream")
 
-    if gamepath_route == "direct" and not chat_request.image_base64:
+    if gamepath_route == "direct":
         async def gamepath_answer_event_generator():
             top_item = gamepath_results[0]
-            answer = build_gamepath_answer(top_item)
             remember_gamepath_reference(top_item, route="direct")
             yield lookup_status_event(
                 "gamepath_hit",
-                "GamePath 命中，使用本地攻略紀錄。",
+                "GamePath 命中，正在用地端 Qwen 整理成提示。",
                 source="gamepath",
                 web_search=False,
                 fast_path=True,
@@ -5244,6 +7821,27 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 retrieval_score=gamepath_evaluation.get("score", 0.0),
                 retrieval_gap=gamepath_evaluation.get("gap", 0.0),
                 retrieval_reason=gamepath_evaluation.get("reason", ""),
+                local_router=gamepath_evaluation.get("local_router"),
+                local_router_retrieval=gamepath_evaluation.get("local_router_retrieval"),
+                **gamepath_lookup_status_details(game_id, gamepath_evaluation),
+            )
+            hint_started = time.perf_counter()
+            answer = await asyncio.to_thread(build_gamepath_hint_answer, gamepath_answer_prompt, top_item)
+            hint_elapsed_ms = round((time.perf_counter() - hint_started) * 1000, 1)
+            yield lookup_status_event(
+                "gamepath_hit",
+                "GamePath 已用地端 Qwen 整理成提示。",
+                source="gamepath",
+                web_search=False,
+                fast_path=True,
+                hits=len(gamepath_results),
+                retrieval_score=gamepath_evaluation.get("score", 0.0),
+                retrieval_gap=gamepath_evaluation.get("gap", 0.0),
+                retrieval_reason=gamepath_evaluation.get("reason", ""),
+                gamepath_hint_ms=hint_elapsed_ms,
+                local_router=gamepath_evaluation.get("local_router"),
+                local_router_retrieval=gamepath_evaluation.get("local_router_retrieval"),
+                **gamepath_lookup_status_details(game_id, gamepath_evaluation),
             )
             append_history("user", prompt)
             append_history("assistant", answer)
@@ -5269,12 +7867,22 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
     rag_context = format_rag_context(guide_results, memory_results, guide_was_requested, gamepath_context_results)
     if gamepath_route == "summarize" and rag_context:
-        rag_context = (
-            "GamePath route: matching local GamePath entries were found. Summarize these entries first. "
-            "Do not use Tavily unless the local entries are clearly insufficient for the player's question.\n"
-            f"{rag_context}"
-        )
-    augmented_prompt = build_augmented_prompt(prompt, rag_context)
+        if tactical_gamepath_reframe:
+            rag_context = (
+                "GamePath tactical follow-up: the player needs a different playable tactic, not a repeated route summary. "
+                "Reframe the local passage into an easier strategy: safer positioning, "
+                "resource-saving method, when to avoid fighting, and one concrete next action. If the local entries do not "
+                "contain combat details, say so briefly and offer a practical fallback.\n"
+                f"{rag_context}"
+            )
+        else:
+            rag_context = (
+                "GamePath route: matching local GamePath entries were found. Summarize these entries first. "
+                "Do not use Tavily unless the local entries are clearly insufficient for the player's question.\n"
+                f"{rag_context}"
+            )
+    model_prompt = gamepath_answer_prompt if chat_request.image_base64 and gamepath_was_requested else prompt
+    augmented_prompt = build_augmented_prompt(model_prompt, rag_context)
 
     if ENABLE_LOCAL_TOOLS and not chat_request.image_base64 and is_text_file_task(prompt):
         async def tool_event_generator():
@@ -5312,6 +7920,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         async def hermes_event_generator():
             collected = ""
             stage, status_message, status_extra = lookup_route_stage(
+                game_id=game_id,
                 hermes_agent_web_enabled=HERMES_AGENT_WEB_ENABLED,
                 gamepath_requested=gamepath_was_requested,
                 gamepath_raw_hits=len(gamepath_results),
@@ -5339,11 +7948,15 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 if HERMES_AGENT_WEB_ENABLED:
                     collected = condense_agent_answer(collected, prompt)
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)
-                store_skip_reason = gamepath_store_skip_reason(
-                    prompt,
-                    collected,
-                    store_game_id,
-                    HERMES_AGENT_WEB_ENABLED,
+                store_skip_reason = (
+                    "tactical_followup_not_reusable"
+                    if tactical_gamepath_reframe
+                    else gamepath_store_skip_reason(
+                        prompt,
+                        collected,
+                        store_game_id,
+                        HERMES_AGENT_WEB_ENABLED,
+                    )
                 )
                 if not store_skip_reason:
                     try:
@@ -5358,15 +7971,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                             source_type="hermes_agent_web",
                             agent_used=True,
                         )
-                        yield lookup_status_event(
-                            "gamepath_stored",
-                            "已濃縮並存入 GamePath，下次同類問題會走本地快取。",
-                            source="gamepath",
-                            web_search=False,
-                            fast_path=False,
-                            entry_id=stored_item.get("id"),
-                            game_id=store_game_id,
-                        )
+                        yield gamepath_store_lookup_status_event(stored_item, store_game_id)
                     except Exception as exc:
                         print(f"GamePath auto-store failed: {exc}")
                 elif gamepath_was_requested and HERMES_AGENT_WEB_ENABLED:
@@ -5389,7 +7994,10 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(hermes_event_generator(), media_type="text/event-stream")
 
-    if should_use_overlay(prompt, chat_request.image_base64):
+    if should_use_overlay(prompt, chat_request.image_base64) or (
+        bool(chat_request.image_base64)
+        and str((local_router_gamepath_result or {}).get("intent_route") or "") == "screenshot_hud"
+    ):
         async def overlay_event_generator():
             await asyncio.sleep(0)
             async with generate_lock:
@@ -5426,12 +8034,26 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             ocr_text = ""
             if ENABLE_OCR_CONTEXT:
                 ocr_text = await asyncio.to_thread(extract_ocr_text, chat_request.image_base64)
+            if gamepath_was_requested or gamepath_context_results:
+                stage, status_message, status_extra = lookup_route_stage(
+                    game_id=game_id,
+                    hermes_agent_web_enabled=HERMES_AGENT_WEB_ENABLED,
+                    gamepath_requested=gamepath_was_requested,
+                    gamepath_raw_hits=len(gamepath_results),
+                    gamepath_evaluation=gamepath_evaluation,
+                    gamepath_results=gamepath_context_results,
+                    guide_results=guide_results,
+                    memory_results=memory_results,
+                )
+                if gamepath_context_results:
+                    remember_gamepath_reference(gamepath_context_results[0], route="summarize")
+                yield lookup_status_event(stage, status_message, **status_extra)
             if CHAT_BACKEND == "hermes" and HERMES_AGENT_WEB_ENABLED:
                 try:
                     await asyncio.to_thread(image_to_data_url, chat_request.image_base64)
                     active_game_context = await asyncio.to_thread(detect_active_game_sync)
                     agent_prompt = build_hermes_agent_web_prompt(
-                        prompt,
+                        model_prompt,
                         game_id=game_id,
                         rag_context=rag_context,
                         active_game=active_game_context,
@@ -5448,28 +8070,21 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
                 answer = condense_agent_answer(answer, prompt)
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)
-                if should_store_gamepath_answer(prompt, answer, store_game_id, True):
+                store_question = gamepath_answer_prompt if gamepath_was_requested else prompt
+                if should_store_gamepath_answer(store_question, answer, store_game_id, True):
                     try:
                         stored_item = await asyncio.to_thread(
                             add_gamepath_sync,
-                            prompt,
+                            store_question,
                             answer,
                             store_game_id,
-                            title=prompt[:80],
+                            title=(gamepath_search_query or prompt)[:80],
                             tags=["auto", "vision", "hermes", "guide"],
                             spoiler_level="low",
                             source_type="hermes_agent_vision",
                             agent_used=True,
                         )
-                        yield lookup_status_event(
-                            "gamepath_stored",
-                            "已濃縮並存入 GamePath，下次同類問題會走本地快取。",
-                            source="gamepath",
-                            web_search=False,
-                            fast_path=False,
-                            entry_id=stored_item.get("id"),
-                            game_id=store_game_id,
-                        )
+                        yield gamepath_store_lookup_status_event(stored_item, store_game_id)
                     except Exception as exc:
                         print(f"GamePath vision auto-store failed: {exc}")
                 if not answer:

@@ -32,6 +32,7 @@ static CAPTURE_PROTECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 static VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED: AtomicBool = AtomicBool::new(false);
 static VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIRTUAL_CURSOR_STATE: OnceLock<Mutex<VirtualCursorState>> = OnceLock::new();
+static CAPTURE_PROTECTION_BOOT_RESET_UNTIL: OnceLock<Instant> = OnceLock::new();
 const VIRTUAL_CURSOR_STEP: f64 = 16.0;
 const VIRTUAL_CURSOR_GAMEPAD_STEP: f64 = 20.0;
 const VIRTUAL_CURSOR_SCREEN_MARGIN: f64 = 12.0;
@@ -135,6 +136,17 @@ fn apply_capture_protection_to_all_windows(app: &tauri::AppHandle, excluded: boo
             set_window_display_excluded(&window, excluded);
         }
     }
+}
+
+fn clear_capture_protection_on_all_windows(app: &tauri::AppHandle) {
+    CAPTURE_PROTECTION_ENABLED.store(false, Ordering::Relaxed);
+    apply_capture_protection_to_all_windows(app, false);
+}
+
+fn capture_protection_boot_reset_active() -> bool {
+    CAPTURE_PROTECTION_BOOT_RESET_UNTIL
+        .get()
+        .is_some_and(|deadline| Instant::now() < *deadline)
 }
 
 fn set_capture_protection_state(app: &tauri::AppHandle, excluded: bool) -> Result<(), String> {
@@ -1670,6 +1682,9 @@ fn game_search_browser_navigate(app: tauri::AppHandle, url: String) -> Result<()
 
 #[tauri::command]
 fn set_main_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(), String> {
+    if excluded && capture_protection_boot_reset_active() {
+        return set_capture_protection_state(&app, false);
+    }
     set_capture_protection_state(&app, excluded)
 }
 
@@ -2263,6 +2278,13 @@ pub fn run() {
         )
         .setup(|app| {
             dismiss_input_experience_windows();
+            let _ =
+                CAPTURE_PROTECTION_BOOT_RESET_UNTIL.set(Instant::now() + Duration::from_secs(8));
+            clear_capture_protection_on_all_windows(app.handle());
+            if let Some(main) = app.get_webview_window("main") {
+                clear_window_capture_protection(&main);
+                let _ = main.eval("localStorage.setItem('protect-mode', 'off');");
+            }
             start_virtual_cursor_keyboard_poll(app.handle().clone());
             start_virtual_cursor_gamepad_poll(app.handle().clone());
 
@@ -2281,6 +2303,7 @@ pub fn run() {
             }
 
             if let Some(hud) = app.get_webview_window("hud") {
+                clear_window_capture_protection(&hud);
                 let _ = hud.set_ignore_cursor_events(true);
                 let _ = hud.set_skip_taskbar(true);
                 let _ = hud.set_focusable(false);

@@ -1,0 +1,228 @@
+{
+  "cases": [
+    {
+      "case": "local_kitchen_boss",
+      "category": "gamepath_local",
+      "prompt": "廚房那個拿刀的一直追我，怎麼安全處理？",
+      "expected_route": "gamepath",
+      "expected_key": "mist_kitchen_boss"
+    },
+    {
+      "case": "local_silver_key",
+      "category": "gamepath_local",
+      "prompt": "這把銀色鑰匙是不是該留著？我不知道要開哪裡。",
+      "expected_route": "gamepath",
+      "expected_key": "silver_key_item"
+    },
+    {
+      "case": "local_red_light",
+      "category": "gamepath_local",
+      "prompt": "紅色光一直擋路，我要先動哪個東西？",
+      "expected_route": "gamepath",
+      "expected_key": "red_light_mechanic"
+    },
+    {
+      "case": "local_hospital_next",
+      "category": "gamepath_local",
+      "prompt": "我在醫院繞很久，接下來應該去哪？",
+      "expected_route": "gamepath",
+      "expected_key": "hospital_route"
+    },
+    {
+      "case": "local_boiler_valves",
+      "category": "gamepath_local",
+      "prompt": "鍋爐那三個轉盤我轉到快瘋了，順序是什麼？",
+      "expected_route": "gamepath",
+      "expected_key": "boiler_valve_puzzle"
+    },
+    {
+      "case": "local_map_fragment",
+      "category": "gamepath_local",
+      "prompt": "碼頭附近那張地圖碎片藏在哪個角落？",
+      "expected_route": "gamepath",
+      "expected_key": "mirror_lake_map"
+    },
+    {
+      "case": "local_clock_boss",
+      "category": "gamepath_local",
+      "prompt": "鐘塔那個守門的到底要打哪裡才有效？",
+      "expected_route": "gamepath",
+      "expected_key": "clocktower_boss"
+    },
+    {
+      "case": "local_moonsilver",
+      "category": "gamepath_local",
+      "prompt": "月銀枝這個素材先別賣嗎？它能做什麼？",
+      "expected_route": "gamepath",
+      "expected_key": "blackwood_material"
+    },
+    {
+      "case": "local_white_npc",
+      "category": "gamepath_local",
+      "prompt": "資料室那個白衣NPC我該選哪一句？",
+      "expected_route": "gamepath",
+      "expected_key": "archive_npc"
+    },
+    {
+      "case": "local_singing_zombie",
+      "category": "gamepath_local",
+      "prompt": "走廊唱歌的女殭屍要硬打嗎？",
+      "expected_route": "gamepath",
+      "expected_key": "east_hall_enemy"
+    },
+    {
+      "case": "local_chapel_quest",
+      "category": "gamepath_local",
+      "prompt": "禮拜堂支線現在只剩鐘聲，下一步是什麼？",
+      "expected_route": "gamepath",
+      "expected_key": "chapel_quest"
+    },
+    {
+      "case": "local_hidden_door",
+      "category": "gamepath_local",
+      "prompt": "西翼大廳好像有暗門，我要看哪裡？",
+      "expected_route": "gamepath",
+      "expected_key": "west_hall_location"
+    },
+    {
+      "case": "local_black_hat",
+      "category": "gamepath_local",
+      "prompt": "酒窖黑帽那個人是誰？可以不要暴雷講嗎？",
+      "expected_route": "gamepath",
+      "expected_key": "cellar_character"
+    },
+    {
+      "case": "local_kitchen_door",
+      "category": "gamepath_local",
+      "prompt": "廚房那扇怪門不是怪物吧？我要怎麼開？",
+      "expected_route": "gamepath",
+      "expected_key": "kitchen_route"
+    },
+    {
+      "case": "local_courtyard_rain",
+      "category": "gamepath_local",
+      "prompt": "中庭下雨那個機關觸發不了，順序是什麼？",
+      "expected_route": "gamepath",
+      "expected_key": "courtyard_mechanic"
+    },
+    {
+      "case": "local_fuse",
+      "category": "gamepath_local",
+      "prompt": "保險絲拿到了，但它不是發電機用的嗎？",
+      "expected_route": "gamepath",
+      "expected_key": "hospital_item"
+    },
+    {
+      "case": "local_iron_arm",
+      "category": "gamepath_local",
+      "prompt": "鍋爐房鐵手臂那隻，我打不動它。",
+      "expected_route": "gamepath",
+      "expected_key": "boiler_boss"
+    },
+    {
+      "case": "local_dock_elder",
+      "category": "gamepath_local",
+      "prompt": "碼頭老人問我鐘聲，我該怎麼回比較安全？",
+      "expected_route": "gamepath",
+      "expected_key": "dock_npc"
+    },
+    {
+      "case": "local_four_bells",
+      "category": "gamepath_local",
+      "prompt": "四次鐘聲的順序我記不起來，怎麼敲？",
+      "expected_route": "gamepath",
+      "expected_key": "clocktower_puzzle"
+    },
+    {
+      "case": "local_black_forest",
+      "category": "gamepath_local",
+      "prompt": "黑森林入口一直繞回原點，怎麼看路標？",
+      "expected_route": "gamepath",
+      "expected_key": "forest_route"
+    },
+    {
+      "case": "agent_new_boss",
+      "category": "hermes_agent",
+      "prompt": "幫我查一下新版本 2.4 的雨夜祭司 boss 有沒有改弱點。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_unseen_item",
+      "category": "hermes_agent",
+      "prompt": "我拿到星霜羅盤，攻略庫沒有的話請去網路查它能做什麼。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_patch_route",
+      "category": "hermes_agent",
+      "prompt": "現在最新 patch 黑森林捷徑是不是被改掉了？幫我找攻略。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_external_build",
+      "category": "hermes_agent",
+      "prompt": "上網查一下這款遊戲目前最穩的新手配裝，不要劇透。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_unknown_map",
+      "category": "hermes_agent",
+      "prompt": "星環塔第七層地圖碎片在哪？本地沒有就交給 Hermes 查。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_version_difference",
+      "category": "hermes_agent",
+      "prompt": "1.9 跟 2.0 的銀鑰匙用途差異幫我查一下。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_speedrun",
+      "category": "hermes_agent",
+      "prompt": "幫我找不暴雷的鐘塔 speedrun 安全路線。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "agent_community_name",
+      "category": "hermes_agent",
+      "prompt": "社群都怎麼稱呼會唱歌的女殭屍？去網路查但不要爆劇情。",
+      "expected_route": "hermes_agent"
+    },
+    {
+      "case": "skip_opacity",
+      "category": "general_skip",
+      "prompt": "把視窗透明度調到 70%。",
+      "expected_route": "skip"
+    },
+    {
+      "case": "skip_restart",
+      "category": "general_skip",
+      "prompt": "幫我重啟程式。",
+      "expected_route": "skip"
+    },
+    {
+      "case": "skip_gamepath_ui",
+      "category": "general_skip",
+      "prompt": "打開 GamePath 視窗讓我看資料庫。",
+      "expected_route": "skip"
+    },
+    {
+      "case": "skip_voice",
+      "category": "general_skip",
+      "prompt": "語音模式關掉，剛剛一直誤觸。",
+      "expected_route": "skip"
+    },
+    {
+      "case": "skip_thanks",
+      "category": "general_skip",
+      "prompt": "謝啦，先不用查攻略。",
+      "expected_route": "skip"
+    },
+    {
+      "case": "skip_architecture",
+      "category": "general_skip",
+      "prompt": "現在整體架構跟 Hermes 的關係再說明一次。",
+      "expected_route": "skip"
+    }
+  ]
+}
