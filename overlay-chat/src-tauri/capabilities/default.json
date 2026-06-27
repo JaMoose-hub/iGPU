@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "hud", "tasks", "search"],
+  "windows": ["main", "hud", "tasks", "search", "gamepath", "tools", "standby"],
   "permissions": [
     "core:default",
     "opener:default",

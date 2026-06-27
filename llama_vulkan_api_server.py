@@ -77,7 +77,7 @@ LOCAL_ROUTER_ENABLED = os.environ.get("IGPU_LOCAL_ROUTER_ENABLED", "0").strip().
     "on",
 }
 LOCAL_ROUTER_URL = os.environ.get("IGPU_LOCAL_ROUTER_URL", "http://127.0.0.1:18081").strip()
-LOCAL_ROUTER_MODEL = os.environ.get("IGPU_LOCAL_ROUTER_MODEL", "qwen3.5-4b-q4_k_m").strip()
+LOCAL_ROUTER_MODEL = os.environ.get("IGPU_LOCAL_ROUTER_MODEL", "qwen3.5-2b-q4_k_m").strip()
 LOCAL_ROUTER_ROLE = os.environ.get("IGPU_LOCAL_ROUTER_ROLE", "user_intent_router").strip()
 LOCAL_ROUTER_TIMEOUT_SECONDS = int(os.environ.get("IGPU_LOCAL_ROUTER_TIMEOUT", "20"))
 LOCAL_ROUTER_GAMEPATH_GATE = os.environ.get("IGPU_LOCAL_ROUTER_GAMEPATH_GATE", "0").strip().lower() in {
@@ -100,6 +100,7 @@ LOCAL_ROUTER_ALWAYS_ROUTE = os.environ.get("IGPU_LOCAL_ROUTER_ALWAYS_ROUTE", "1"
     "on",
 }
 LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS = int(os.environ.get("IGPU_LOCAL_ROUTER_CACHE_TTL", "600"))
+LOCAL_ROUTER_INTENT_CACHE_VERSION = "intent-route-v3-screen-guard"
 
 ASSET_ROOT = Path(
     os.environ.get(
@@ -182,6 +183,9 @@ GAMEPATH_NOTES_DIR = GAMEPATH_DIR / "notes"
 GAME_PROFILES_FILE = PROJECT_ROOT / "game_profiles.json"
 MEMORY_CACHE_DIR = PROJECT_ROOT / "memory_cache"
 MEMORY_DB = MEMORY_CACHE_DIR / "memory.sqlite"
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
+LIVE_STATE_DIR = Path(os.environ.get("IGPU_LIVE_STATE_DIR", str(RUNTIME_DIR / "state")))
+LIVE_STATE_FILE = LIVE_STATE_DIR / "current_game_state.json"
 
 llama_process: Optional[subprocess.Popen] = None
 history: list[dict[str, Any]] = []
@@ -189,6 +193,21 @@ last_gamepath_reference: dict[str, Any] = {}
 local_router_decision_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 last_active_game_window: Optional[dict[str, Any]] = None
 last_active_game_detection: Optional[dict[str, Any]] = None
+live_state_enabled = os.environ.get("IGPU_LIVE_STATE_ENABLED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+live_state_task: Optional[asyncio.Task] = None
+live_state_memory: dict[str, Any] = {}
+live_state_last_signature: Optional[list[float]] = None
+live_state_last_analyze_at = 0.0
+live_state_last_capture_at = 0.0
+live_state_busy = False
+live_state_monitor: Optional[int] = None
+live_state_mode = "foreground"
+live_state_error_count = 0
 generate_lock = asyncio.Lock()
 ocr_engine: Any = None
 stt_model: Any = None
@@ -226,6 +245,18 @@ class ChatRequest(BaseModel):
     game_id: Optional[str] = None
     use_guides: Optional[bool] = None
     use_memory: bool = True
+    use_live_state: bool = True
+
+
+class LiveStateStartRequest(BaseModel):
+    monitor: Optional[int] = None
+    mode: str = "foreground"
+
+
+class LiveStateAnalyzeRequest(BaseModel):
+    force: bool = True
+    monitor: Optional[int] = None
+    mode: str = "foreground"
 
 
 class IntentRouteRequest(BaseModel):
@@ -406,8 +437,9 @@ def get_hermes_agent_web_system_prompt() -> str:
         "game mechanics, or when the player explicitly asks to check the web. If local context is enough, "
         "answer directly without web search. Default to no-spoiler guidance: avoid story twists, later "
         "area names, character fate, endings, and surprise encounters unless the player explicitly asks "
-        "for the full solution. Prefer a hint ladder: Hint 1, Hint 2, Hint 3. If the player asks for the "
-        "answer directly, give a clear solution but still avoid unnecessary story spoilers. When you do "
+        "for the full solution. Prefer one direct teaching hint first, then add details only when useful. "
+        "Do not label answers with tiered hint markers. If the player asks for the answer directly, "
+        "give a clear solution but still avoid unnecessary story spoilers. When you do "
         "search, use retrieved pages only as private background material. Condense them into useful player "
         "guidance. Do not include a sources/references/links section, source titles, or URLs unless the "
         "player explicitly asks for sources or links. Mention uncertainty or version mismatch only when it "
@@ -677,6 +709,121 @@ def chunk_text(text: str, size: int = 80):
 
 def sse_data(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def clean_response_inline_text(text: str) -> str:
+    cleaned = re.sub(r"```[\s\S]*?```", " ", str(text or ""))
+    cleaned = re.sub(r"[`*_>#]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def truncate_response_short(text: str, limit: int = 118) -> str:
+    cleaned = clean_response_inline_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: max(0, limit - 3)].rstrip()}..."
+
+
+def parse_response_format_object(answer: str) -> Optional[dict[str, str]]:
+    raw = str(answer or "").strip()
+    if not raw:
+        return None
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    short = str(parsed.get("short") or parsed.get("Short") or "").strip()
+    long = str(parsed.get("long") or parsed.get("Long") or parsed.get("content") or "").strip()
+    if not short and not long:
+        return None
+    return {"short": short, "long": long}
+
+
+def parse_response_format_labels(answer: str) -> Optional[dict[str, str]]:
+    raw = str(answer or "").strip()
+    if not raw:
+        return None
+    short_re = r"(?:短回覆|短答|短教學|摘要|short)"
+    long_re = r"(?:詳細回覆|長回覆|完整回覆|long)"
+    short_match = re.search(
+        rf"(?:^|\n)\s*{short_re}\s*[:：]\s*([\s\S]*?)(?=\n\s*{long_re}\s*[:：]|\Z)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    long_match = re.search(
+        rf"(?:^|\n)\s*{long_re}\s*[:：]\s*([\s\S]*?)(?=\n\s*{short_re}\s*[:：]|\Z)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    short = (short_match.group(1).strip() if short_match else "")
+    long = (long_match.group(1).strip() if long_match else "")
+    if not short and not long:
+        return None
+    return {"short": short, "long": long}
+
+
+def extract_hint_line(answer: str, number: int = 3) -> str:
+    lines = str(answer or "").splitlines()
+    capture: list[str] = []
+    in_target = False
+    hint_re = re.compile(r"^\s*(?:[-*]\s*)?Hint\s*([123])\s*[:：]\s*(.*)$", re.IGNORECASE)
+    for line in lines:
+        match = hint_re.match(line)
+        if match:
+            if in_target:
+                break
+            in_target = int(match.group(1)) == number
+            if in_target and match.group(2).strip():
+                capture.append(match.group(2).strip())
+            continue
+        if in_target:
+            stripped = line.strip()
+            if not stripped:
+                break
+            capture.append(stripped)
+    return truncate_response_short(" ".join(capture), 118) if capture else ""
+
+
+def derive_response_short(answer: str) -> str:
+    # Compatibility only: older cached answers may still contain tiered hint markers.
+    hint3 = extract_hint_line(answer, 3)
+    if hint3:
+        return hint3
+    for line in str(answer or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^(GamePath\s*已[有存]|來源|資料來源|參考|References?|Sources?)", stripped, re.IGNORECASE):
+            continue
+        stripped = re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", stripped)
+        stripped = re.sub(r"^\s*(?:短回覆|短答|短教學|摘要|Hint\s*[123])\s*[:：]\s*", "", stripped, flags=re.IGNORECASE)
+        if stripped:
+            return truncate_response_short(stripped, 118)
+    compact = clean_response_inline_text(answer)
+    parts = re.split(r"(?<=[。！？!?])\s+", compact, maxsplit=1)
+    return truncate_response_short(parts[0] if parts else compact, 118)
+
+
+def build_response_format(answer: str) -> dict[str, str]:
+    parsed = parse_response_format_object(answer) or parse_response_format_labels(answer)
+    long_text = (parsed or {}).get("long") or str(answer or "").strip()
+    short_text = (parsed or {}).get("short") or derive_response_short(long_text)
+    return {
+        "short": short_text.strip(),
+        "long": long_text.strip(),
+    }
+
+
+def response_format_event(answer: str) -> str:
+    return sse_data({"response_format": build_response_format(answer)})
 
 
 def lookup_status_event(stage: str, message: str, **extra: Any) -> str:
@@ -1269,10 +1416,35 @@ def extract_json_object(text: str) -> dict[str, Any]:
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
 
+    decoder = json.JSONDecoder()
+    last_error: Optional[Exception] = None
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as exc:
+        last_error = exc
+
+    for match in re.finditer(r"\{", stripped):
+        try:
+            parsed, _ = decoder.raw_decode(stripped[match.start() :])
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as exc:
+            last_error = exc
+
     start = stripped.find("{")
     end = stripped.rfind("}")
     if start >= 0 and end > start:
-        stripped = stripped[start : end + 1]
+        candidate = stripped[start : end + 1]
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
     return json.loads(stripped)
 
 
@@ -1286,6 +1458,7 @@ def call_local_router_once(
     messages: list[dict[str, Any]],
     max_tokens: int = 96,
     timeout_seconds: Optional[int] = None,
+    temperature: float = 0.1,
 ) -> str:
     if not LOCAL_ROUTER_ENABLED:
         raise RuntimeError("Local router is disabled.")
@@ -1294,7 +1467,7 @@ def call_local_router_once(
         "messages": messages,
         "stream": False,
         "max_tokens": max_tokens,
-        "temperature": 0.1,
+        "temperature": temperature,
         "top_p": 0.8,
         "top_k": 20,
         "cache_prompt": True,
@@ -4653,6 +4826,8 @@ LOCAL_ROUTER_INTENT_ROUTES = {
     "general_chat",
     "ui_command",
     "task_memory",
+    "screenshot_gamepath_query",
+    "screenshot_visual",
     "screenshot_hud",
     "skip",
     "clarify",
@@ -4678,8 +4853,19 @@ def normalize_local_router_intent_route(value: Any, parsed: Optional[dict[str, A
         "app_command": "ui_command",
         "memory": "task_memory",
         "task": "task_memory",
-        "screenshot": "screenshot_hud",
+        "screenshot": "screenshot_visual",
+        "screen": "screenshot_visual",
+        "vision": "screenshot_visual",
+        "visual": "screenshot_visual",
+        "inspect": "screenshot_visual",
+        "describe": "screenshot_visual",
+        "screenshot_guide": "screenshot_gamepath_query",
+        "screenshot_gamepath": "screenshot_gamepath_query",
+        "screenshot_gamepath_query": "screenshot_gamepath_query",
         "hud": "screenshot_hud",
+        "mark": "screenshot_hud",
+        "circle": "screenshot_hud",
+        "overlay": "screenshot_hud",
         "none": "skip",
     }
     route = aliases.get(route, route)
@@ -4717,7 +4903,11 @@ def local_router_gamepath_decision(
         if not should_ask_local_router_for_gamepath(prompt, guide_requested):
             return fallback_gamepath_decision(prompt, game_id, guide_requested, "router_unavailable")
 
-    cache_kind = "user-intent-route" if LOCAL_ROUTER_ALWAYS_ROUTE else "gamepath-route"
+    cache_kind = (
+        f"user-intent-route:{LOCAL_ROUTER_INTENT_CACHE_VERSION}"
+        if LOCAL_ROUTER_ALWAYS_ROUTE
+        else f"gamepath-route:{LOCAL_ROUTER_INTENT_CACHE_VERSION}"
+    )
     cache_key = local_router_cache_key(cache_kind, game_id, prompt)
     cached = local_router_cache_get(cache_key)
     if cached:
@@ -4728,14 +4918,17 @@ def local_router_gamepath_decision(
             "role": "system",
             "content": (
                 "You are the Game Companion user-intent router. JSON only, no prose. "
-                "Schema: {\"route\":\"gamepath_query|hermes_web|general_chat|ui_command|task_memory|screenshot_hud|skip|clarify\","
+                "Schema: {\"route\":\"gamepath_query|hermes_web|general_chat|ui_command|task_memory|screenshot_gamepath_query|screenshot_visual|screenshot_hud|skip|clarify\","
                 "\"q\":\"short search query\",\"t\":[\"item|quest|boss|map|route|puzzle|mechanic|enemy|npc|character|material|location\"],"
                 "\"sp\":\"none|low|medium\",\"c\":\"low|medium|high\",\"ui_action\":\"optional_action\",\"reason\":\"short\"}. "
                 "Use gamepath_query for game guides: item use, quest, location, boss, puzzle, route, enemy/NPC/character names, stuck/next-step help. "
                 "Use hermes_web for web/current/latest/patch/version difference/community/speedrun/meta or when user explicitly asks to search online. "
                 "Use ui_command for app/window/system controls: open/close GamePath/Task/Game Search, opacity, voice mode, content protection, restart, screenshot screen selection, virtual cursor. "
                 "Use task_memory for player objectives, inventory/task records, or remembering what the player has. "
-                "Use screenshot_hud for seeing/circling/marking current screen. "
+                "Use screenshot_visual when the player asks to look at, describe, inspect, or understand the current screen/image without asking for visible marks. "
+                "Use screenshot_gamepath_query when the player asks what to do next, how to pass, where to go, how to fight/solve/use something based on the current screen. "
+                "If the player asks to look at the current screen/scene and decide the next action, choose screenshot_gamepath_query, not gamepath_query. "
+                "Use screenshot_hud only when the player asks for visible marking/circling/pointing/arrow/HUD on the current screen. "
                 "Use general_chat for normal conversation or technical explanation. Use skip for negated requests like 'do not search guide'. "
                 "If player_message is Chinese, keep q in Chinese. Do not translate Chinese to English. Qwen only routes; backend executes allowlisted actions."
             ),
@@ -4749,7 +4942,7 @@ def local_router_gamepath_decision(
         },
     ]
     started = time.perf_counter()
-    output = call_local_router_once(messages, max_tokens=80)
+    output = call_local_router_once(messages, max_tokens=48)
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
     try:
         parsed = extract_json_object(output)
@@ -4757,6 +4950,10 @@ def local_router_gamepath_decision(
         lowered = output.strip().lower()
         parsed = {"route": "gamepath_query" if "gamepath" in lowered or ("true" in lowered and "false" not in lowered) else "general_chat"}
     route = normalize_local_router_intent_route(parsed.get("route", parsed.get("r")), parsed)
+    if route == "gamepath_query" and live_state_prompt_needs_screen(prompt):
+        route = "screenshot_gamepath_query"
+        parsed["route"] = route
+        parsed["reason"] = parsed.get("reason") or "current_screen_help_guard"
     should_search = route == "gamepath_query"
     prefer_hermes_agent = route == "hermes_web"
     query = str(parsed.get("query") or parsed.get("q") or prompt or "").strip()
@@ -5291,7 +5488,7 @@ def local_router_retrieval_decision(
         },
     ]
     started = time.perf_counter()
-    output = call_local_router_once(messages, max_tokens=32)
+    output = call_local_router_once(messages, max_tokens=128)
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
     parsed = extract_json_object(output)
     confidence = str(parsed.get("confidence") or "").strip().lower()
@@ -5386,7 +5583,7 @@ def build_gamepath_hint_answer(prompt: str, result: dict[str, Any]) -> str:
             "role": "system",
             "content": (
                 "你是遊戲攻略提示整理器。只能使用提供的 GamePath 本地資料，不要新增未提供事實，"
-                "不要列來源網址，不要貼原文全文。用繁體中文，輸出給玩家看的簡短 hint ladder。"
+                "不要列來源網址，不要貼原文全文。用繁體中文，輸出給玩家看的短回覆與詳細回覆。"
                 "弱點、密碼、道具名稱、地點名稱必須沿用資料原詞；不要改寫成資料裡沒有的部位或名詞。"
             ),
         },
@@ -5396,23 +5593,21 @@ def build_gamepath_hint_answer(prompt: str, result: dict[str, Any]) -> str:
                 f"玩家問題：{status_text(prompt, 180)}\n"
                 f"GamePath 標題：{title}\n"
                 f"GamePath 本地資料：{source_text}\n\n"
-                "請只輸出下面 4 行，不要前言，不要來源：\n"
-                "GamePath 已有紀錄：<短標題>\n"
-                "Hint 1：<最保守、不劇透的一步>\n"
-                "Hint 2：<更明確的路線/站位/操作>\n"
-                "Hint 3：<玩家真的卡住時的具體解法>\n"
+                "請只輸出下面 2 段，不要前言，不要來源，不要使用分級提示標籤：\n"
+                "短回覆：<一句最可執行的教學提示，像玩家真的卡住時需要的下一步>\n"
+                "詳細回覆：<較完整但仍精簡的教學，包含原因、路線/站位/操作，2 到 4 句>\n"
                 "注意：如果是戰鬥問題，要給站位、迴避或省資源打法；如果是謎題/密碼，先提示再給明確答案。"
                 "禁止使用資料中沒有出現的弱點部位，例如不要把「屁股」改成「關節、核心、腹部」。"
             ),
         },
     ]
     try:
-        output = strip_model_thinking(call_local_router_once(messages, max_tokens=180, timeout_seconds=60))
+        output = strip_model_thinking(call_local_router_once(messages, max_tokens=256, timeout_seconds=60))
     except Exception as exc:
         print(f"GamePath Qwen hint format failed: {exc}")
         return fallback
     output = condense_agent_answer(output, prompt).strip()
-    if not output or "Hint" not in output:
+    if not output:
         return fallback
     return output[:1800]
 
@@ -6327,10 +6522,17 @@ async def startup_event():
         await asyncio.to_thread(start_llama_server)
     else:
         print("llama auto-start disabled; backend will use configured non-llama chat route.")
+    if live_state_enabled:
+        ensure_live_state_task()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    global live_state_enabled, live_state_task
+    live_state_enabled = False
+    if live_state_task and not live_state_task.done():
+        live_state_task.cancel()
+    live_state_task = None
     stop_llama_server()
 
 
@@ -6392,6 +6594,10 @@ async def health():
         "gamepath_entry_count": gamepath_entry_count_sync(),
         "gamepath_chunk_count": gamepath_chunk_count_sync(),
         "gamepath_last_updated_at": gamepath_last_updated_at_sync(),
+        "live_state_enabled": bool(live_state_enabled),
+        "live_state_running": bool(live_state_task and not live_state_task.done()),
+        "live_state_last_updated_at": live_state_memory.get("updated_at") or "",
+        "live_state_model": live_state_model_name(),
     }
 
 
@@ -6908,6 +7114,15 @@ def hide_ignored_windows_for_capture(enabled: bool) -> list[dict[str, Any]]:
         return []
 
 
+def capture_hide_fallback_enabled() -> bool:
+    return os.environ.get("IGPU_CAPTURE_HIDE_FALLBACK", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def restore_hidden_windows_after_capture(hidden_windows: list[dict[str, Any]]) -> None:
     if not hidden_windows or os.name != "nt":
         return
@@ -7317,6 +7532,12 @@ def screenshot_profile_settings(profile: str) -> tuple[int, int, str]:
         return 1280, 76, "JPEG"
     if profile_name == "turbo":
         return 768, 60, "JPEG"
+    if profile_name == "state":
+        return (
+            bounded_int_env("IGPU_LIVE_STATE_MAX_LONG_EDGE", 640, 320, 1280),
+            bounded_int_env("IGPU_LIVE_STATE_JPEG_QUALITY", 55, 35, 80),
+            "JPEG",
+        )
     return (
         bounded_int_env("IGPU_SCREENSHOT_LONG_EDGE", 960, 512, 2560),
         bounded_int_env("IGPU_SCREENSHOT_QUALITY", 65, 35, 95),
@@ -7357,6 +7578,98 @@ def make_screenshot_response(img: Image.Image, source: dict[str, Any], profile: 
     }
 
 
+def capture_screenshot_sync(
+    mode: str = "foreground",
+    redact: Optional[bool] = None,
+    profile: str = "fast",
+    monitor: Optional[int] = None,
+) -> dict[str, Any]:
+    mode_name = (mode or "foreground").lower()
+    window = None
+    if mode_name in {"foreground", "window"}:
+        window = get_foreground_window_info()
+        if not window:
+            window = get_foreground_window_info()
+
+    protection_enabled = (
+        redact
+        if redact is not None
+        else os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    hide_fallback = bool(protection_enabled) and capture_hide_fallback_enabled()
+    hidden_hwnds = hide_ignored_windows_for_capture(hide_fallback)
+    capture_protection_mode = (
+        "hide_restore"
+        if hidden_hwnds
+        else "display_affinity"
+        if protection_enabled
+        else "off"
+    )
+    try:
+        if mode_name == "window":
+            if window:
+                captured = capture_window_image(window)
+                if captured is not None:
+                    img, capture_method = captured
+                    source = make_capture_source(
+                        mode="window",
+                        capture_method=capture_method,
+                        img=img,
+                        capture_left=int(window["left"]),
+                        capture_top=int(window["top"]),
+                        window=window,
+                    )
+                    source["ignored_overlay_windows"] = len(hidden_hwnds)
+                    source["redacted_overlay_windows"] = 0
+                    source["capture_protection"] = capture_protection_mode
+                    return make_screenshot_response(img, source, profile)
+                print("Direct window capture failed; falling back to screen crop.")
+            else:
+                print("No target window found; falling back to monitor capture.")
+
+        with mss.mss() as sct:
+            selected_monitor, monitor_index = select_capture_monitor(sct.monitors, window, monitor)
+            sct_img = sct.grab(selected_monitor)
+            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+            capture_bounds = get_capture_bounds(selected_monitor)
+            source: dict[str, Any] = make_capture_source(
+                mode="screen",
+                capture_method="mss_monitor",
+                img=img,
+                capture_left=int(capture_bounds[0]),
+                capture_top=int(capture_bounds[1]),
+                monitor={**selected_monitor, "index": monitor_index},
+            )
+
+            if mode_name in {"foreground", "window"}:
+                if window:
+                    cropped = crop_to_foreground_window(img, selected_monitor, window)
+                    if cropped:
+                        img = cropped
+                        capture_bounds = get_capture_bounds(selected_monitor, window)
+                        source = make_capture_source(
+                            mode=mode_name,
+                            capture_method=(
+                                "screen_crop_fallback" if mode_name == "window" else "screen_crop"
+                            ),
+                            img=img,
+                            capture_left=int(capture_bounds[0]),
+                            capture_top=int(capture_bounds[1]),
+                            window=window,
+                            monitor={**selected_monitor, "index": monitor_index},
+                        )
+                        if mode_name == "window":
+                            source["direct_capture_failed"] = True
+
+            source["ignored_overlay_windows"] = len(hidden_hwnds)
+            source["redacted_overlay_windows"] = 0
+            source["capture_protection"] = capture_protection_mode
+            return make_screenshot_response(img, source, profile)
+    finally:
+        restore_hidden_windows_after_capture(hidden_hwnds)
+
+
 @app.get("/screenshot")
 async def screenshot_endpoint(
     mode: str = "foreground",
@@ -7365,86 +7678,467 @@ async def screenshot_endpoint(
     monitor: Optional[int] = None,
 ):
     try:
-        mode_name = mode.lower()
-        window = None
-        if mode_name in {"foreground", "window"}:
-            window = get_foreground_window_info()
-            if not window:
-                window = get_foreground_window_info()
-
-        protection_enabled = (
-            redact
-            if redact is not None
-            else os.environ.get("IGPU_REDACT_IGNORED_WINDOWS", "0").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
-        hidden_hwnds = hide_ignored_windows_for_capture(bool(protection_enabled))
-        try:
-            if mode_name == "window":
-                if window:
-                    captured = capture_window_image(window)
-                    if captured is not None:
-                        img, capture_method = captured
-                        source = make_capture_source(
-                                mode="window",
-                                capture_method=capture_method,
-                                img=img,
-                                capture_left=int(window["left"]),
-                                capture_top=int(window["top"]),
-                                window=window,
-                        )
-                        source["ignored_overlay_windows"] = len(hidden_hwnds)
-                        source["redacted_overlay_windows"] = 0
-                        source["capture_protection"] = "hide_restore" if protection_enabled else "off"
-                        return make_screenshot_response(img, source, profile)
-                    print("Direct window capture failed; falling back to screen crop.")
-                else:
-                    print("No target window found; falling back to monitor capture.")
-
-            with mss.mss() as sct:
-                selected_monitor, monitor_index = select_capture_monitor(sct.monitors, window, monitor)
-                sct_img = sct.grab(selected_monitor)
-                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                capture_bounds = get_capture_bounds(selected_monitor)
-                source: dict[str, Any] = make_capture_source(
-                    mode="screen",
-                    capture_method="mss_monitor",
-                    img=img,
-                    capture_left=int(capture_bounds[0]),
-                    capture_top=int(capture_bounds[1]),
-                    monitor={**selected_monitor, "index": monitor_index},
-                )
-
-                if mode_name in {"foreground", "window"}:
-                    if window:
-                        cropped = crop_to_foreground_window(img, selected_monitor, window)
-                        if cropped:
-                            img = cropped
-                            capture_bounds = get_capture_bounds(selected_monitor, window)
-                            source = make_capture_source(
-                                mode=mode_name,
-                                capture_method=(
-                                    "screen_crop_fallback" if mode_name == "window" else "screen_crop"
-                                ),
-                                img=img,
-                                capture_left=int(capture_bounds[0]),
-                                capture_top=int(capture_bounds[1]),
-                                window=window,
-                                monitor={**selected_monitor, "index": monitor_index},
-                            )
-                            if mode_name == "window":
-                                source["direct_capture_failed"] = True
-
-                source["ignored_overlay_windows"] = len(hidden_hwnds)
-                source["redacted_overlay_windows"] = 0
-                source["capture_protection"] = "hide_restore" if protection_enabled else "off"
-                return make_screenshot_response(img, source, profile)
-        finally:
-            restore_hidden_windows_after_capture(hidden_hwnds)
+        return await asyncio.to_thread(capture_screenshot_sync, mode, redact, profile, monitor)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def live_state_config() -> dict[str, Any]:
+    return {
+        "interval_ms": bounded_int_env("IGPU_LIVE_STATE_INTERVAL_MS", 3000, 1000, 60000),
+        "min_change_score": max(
+            0.0,
+            min(1.0, float(os.environ.get("IGPU_LIVE_STATE_MIN_CHANGE_SCORE", "0.18") or 0.18)),
+        ),
+        "min_analyze_gap_ms": bounded_int_env(
+            "IGPU_LIVE_STATE_MIN_ANALYZE_GAP_MS",
+            8000,
+            1000,
+            120000,
+        ),
+        "fresh_ms": bounded_int_env("IGPU_LIVE_STATE_FRESH_MS", 30000, 5000, 300000),
+        "timeout_seconds": bounded_int_env("IGPU_LIVE_STATE_TIMEOUT_SECONDS", 12, 4, 60),
+    }
+
+
+def live_state_model_name() -> str:
+    if LOCAL_ROUTER_ENABLED:
+        return LOCAL_ROUTER_MODEL
+    return MODEL_ALIAS
+
+
+def live_state_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def live_state_write(payload: dict[str, Any]) -> dict[str, Any]:
+    global live_state_memory
+    LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    live_state_memory = dict(payload)
+    LIVE_STATE_FILE.write_text(
+        json.dumps(live_state_memory, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return live_state_memory
+
+
+def live_state_update_status(status: str, **extra: Any) -> dict[str, Any]:
+    payload = dict(live_state_memory)
+    payload.update(
+        {
+            "status": status,
+            "enabled": live_state_enabled,
+            "running": bool(live_state_task and not live_state_task.done()),
+            "model": live_state_model_name(),
+            "status_updated_at": live_state_now(),
+        }
+    )
+    payload.update(extra)
+    return live_state_write(payload)
+
+
+def live_state_status_snapshot() -> dict[str, Any]:
+    running = bool(live_state_task and not live_state_task.done())
+    status = live_state_memory.get("status") or ("Watching" if live_state_enabled else "Off")
+    if not live_state_enabled:
+        status = "Off"
+    elif live_state_busy:
+        status = "Thinking"
+    elif running and status in {"Off", "stopped"}:
+        status = "Watching"
+    return {
+        "enabled": bool(live_state_enabled),
+        "running": running,
+        "status": status,
+        "last_updated_at": live_state_memory.get("updated_at") or "",
+        "last_analyze_at": live_state_memory.get("last_analyze_at") or "",
+        "last_error": live_state_memory.get("last_error") or "",
+        "last_skip_reason": live_state_memory.get("last_skip_reason") or "",
+        "confidence": live_state_memory.get("confidence"),
+        "scene": live_state_memory.get("scene") or "",
+        "player_status": live_state_memory.get("player_status") or "",
+        "possible_intent": live_state_memory.get("possible_intent") or "",
+        "model": live_state_model_name(),
+        "state_path": str(LIVE_STATE_FILE),
+        "mode": live_state_mode,
+        "monitor": live_state_monitor,
+        "config": live_state_config(),
+    }
+
+
+def live_state_image_signature(image_base64: str) -> list[float]:
+    raw = image_base64.split(",", 1)[-1]
+    img = Image.open(io.BytesIO(base64.b64decode(raw))).convert("L")
+    img.thumbnail((32, 32), Image.Resampling.BILINEAR)
+    histogram = img.histogram()
+    bins = [sum(histogram[index : index + 16]) for index in range(0, 256, 16)]
+    total = float(sum(bins) or 1.0)
+    return [value / total for value in bins]
+
+
+def live_state_change_score(signature: list[float]) -> float:
+    if live_state_last_signature is None:
+        return 1.0
+    return min(1.0, sum(abs(a - b) for a, b in zip(signature, live_state_last_signature)) / 2.0)
+
+
+def live_state_clean_list(value: Any, max_items: int = 8) -> list[str]:
+    if isinstance(value, str):
+        value = re.split(r"[,，、\n]+", value)
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        text = re.sub(r"\s+", " ", str(item or "").strip())
+        if text and text not in cleaned:
+            cleaned.append(status_text(text, 48))
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
+def live_state_enum(value: Any, allowed: set[str], default: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else default
+
+
+def normalize_live_state_payload(raw: dict[str, Any], source: dict[str, Any], elapsed_ms: float) -> dict[str, Any]:
+    confidence = parse_loose_float(str(raw.get("confidence", 0.0)), 0.0)
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "status": "Watching",
+        "enabled": bool(live_state_enabled),
+        "running": bool(live_state_task and not live_state_task.done()),
+        "model": live_state_model_name(),
+        "scene": status_text(raw.get("scene") or "未知", 120),
+        "visible_ui": live_state_clean_list(raw.get("visible_ui")),
+        "visible_objects": live_state_clean_list(raw.get("visible_objects")),
+        "player_status": live_state_enum(
+            raw.get("player_status"),
+            {"探索中", "戰鬥中", "解謎中", "未知"},
+            "未知",
+        ),
+        "possible_intent": live_state_enum(
+            raw.get("possible_intent"),
+            {"找路", "戰鬥", "解謎", "道具確認", "未知"},
+            "未知",
+        ),
+        "risk": live_state_enum(raw.get("risk"), {"none", "low", "medium", "high"}, "none"),
+        "confidence": confidence,
+        "updated_at": live_state_now(),
+        "last_analyze_at": live_state_now(),
+        "latency_ms": round(elapsed_ms, 1),
+        "source": source,
+        "last_error": "",
+        "last_skip_reason": "",
+    }
+
+
+def live_state_messages(image_base64: str, mime_type: str) -> list[dict[str, Any]]:
+    data_url = f"data:{mime_type or 'image/jpeg'};base64,{image_base64}"
+    schema = (
+        "Return exactly one minified JSON object. No markdown, no comments, no trailing text. "
+        "Use Traditional Chinese values with this schema: "
+        '{"scene":"...","visible_ui":["..."],"visible_objects":["..."],'
+        '"player_status":"探索中|戰鬥中|解謎中|未知",'
+        '"possible_intent":"找路|戰鬥|解謎|道具確認|未知",'
+        '"risk":"none|low|medium|high","confidence":0.0}. '
+        "Do not answer the player. Do not provide a guide. If uncertain, use 未知 and low confidence."
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a low-frequency local game-state observer for an in-game companion. "
+                "You summarize the current screenshot as short structured state only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": schema},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+
+def call_live_state_qwen(messages: list[dict[str, Any]]) -> str:
+    timeout_seconds = live_state_config()["timeout_seconds"]
+    if not LOCAL_ROUTER_ENABLED:
+        raise RuntimeError("local_qwen_router_unavailable")
+    return call_local_router_once(messages, max_tokens=96, timeout_seconds=timeout_seconds, temperature=0.0)
+
+
+def live_state_exception_detail(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        return f"HTTPError {exc.code}: {detail or exc.reason or exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def analyze_live_state_sync(
+    force: bool = False,
+    monitor: Optional[int] = None,
+    mode: str = "foreground",
+    reason: str = "manual",
+) -> dict[str, Any]:
+    global live_state_busy, live_state_last_signature, live_state_last_analyze_at, live_state_last_capture_at
+    global live_state_error_count
+    if live_state_busy:
+        return live_state_update_status("Paused", last_skip_reason="analysis_already_running")
+    if not force and generate_lock.locked():
+        return live_state_update_status("Paused", last_skip_reason="backend_busy")
+
+    config = live_state_config()
+    now = time.perf_counter()
+    if not force and live_state_last_analyze_at:
+        elapsed_gap_ms = (now - live_state_last_analyze_at) * 1000
+        if elapsed_gap_ms < config["min_analyze_gap_ms"]:
+            return live_state_update_status(
+                "Watching",
+                last_skip_reason="cooldown",
+                cooldown_remaining_ms=round(config["min_analyze_gap_ms"] - elapsed_gap_ms, 1),
+            )
+
+    live_state_busy = True
+    live_state_update_status("Thinking", last_skip_reason="", trigger=reason)
+    started = time.perf_counter()
+    try:
+        shot = capture_screenshot_sync(mode=mode, redact=True, profile="state", monitor=monitor)
+        live_state_last_capture_at = time.perf_counter()
+        signature = live_state_image_signature(shot["image_base64"])
+        change_score = live_state_change_score(signature)
+        if not force and change_score < config["min_change_score"]:
+            live_state_last_signature = signature
+            return live_state_update_status(
+                "Watching",
+                last_skip_reason="unchanged_frame",
+                change_score=round(change_score, 4),
+                source=shot.get("source", {}),
+            )
+
+        messages = live_state_messages(shot["image_base64"], shot.get("mime_type") or "image/jpeg")
+        output = call_live_state_qwen(messages)
+        try:
+            parsed = extract_json_object(output)
+        except Exception as parse_exc:
+            live_state_last_signature = signature
+            live_state_last_analyze_at = time.perf_counter()
+            parse_error = f"parse_failed: {live_state_exception_detail(parse_exc)}"
+            if live_state_memory.get("scene"):
+                retained = dict(live_state_memory)
+                retained.update(
+                    {
+                        "status": "uncertain",
+                        "enabled": bool(live_state_enabled),
+                        "running": bool(live_state_task and not live_state_task.done()),
+                        "last_error": parse_error,
+                        "last_skip_reason": "parse_failed_retained_previous",
+                        "raw_model_output": status_text(output, 500),
+                        "status_updated_at": live_state_now(),
+                        "last_analyze_at": live_state_now(),
+                        "trigger": reason,
+                        "change_score": round(change_score, 4),
+                        "consecutive_errors": 0,
+                    }
+                )
+                live_state_error_count = 0
+                return live_state_write(retained)
+            raise RuntimeError(f"{parse_error}; raw={status_text(output, 240)}") from parse_exc
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        payload = normalize_live_state_payload(parsed, shot.get("source", {}), elapsed_ms)
+        payload["change_score"] = round(change_score, 4)
+        payload["trigger"] = reason
+        payload["raw_model_output"] = status_text(output, 500)
+        live_state_error_count = 0
+
+        previous_confidence = parse_loose_float(str(live_state_memory.get("confidence", 0.0)), 0.0)
+        if payload["confidence"] < 0.25 and previous_confidence >= 0.55:
+            retained = dict(live_state_memory)
+            retained.update(
+                {
+                    "status": "uncertain",
+                    "uncertain_observation": payload,
+                    "last_error": "low_confidence_observation",
+                    "last_skip_reason": "",
+                    "status_updated_at": live_state_now(),
+                    "trigger": reason,
+                }
+            )
+            live_state_last_signature = signature
+            live_state_last_analyze_at = time.perf_counter()
+            return live_state_write(retained)
+
+        live_state_last_signature = signature
+        live_state_last_analyze_at = time.perf_counter()
+        return live_state_write(payload)
+    except Exception as exc:
+        live_state_last_analyze_at = time.perf_counter()
+        live_state_error_count += 1
+        error_detail = live_state_exception_detail(exc)
+        lower_detail = error_detail.lower()
+        unsupported_image = "image input is not supported" in lower_detail or "mmproj" in lower_detail
+        if unsupported_image:
+            live_state_error_count = max(live_state_error_count, 3)
+        status = (
+            "capture_failed"
+            if "screenshot" in lower_detail
+            else "Paused"
+            if unsupported_image
+            else "Error"
+        )
+        return live_state_update_status(
+            status,
+            last_error=error_detail,
+            consecutive_errors=live_state_error_count,
+            trigger=reason,
+            last_analyze_at=live_state_now(),
+            last_skip_reason="image_input_unsupported" if unsupported_image else "",
+        )
+    finally:
+        live_state_busy = False
+
+
+async def live_state_worker() -> None:
+    global live_state_enabled
+    while live_state_enabled:
+        if live_state_error_count >= 3:
+            live_state_update_status("Paused", last_skip_reason="too_many_live_state_errors")
+            await asyncio.sleep(live_state_config()["interval_ms"] / 1000)
+            continue
+        try:
+            await asyncio.to_thread(
+                analyze_live_state_sync,
+                False,
+                live_state_monitor,
+                live_state_mode,
+                "scheduled",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            live_state_update_status("Error", last_error=f"{type(exc).__name__}: {exc}")
+        await asyncio.sleep(live_state_config()["interval_ms"] / 1000)
+
+
+def ensure_live_state_task() -> None:
+    global live_state_task
+    if live_state_task and not live_state_task.done():
+        return
+    live_state_task = asyncio.create_task(live_state_worker())
+
+
+def live_state_is_fresh(max_age_ms: Optional[int] = None) -> bool:
+    updated_at = live_state_memory.get("updated_at")
+    if not updated_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(updated_at))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age_ms = (datetime.now(timezone.utc) - dt).total_seconds() * 1000
+    return age_ms <= (max_age_ms or live_state_config()["fresh_ms"])
+
+
+def live_state_prompt_needs_screen(prompt: str) -> bool:
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        "現在在哪",
+        "現在該",
+        "我在哪",
+        "這畫面",
+        "看畫面",
+        "幫我看",
+        "該怎麼做",
+        "what am i looking at",
+        "where am i",
+        "what should i do",
+    )
+    return any(pattern in text for pattern in patterns)
+
+
+def live_state_context_for_chat(prompt: str, enabled: bool) -> str:
+    if not enabled or not live_state_enabled or not live_state_is_fresh():
+        return ""
+    state = live_state_memory
+    lines = [
+        "Live State context (background local Qwen observation; use only as supplemental current-screen context):",
+        f"- scene: {state.get('scene') or '未知'}",
+        f"- player_status: {state.get('player_status') or '未知'}",
+        f"- possible_intent: {state.get('possible_intent') or '未知'}",
+        f"- risk: {state.get('risk') or 'none'}",
+        f"- confidence: {state.get('confidence')}",
+    ]
+    objects = state.get("visible_objects") or []
+    visible_ui = state.get("visible_ui") or []
+    if objects:
+        lines.append(f"- visible_objects: {', '.join(objects[:8])}")
+    if visible_ui:
+        lines.append(f"- visible_ui: {', '.join(visible_ui[:6])}")
+    if not live_state_prompt_needs_screen(prompt):
+        lines.append("- note: the player did not explicitly ask about the current screen, so do not overuse this context.")
+    return "\n".join(lines)
+
+
+@app.post("/live-state/start")
+async def live_state_start(request: LiveStateStartRequest = LiveStateStartRequest()):
+    global live_state_enabled, live_state_monitor, live_state_mode, live_state_error_count
+    live_state_enabled = True
+    live_state_monitor = request.monitor
+    live_state_mode = request.mode or "foreground"
+    live_state_error_count = 0
+    ensure_live_state_task()
+    live_state_update_status("Watching", last_error="", last_skip_reason="", mode=request.mode, monitor=request.monitor)
+    return live_state_status_snapshot()
+
+
+@app.post("/live-state/stop")
+async def live_state_stop():
+    global live_state_enabled, live_state_task, live_state_error_count
+    live_state_enabled = False
+    live_state_error_count = 0
+    if live_state_task and not live_state_task.done():
+        live_state_task.cancel()
+    live_state_task = None
+    live_state_update_status("Off", last_skip_reason="stopped", last_error="", consecutive_errors=0)
+    return live_state_status_snapshot()
+
+
+@app.get("/live-state/status")
+async def live_state_status():
+    return live_state_status_snapshot()
+
+
+@app.get("/live-state/current")
+async def live_state_current():
+    return {
+        "status": live_state_status_snapshot(),
+        "state": live_state_memory,
+        "fresh": live_state_is_fresh(),
+    }
+
+
+@app.post("/live-state/analyze-now")
+async def live_state_analyze_now(request: LiveStateAnalyzeRequest = LiveStateAnalyzeRequest()):
+    result = await asyncio.to_thread(
+        analyze_live_state_sync,
+        bool(request.force),
+        request.monitor,
+        request.mode,
+        "manual",
+    )
+    return {"status": live_state_status_snapshot(), "state": result, "fresh": live_state_is_fresh()}
 
 
 @app.post("/intent/route")
@@ -7490,6 +8184,21 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
     prompt = chat_request.message or "請分析這張截圖。"
     game_id = normalize_game_id(chat_request.game_id)
     guide_was_requested = should_use_guides(prompt, chat_request.use_guides)
+    use_live_state_context = bool(chat_request.use_live_state)
+    if (
+        use_live_state_context
+        and live_state_enabled
+        and not chat_request.image_base64
+        and live_state_prompt_needs_screen(prompt)
+        and not live_state_is_fresh()
+    ):
+        await asyncio.to_thread(
+            analyze_live_state_sync,
+            True,
+            live_state_monitor,
+            live_state_mode,
+            "chat_request",
+        )
     preflight_router_gamepath_result: Optional[dict[str, Any]] = None
     screenshot_intent_result: Optional[dict[str, Any]] = None
     if not chat_request.image_base64:
@@ -7804,6 +8513,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             append_history("user", prompt)
             append_history("assistant", fact_answer)
             yield f"data: {json.dumps({'content': fact_answer}, ensure_ascii=False)}\n\n"
+            yield response_format_event(fact_answer)
 
         return StreamingResponse(fact_answer_event_generator(), media_type="text/event-stream")
 
@@ -7826,7 +8536,9 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 **gamepath_lookup_status_details(game_id, gamepath_evaluation),
             )
             hint_started = time.perf_counter()
-            answer = await asyncio.to_thread(build_gamepath_hint_answer, gamepath_answer_prompt, top_item)
+            raw_answer = await asyncio.to_thread(build_gamepath_hint_answer, gamepath_answer_prompt, top_item)
+            display_format = build_response_format(raw_answer)
+            answer = display_format["long"]
             hint_elapsed_ms = round((time.perf_counter() - hint_started) * 1000, 1)
             yield lookup_status_event(
                 "gamepath_hit",
@@ -7846,6 +8558,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             append_history("user", prompt)
             append_history("assistant", answer)
             yield sse_data({"content": answer})
+            yield sse_data({"response_format": display_format})
 
         return StreamingResponse(gamepath_answer_event_generator(), media_type="text/event-stream")
 
@@ -7862,10 +8575,14 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             if memory_results:
                 message += "\n我有找到一些玩家記憶，但沒有本機攻略片段，所以不會硬編攻略。"
             yield f"data: {json.dumps({'content': message}, ensure_ascii=False)}\n\n"
+            yield response_format_event(message)
 
         return StreamingResponse(no_guide_event_generator(), media_type="text/event-stream")
 
     rag_context = format_rag_context(guide_results, memory_results, guide_was_requested, gamepath_context_results)
+    live_state_context = live_state_context_for_chat(prompt, use_live_state_context)
+    if live_state_context:
+        rag_context = f"{live_state_context}\n\n{rag_context}" if rag_context else live_state_context
     if gamepath_route == "summarize" and rag_context:
         if tactical_gamepath_reframe:
             rag_context = (
@@ -7947,6 +8664,8 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             if collected:
                 if HERMES_AGENT_WEB_ENABLED:
                     collected = condense_agent_answer(collected, prompt)
+                display_format = build_response_format(collected)
+                collected = display_format["long"]
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)
                 store_skip_reason = (
                     "tactical_followup_not_reusable"
@@ -7991,6 +8710,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                         break
                     yield sse_data({"content": chunk})
                     await asyncio.sleep(0)
+                yield sse_data({"response_format": display_format})
 
         return StreamingResponse(hermes_event_generator(), media_type="text/event-stream")
 
@@ -8016,6 +8736,8 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             answer = str(result.get("answer") or "").strip()
             overlay = result.get("overlay")
             if answer:
+                display_format = build_response_format(answer)
+                answer = display_format["long"]
                 append_history("user", prompt)
                 append_history("assistant", answer)
                 for chunk in chunk_text(answer):
@@ -8023,6 +8745,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                         return
                     yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
                     await asyncio.sleep(0)
+                yield sse_data({"response_format": display_format})
             if overlay:
                 yield f"data: {json.dumps({'overlay': overlay}, ensure_ascii=False)}\n\n"
 
@@ -8089,9 +8812,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                         print(f"GamePath vision auto-store failed: {exc}")
                 if not answer:
                     answer = "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
+                display_format = build_response_format(answer)
+                answer = display_format["long"]
                 append_history("user", prompt)
                 append_history("assistant", answer)
                 yield f"data: {json.dumps({'content': answer}, ensure_ascii=False)}\n\n"
+                yield sse_data({"response_format": display_format})
                 return
 
             visual_scene_request = should_use_visual_scene(prompt)
@@ -8133,9 +8859,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             answer = clean_vision_answer(answer)
             if not answer:
                 answer = "這張截圖我看不出可靠重點；你可以直接指定要我看哪個位置或 UI。"
+            display_format = build_response_format(answer)
+            answer = display_format["long"]
             append_history("user", prompt)
             append_history("assistant", answer)
             yield f"data: {json.dumps({'content': answer}, ensure_ascii=False)}\n\n"
+            yield sse_data({"response_format": display_format})
 
         return StreamingResponse(image_event_generator(), media_type="text/event-stream")
 
@@ -8201,11 +8930,13 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             if collected:
                 append_history("user", prompt)
                 append_history("assistant", collected)
+                yield response_format_event(collected)
             elif not await fastapi_request.is_disconnected():
                 fallback = "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
                 append_history("user", prompt)
                 append_history("assistant", fallback)
                 yield f"data: {json.dumps({'content': fallback}, ensure_ascii=False)}\n\n"
+                yield response_format_event(fallback)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

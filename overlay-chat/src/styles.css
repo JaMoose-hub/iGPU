@@ -56,10 +56,35 @@ body {
 }
 
 .drag-bar .title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   color: var(--text-main);
   font-weight: 600;
   font-size: 15px;
+  white-space: nowrap;
   pointer-events: none; /* 讓點擊事件穿透到背後拖曳區 */
+}
+
+.app-lottie-icon {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: transparent;
+  pointer-events: none;
+}
+
+.app-lottie-icon svg,
+.app-lottie-icon canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
 }
 
 .tool-strip {
@@ -400,6 +425,20 @@ body.perf-mode {
   gap: 2px;
 }
 
+.tools-window-btn {
+  color: #dbe4ff;
+  background: rgba(124, 156, 255, 0.12);
+}
+
+.standby-window-btn {
+  color: #ffdce7;
+  background: rgba(255, 145, 178, 0.12);
+}
+
+.standby-window-btn:hover {
+  background: rgba(255, 145, 178, 0.22);
+}
+
 /* 透明度控制器 */
 .shortcut-hint {
   font-size: 11px;
@@ -442,6 +481,26 @@ body.perf-mode {
 .game-auto-btn.active {
   border-color: rgba(92, 255, 176, 0.58);
   color: #c9ffe1;
+}
+
+.live-state-btn.active {
+  border-color: rgba(92, 255, 176, 0.58);
+  color: #c9ffe1;
+}
+
+.live-state-btn.thinking {
+  border-color: rgba(255, 212, 128, 0.68);
+  color: #ffe1a8;
+}
+
+.live-state-btn.paused {
+  border-color: rgba(160, 180, 255, 0.52);
+  color: #cdd7ff;
+}
+
+.live-state-btn.error {
+  border-color: rgba(255, 130, 130, 0.65);
+  color: #ffc9c9;
 }
 
 .game-select {
@@ -497,6 +556,11 @@ body.perf-mode {
 }
 
 .tool-strip .game-auto-btn {
+  max-width: 76px;
+}
+
+.tool-strip .live-state-btn,
+.tool-strip .live-state-analyze-btn {
   max-width: 76px;
 }
 

@@ -5,10 +5,14 @@ param(
     [string]$ApiHost = "127.0.0.1",
     [int]$RouterPort = 18081,
     [string]$RouterModelPath = "",
-    [string]$RouterAlias = "qwen3.5-4b-q4_k_m",
+    [string]$RouterMmprojPath = "",
+    [string]$RouterAlias = "qwen3.5-2b-q4_k_m",
+    [string]$RouterLogName = "hybrid-qwen35-2b-router",
     [string]$VulkanDevice = "0",
-    [int]$RouterCtxSize = 8192,
+    [int]$RouterCtxSize = 4096,
     [int]$RouterGpuLayers = 99,
+    [int]$RouterImageMinTokens = 128,
+    [int]$RouterImageMaxTokens = 384,
     [int]$RouterStartupTimeoutSeconds = 300,
     [string]$HermesWslDistro = "Ubuntu-24.04",
     [int]$HermesTimeoutSeconds = 900,
@@ -29,7 +33,7 @@ if (-not $Python) {
 }
 
 if (-not $RouterModelPath) {
-    $RouterModelPath = Join-Path $Root "models\Qwen3.5-4B-Q4_K_M.gguf"
+    $RouterModelPath = Join-Path $Root "models\Qwen3.5-2B-Q4_K_M.gguf"
 }
 
 $backendScript = Join-Path $Root "llama_vulkan_api_server.py"
@@ -38,8 +42,8 @@ if (-not (Test-Path -LiteralPath $overlayExe)) {
     $overlayExe = Join-Path $Root "overlay-chat\src-tauri\target\debug\overlay-chat.exe"
 }
 $logDir = Join-Path $Root "logs"
-$routerStdoutLog = Join-Path $logDir "hybrid-qwen35-4b-router.log"
-$routerStderrLog = Join-Path $logDir "hybrid-qwen35-4b-router.err.log"
+$routerStdoutLog = Join-Path $logDir "$RouterLogName.log"
+$routerStderrLog = Join-Path $logDir "$RouterLogName.err.log"
 $backendStdoutLog = Join-Path $logDir "hybrid-cloud-api.log"
 $backendStderrLog = Join-Path $logDir "hybrid-cloud-api.err.log"
 $apiPort = ([uri]$ApiUrl).Port
@@ -145,8 +149,8 @@ function Ensure-RouterModel {
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $RouterModelPath) | Out-Null
     $env:PYTHONIOENCODING = "utf-8"
-    Write-Host "Downloading Qwen3.5 4B Q4_K_M router model..."
-    & $hfCli download jc-builds/Qwen3.5-4B-Q4_K_M-GGUF Qwen3.5-4B-Q4_K_M.gguf --local-dir (Join-Path $Root "models")
+    Write-Host "Downloading Qwen3.5 2B Q4_K_M router model..."
+    & $hfCli download unsloth/Qwen3.5-2B-GGUF Qwen3.5-2B-Q4_K_M.gguf --local-dir (Join-Path $Root "models")
     if (-not (Test-Path -LiteralPath $RouterModelPath)) {
         throw "Model download finished but file was not found: $RouterModelPath"
     }
@@ -164,11 +168,17 @@ if (-not (Test-Path -LiteralPath $Python)) {
 
 $llamaServer = Resolve-LlamaServer
 Ensure-RouterModel
+if ($RouterMmprojPath -and -not (Test-Path -LiteralPath $RouterMmprojPath)) {
+    throw "Missing router mmproj: $RouterMmprojPath"
+}
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 Write-Host "Starting Game Companion hybrid mode."
 Write-Host "Cloud: Hermes config in WSL"
 Write-Host "Local router: $RouterAlias on $routerUrl"
+if ($RouterMmprojPath) {
+    Write-Host "Local router mmproj: $RouterMmprojPath"
+}
 Write-Host "llama.cpp auto-start inside backend: disabled"
 
 Stop-Overlay
@@ -188,7 +198,7 @@ $routerArgs = @(
     "--host", "127.0.0.1",
     "--port", "$RouterPort",
     "--ctx-size", "$RouterCtxSize",
-    "--device", "Vulkan0",
+    "--device", "Vulkan$VulkanDevice",
     "--n-gpu-layers", "$RouterGpuLayers",
     "--alias", $RouterAlias,
     "--jinja",
@@ -199,8 +209,15 @@ $routerArgs = @(
     "--top-k", "20"
 )
 
-$routerEnvDevice = $VulkanDevice
-$env:GGML_VK_VISIBLE_DEVICES = $routerEnvDevice
+if ($RouterMmprojPath) {
+    $routerArgs += @(
+        "--mmproj", $RouterMmprojPath,
+        "--image-min-tokens", "$RouterImageMinTokens",
+        "--image-max-tokens", "$RouterImageMaxTokens"
+    )
+}
+
+Remove-Item Env:\GGML_VK_VISIBLE_DEVICES -ErrorAction SilentlyContinue
 $env:LLAMA_ARG_FLASH_ATTN = "0"
 
 $routerProcess = Start-Process `
@@ -233,6 +250,7 @@ if (-not (Test-OpenAIServiceReady -BaseUrl $routerUrl)) {
 
 $env:IGPU_CHAT_BACKEND = "hermes"
 $env:LLAMA_AUTO_START = "0"
+$env:GGML_VK_VISIBLE_DEVICES = $VulkanDevice
 $env:HERMES_USE_CONFIG_MODEL = "1"
 $env:IGPU_ENABLE_LOCAL_TOOLS = "0"
 $env:HERMES_WSL_DISTRO = $HermesWslDistro
@@ -256,6 +274,7 @@ $env:IGPU_LOCAL_ROUTER_ALWAYS_ROUTE = "1"
 $env:IGPU_LOCAL_ROUTER_GAMEPATH_MAX_CHARS = "280"
 $env:IGPU_LOCAL_ROUTER_RETRIEVAL_EVAL = "1"
 $env:IGPU_LOCAL_ROUTER_CACHE_TTL = "600"
+$env:IGPU_LIVE_STATE_ENABLED = "0"
 Remove-Item Env:\LLAMA_OPENAI_MAX_TOKENS_CAP -ErrorAction SilentlyContinue
 
 Start-Process `

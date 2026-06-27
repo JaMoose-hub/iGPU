@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.james.overlay-chat",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
@@ -12,8 +15,8 @@
       {
         "label": "main",
         "title": "overlay-chat",
-        "width": 520,
-        "height": 620,
+        "width": 720,
+        "height": 760,
         "minWidth": 460,
         "minHeight": 560,
         "transparent": true,
@@ -84,6 +87,41 @@
         "alwaysOnTop": true,
         "visible": false,
         "resizable": true
+      },
+      {
+        "label": "tools",
+        "title": "game-tools-panel",
+        "url": "tools.html",
+        "x": -32000,
+        "y": -32000,
+        "width": 320,
+        "height": 430,
+        "minWidth": 300,
+        "minHeight": 360,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": true
+      },
+      {
+        "label": "standby",
+        "title": "game-companion-standby",
+        "url": "standby.html",
+        "x": -32000,
+        "y": -32000,
+        "width": 260,
+        "height": 460,
+        "minWidth": 40,
+        "minHeight": 80,
+        "transparent": true,
+        "backgroundColor": "#00000000",
+        "decorations": false,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false
       }
     ],
     "security": {

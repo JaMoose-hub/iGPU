@@ -12,6 +12,7 @@ model_cache/
 scratch/
 generated_files/
 logs/
+runtime/
 guide_cache/
 memory_cache/
 game_guides/

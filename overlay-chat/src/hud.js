@@ -1,4 +1,12 @@
-document.addEventListener("DOMContentLoaded", async () => {
+const runWhenDomReady = (callback) => {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", callback, { once: true });
+  } else {
+    callback();
+  }
+};
+
+runWhenDomReady(async () => {
   const { getCurrentWindow } = window.__TAURI__.window;
   const { invoke } = window.__TAURI__.core;
   const { listen, emit } = window.__TAURI__.event;

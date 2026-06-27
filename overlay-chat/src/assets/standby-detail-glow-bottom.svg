@@ -1,0 +1,10 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 426.614 145" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path id="Glow UP" d="M134.582 0H283.682L419.144 109.443C433.812 121.294 425.432 145 406.575 145L20.0401 145C1.49334 145 -7.06415 121.943 6.99142 109.843L134.582 0Z" fill="url(#paint0_linear_0_4)"/>
+<defs>
+<linearGradient id="paint0_linear_0_4" x1="-33.8459" y1="72.5" x2="463.154" y2="72.5" gradientUnits="userSpaceOnUse">
+<stop stop-color="#AA6EEE"/>
+<stop offset="0.5" stop-color="#FF6778"/>
+<stop offset="1" stop-color="#DDBA71"/>
+</linearGradient>
+</defs>
+</svg>

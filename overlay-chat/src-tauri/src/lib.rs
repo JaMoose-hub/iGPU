@@ -7,8 +7,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri::{webview::Color, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::POINT;
@@ -131,7 +131,7 @@ fn apply_current_capture_protection(window: &tauri::WebviewWindow) {
 }
 
 fn apply_capture_protection_to_all_windows(app: &tauri::AppHandle, excluded: bool) {
-    for label in ["main", "hud", "tasks", "search", "gamepath"] {
+    for label in ["main", "hud", "tasks", "search", "gamepath", "tools", "standby"] {
         if let Some(window) = app.get_webview_window(label) {
             set_window_display_excluded(&window, excluded);
         }
@@ -163,6 +163,18 @@ fn set_capture_protection_state(app: &tauri::AppHandle, excluded: bool) -> Resul
         "protect-state-changed",
         serde_json::json!({ "enabled": excluded }),
     );
+    Ok(())
+}
+
+fn set_app_capture_exclusion_state(app: &tauri::AppHandle, excluded: bool) -> Result<(), String> {
+    if app.get_webview_window("main").is_none() {
+        return Err("main window not found".to_string());
+    }
+
+    dismiss_input_experience_windows();
+    apply_capture_protection_to_all_windows(app, excluded);
+    park_hidden_companion_windows(app);
+    dismiss_input_experience_windows();
     Ok(())
 }
 
@@ -973,7 +985,7 @@ fn park_window_if_hidden(window: &tauri::WebviewWindow) {
 }
 
 fn park_hidden_companion_windows(app: &tauri::AppHandle) {
-    for label in ["hud", "tasks", "search", "gamepath"] {
+    for label in ["hud", "tasks", "search", "gamepath", "tools", "standby"] {
         if let Some(window) = app.get_webview_window(label) {
             park_window_if_hidden(&window);
         }
@@ -1397,6 +1409,92 @@ fn ensure_gamepath_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow
     Ok(gamepath)
 }
 
+fn ensure_tools_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let Some(tools) = app.get_webview_window("tools") else {
+        return Err("tools window not found".to_string());
+    };
+    apply_current_capture_protection(&tools);
+    Ok(tools)
+}
+
+fn ensure_standby_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let Some(standby) = app.get_webview_window("standby") else {
+        return Err("standby window not found".to_string());
+    };
+    apply_current_capture_protection(&standby);
+    Ok(standby)
+}
+
+fn standby_window_position(
+    app: &tauri::AppHandle,
+    width: u32,
+    height: u32,
+) -> (i32, i32) {
+    let main = app.get_webview_window("main");
+    let monitor = main
+        .as_ref()
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+
+    if let Some(monitor) = monitor {
+        let position = monitor.position();
+        let size = monitor.size();
+        let scale_factor = monitor.scale_factor().max(1.0);
+        let mon_right = position.x + i32::try_from(size.width).unwrap_or(1920);
+        let mon_top = position.y;
+        let mon_height = i32::try_from(size.height).unwrap_or(1080);
+        let window_width = ((width.max(1) as f64) * scale_factor).round() as i32;
+        let window_height = ((height.max(1) as f64) * scale_factor).round() as i32;
+        let x = mon_right - window_width;
+        let y = mon_top + ((mon_height - window_height) / 2).max(0);
+        return (x, y);
+    }
+
+    (1824, 450)
+}
+
+fn configure_standby_window(
+    app: &tauri::AppHandle,
+    expanded: bool,
+) -> Result<tauri::WebviewWindow, String> {
+    configure_standby_window_mode(app, if expanded { "typein" } else { "collapsed" })
+}
+
+fn standby_window_size_for_mode(mode: &str) -> (u32, u32) {
+    match mode {
+        "detail" => (488_u32, 640_u32),
+        "response" => (640_u32, 360_u32),
+        "typein" => (620_u32, 320_u32),
+        "thinking" => (488_u32, 100_u32),
+        _ => (260_u32, 460_u32),
+    }
+}
+
+fn configure_standby_window_mode(
+    app: &tauri::AppHandle,
+    mode: &str,
+) -> Result<tauri::WebviewWindow, String> {
+    let standby = ensure_standby_window(app)?;
+    let (width, height) = standby_window_size_for_mode(mode);
+    let (x, y) = standby_window_position(app, width, height);
+    let _ = standby.set_size(LogicalSize::new(width as f64, height as f64));
+    let _ = standby.set_position(PhysicalPosition::new(x, y));
+    let _ = standby.set_always_on_top(true);
+    let _ = standby.set_background_color(Some(Color(0, 0, 0, 0)));
+    let _ = standby.set_shadow(false);
+    Ok(standby)
+}
+
+fn set_standby_pointer_passthrough_state(
+    app: &tauri::AppHandle,
+    passthrough: bool,
+) -> Result<(), String> {
+    let standby = ensure_standby_window(app)?;
+    let _ = standby.set_ignore_cursor_events(passthrough);
+    let _ = standby.set_focusable(!passthrough);
+    Ok(())
+}
+
 fn clamp_i32(value: i32, minimum: i32, maximum: i32) -> i32 {
     if maximum < minimum {
         minimum
@@ -1523,6 +1621,139 @@ fn show_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn show_tools_window(app: tauri::AppHandle) -> Result<(), String> {
+    park_hidden_companion_windows(&app);
+    let tools = ensure_tools_window(&app)?;
+    apply_current_capture_protection(&tools);
+    let (x, y) = companion_child_position(&app, &tools, PhysicalSize::new(320, 430), 72);
+    let _ = tools.set_position(PhysicalPosition::new(x, y));
+    let _ = tools.set_always_on_top(true);
+    tools.show().map_err(|err| err.to_string())?;
+    force_companion_window_repaint(&tools, x, y);
+    let result = tools.set_focus().map_err(|err| err.to_string());
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
+}
+
+#[tauri::command]
+fn show_standby_window(app: tauri::AppHandle) -> Result<(), String> {
+    let standby = configure_standby_window(&app, false)?;
+    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+    standby.show().map_err(|err| err.to_string())?;
+    let _ = set_standby_pointer_passthrough_state(&app, true);
+    let position = standby.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    force_companion_window_repaint(&standby, position.x, position.y);
+    let _ = app.emit_to("standby", "standby:set-mode", serde_json::json!({ "expanded": false }));
+    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+    Ok(())
+}
+
+fn wake_standby_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let standby = configure_standby_window_mode(app, "collapsed")?;
+    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+    standby.show().map_err(|err| err.to_string())?;
+    let _ = set_standby_pointer_passthrough_state(app, false);
+    let position = standby.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    force_companion_window_repaint(&standby, position.x, position.y);
+    let _ = standby.set_focus();
+    let _ = standby.eval("window.focus();");
+    let _ = app.emit_to(
+        "standby",
+        "standby:wake",
+        serde_json::json!({ "source": "ctrl-g", "timeoutMs": 5000 }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn set_standby_window_expanded(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
+    let standby = configure_standby_window(&app, expanded)?;
+    let script = format!(
+        "window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded({});",
+        if expanded { "true" } else { "false" }
+    );
+    let _ = standby.eval(&script);
+    standby.show().map_err(|err| err.to_string())?;
+    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
+    if expanded {
+        let _ = standby.set_focus();
+    }
+    let _ = app.emit_to("standby", "standby:set-mode", serde_json::json!({ "expanded": expanded }));
+    let _ = standby.eval(&script);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_standby_window_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let normalized = match mode.as_str() {
+        "collapsed" => "collapsed",
+        "typein" => "typein",
+        "thinking" => "thinking",
+        "response" => "response",
+        "detail" => "detail",
+        _ => "typein",
+    };
+    let expanded = normalized != "collapsed";
+    let standby = configure_standby_window_mode(&app, normalized)?;
+    standby.show().map_err(|err| err.to_string())?;
+    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
+    if expanded {
+        let _ = standby.set_focus();
+    }
+    let _ = app.emit_to(
+        "standby",
+        "standby:set-mode",
+        serde_json::json!({ "expanded": expanded, "mode": normalized }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn set_standby_pointer_passthrough(
+    app: tauri::AppHandle,
+    passthrough: bool,
+) -> Result<(), String> {
+    set_standby_pointer_passthrough_state(&app, passthrough)
+}
+
+#[tauri::command]
+fn hide_standby_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(standby) = app.get_webview_window("standby") else {
+        return Ok(());
+    };
+    hide_companion_window(&standby)
+}
+
+#[tauri::command]
+fn collapse_main_to_standby(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.minimize();
+    }
+    for label in ["tools", "tasks", "search", "gamepath"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = hide_companion_window(&window);
+        }
+    }
+    show_standby_window(app)
+}
+
+#[tauri::command]
+fn restore_main_from_standby(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = hide_standby_window(app.clone());
+    let Some(main) = app.get_webview_window("main") else {
+        return Err("main window not found".to_string());
+    };
+    main.show().map_err(|err| err.to_string())?;
+    let _ = main.unminimize();
+    let _ = main.set_always_on_top(true);
+    let position = main.outer_position().unwrap_or(PhysicalPosition::new(80, 80));
+    force_companion_window_repaint(&main, position.x, position.y);
+    let _ = main.set_focus();
+    let _ = show_tools_window(app);
+    Ok(())
+}
+
+#[tauri::command]
 fn hide_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
     let Some(tasks) = app.get_webview_window("tasks") else {
         return Ok(());
@@ -1548,6 +1779,16 @@ fn hide_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     };
     let result = hide_companion_window(&gamepath);
+    let _ = emit_virtual_cursor_frames_changed(&app);
+    result
+}
+
+#[tauri::command]
+fn hide_tools_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(tools) = app.get_webview_window("tools") else {
+        return Ok(());
+    };
+    let result = hide_companion_window(&tools);
     let _ = emit_virtual_cursor_frames_changed(&app);
     result
 }
@@ -1585,6 +1826,18 @@ fn toggle_gamepath_window(app: tauri::AppHandle) -> Result<(), String> {
         result
     } else {
         show_gamepath_window(app)
+    }
+}
+
+#[tauri::command]
+fn toggle_tools_window(app: tauri::AppHandle) -> Result<(), String> {
+    let tools = ensure_tools_window(&app)?;
+    if tools.is_visible().unwrap_or(false) {
+        let result = hide_companion_window(&tools);
+        let _ = emit_virtual_cursor_frames_changed(&app);
+        result
+    } else {
+        show_tools_window(app)
     }
 }
 
@@ -1689,6 +1942,14 @@ fn set_main_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(
 }
 
 #[tauri::command]
+fn set_app_capture_exclusion(app: tauri::AppHandle, excluded: bool) -> Result<(), String> {
+    if excluded && capture_protection_boot_reset_active() {
+        return set_app_capture_exclusion_state(&app, false);
+    }
+    set_app_capture_exclusion_state(&app, excluded)
+}
+
+#[tauri::command]
 fn set_virtual_cursor_global_controls(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     set_virtual_cursor_global_controls_state(&app, enabled)
 }
@@ -1715,6 +1976,7 @@ fn set_virtual_cursor_window_move(
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
 
@@ -1750,6 +2012,7 @@ fn set_virtual_cursor_active_window(app: tauri::AppHandle, label: String) -> Res
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
     let frames = collect_virtual_cursor_window_frames(&app)?;
@@ -1794,6 +2057,7 @@ fn set_virtual_cursor_window_position(
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported virtual cursor window".to_string()),
     };
     let frames = collect_virtual_cursor_window_frames(&app)?;
@@ -1846,6 +2110,7 @@ fn focus_virtual_cursor_text_entry(
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1886,6 +2151,7 @@ fn click_virtual_cursor_position(
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1913,6 +2179,7 @@ fn focus_companion_window(app: tauri::AppHandle, label: String) -> Result<(), St
         "tasks" => "tasks",
         "search" => "search",
         "gamepath" => "gamepath",
+        "tools" => "tools",
         _ => return Err("unsupported companion window".to_string()),
     };
 
@@ -1935,7 +2202,7 @@ fn collect_virtual_cursor_window_frames(
     app: &tauri::AppHandle,
 ) -> Result<Vec<VirtualCursorWindowFrame>, String> {
     let mut frames = Vec::new();
-    for label in ["main", "tasks", "search", "gamepath"] {
+    for label in ["main", "tasks", "search", "gamepath", "tools"] {
         let Some(window) = app.get_webview_window(label) else {
             continue;
         };
@@ -2093,7 +2360,7 @@ fn virtual_cursor_transfer_window(
     id: String,
 ) -> Result<(), String> {
     match label.as_str() {
-        "main" | "tasks" | "search" | "gamepath" => {}
+        "main" | "tasks" | "search" | "gamepath" | "tools" => {}
         _ => return Err("unsupported virtual cursor transfer target".to_string()),
     }
 
@@ -2119,7 +2386,7 @@ fn virtual_cursor_transfer_at_edge(
     id: String,
 ) -> Result<Option<String>, String> {
     match source.as_str() {
-        "main" | "tasks" | "search" | "gamepath" => {}
+        "main" | "tasks" | "search" | "gamepath" | "tools" => {}
         _ => return Err("unsupported virtual cursor source".to_string()),
     }
     match edge.as_str() {
@@ -2201,7 +2468,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-                if matches!(window.label(), "main" | "tasks" | "search" | "gamepath") {
+                if matches!(window.label(), "main" | "tasks" | "search" | "gamepath" | "tools") {
                     let _ = emit_virtual_cursor_frames_changed(window.app_handle());
                 }
             }
@@ -2240,6 +2507,10 @@ pub fn run() {
                                 }
                                 return;
                             }
+                        }
+                        if shortcut.matches(Modifiers::CONTROL, Code::KeyG) {
+                            let _ = wake_standby_window(app);
+                            return;
                         }
                         match shortcut.key {
                             Code::F4 => {
@@ -2284,6 +2555,13 @@ pub fn run() {
             if let Some(main) = app.get_webview_window("main") {
                 clear_window_capture_protection(&main);
                 let _ = main.eval("localStorage.setItem('protect-mode', 'off');");
+                let _ = main.set_size(LogicalSize::new(720.0, 760.0));
+                let _ = main.set_position(PhysicalPosition::new(80_i32, 80_i32));
+                let _ = main.set_always_on_top(true);
+                let _ = main.set_background_color(Some(Color(0, 0, 0, 0)));
+                let _ = main.show();
+                force_companion_window_repaint(&main, 80, 80);
+                let _ = main.set_focus();
             }
             start_virtual_cursor_keyboard_poll(app.handle().clone());
             start_virtual_cursor_gamepad_poll(app.handle().clone());
@@ -2301,6 +2579,9 @@ pub fn run() {
                 let shortcut = Shortcut::new(None, key);
                 let _ = app.global_shortcut().register(shortcut);
             }
+            let _ = app
+                .global_shortcut()
+                .register(Shortcut::new(Some(Modifiers::CONTROL), Code::KeyG));
 
             if let Some(hud) = app.get_webview_window("hud") {
                 clear_window_capture_protection(&hud);
@@ -2324,6 +2605,19 @@ pub fn run() {
                 let _ = gamepath.set_always_on_top(true);
                 let _ = hide_companion_window(&gamepath);
             }
+            if let Some(tools) = app.get_webview_window("tools") {
+                clear_window_capture_protection(&tools);
+                let _ = tools.set_always_on_top(true);
+                let _ = hide_companion_window(&tools);
+            }
+            if let Some(standby) = app.get_webview_window("standby") {
+                clear_window_capture_protection(&standby);
+                let _ = standby.set_always_on_top(true);
+                let _ = standby.set_ignore_cursor_events(true);
+                let _ = standby.set_focusable(false);
+                let _ = hide_companion_window(&standby);
+            }
+            let _ = show_tools_window(app.handle().clone());
 
             // 在 Windows 上設定視窗截圖排除
             Ok(())
@@ -2337,18 +2631,29 @@ pub fn run() {
             show_tasks_window,
             show_search_window,
             show_gamepath_window,
+            show_tools_window,
+            show_standby_window,
             hide_tasks_window,
             hide_search_window,
             hide_gamepath_window,
+            hide_tools_window,
+            hide_standby_window,
             toggle_tasks_window,
             toggle_search_window,
             toggle_gamepath_window,
+            toggle_tools_window,
+            set_standby_window_expanded,
+            set_standby_window_mode,
+            set_standby_pointer_passthrough,
+            collapse_main_to_standby,
+            restore_main_from_standby,
             begin_gamepath_window_drag,
             game_search_browser_back,
             game_search_browser_forward,
             game_search_browser_reload,
             game_search_browser_navigate,
             set_main_capture_exclusion,
+            set_app_capture_exclusion,
             set_virtual_cursor_global_controls,
             set_virtual_cursor_text_entry,
             set_virtual_cursor_window_move,

@@ -1,6 +1,14 @@
 import { initVirtualCursor } from "./virtualCursor.js";
 
-document.addEventListener("DOMContentLoaded", async () => {
+const runWhenDomReady = (callback) => {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", callback, { once: true });
+  } else {
+    callback();
+  }
+};
+
+runWhenDomReady(async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.();
   const events = tauri.event || {};

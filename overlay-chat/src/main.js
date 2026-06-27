@@ -1,17 +1,47 @@
+import lottie from "lottie-web";
+import cosmosAnimation from "./assets/cosmos-lottie.json";
 import { initVirtualCursor } from "./virtualCursor.js";
 
-document.addEventListener("DOMContentLoaded", async () => {
+const runWhenDomReady = (callback) => {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", callback, { once: true });
+  } else {
+    callback();
+  }
+};
+
+runWhenDomReady(async () => {
   const tauri = window.__TAURI__ || {};
   const appWindow = tauri.window?.getCurrentWindow?.();
   const globalShortcut = tauri.globalShortcut || {};
   const events = tauri.event || {};
   const invoke = tauri.core?.invoke;
+  const cosmosLottie = document.getElementById("cosmosLottie");
+  if (cosmosLottie) {
+    try {
+      const animation = lottie.loadAnimation({
+        container: cosmosLottie,
+        renderer: "svg",
+        loop: true,
+        autoplay: true,
+        animationData: cosmosAnimation,
+        rendererSettings: {
+          preserveAspectRatio: "xMidYMid meet"
+        }
+      });
+      window.addEventListener("beforeunload", () => animation.destroy(), { once: true });
+    } catch (err) {
+      console.warn("Could not start Cosmos lottie icon:", err);
+    }
+  }
 
   const API_BASE = "http://127.0.0.1:8000";
 
   const closeBtn = document.getElementById("closeBtn");
   const minBtn = document.getElementById("minBtn");
   const maxBtn = document.getElementById("maxBtn");
+  const toolsBtn = document.getElementById("toolsBtn");
+  const standbyBtn = document.getElementById("standbyBtn");
   const searchBtn = document.getElementById("searchBtn");
   const tasksBtn = document.getElementById("tasksBtn");
   const gamepathBtn = document.getElementById("gamepathBtn");
@@ -27,6 +57,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const voiceBtn = document.getElementById("voiceBtn");
   const gameSelect = document.getElementById("gameSelect");
   const gameAutoBtn = document.getElementById("gameAutoBtn");
+  const liveStateBtn = document.getElementById("liveStateBtn");
+  const liveStateAnalyzeBtn = document.getElementById("liveStateAnalyzeBtn");
   const hudBtn = document.getElementById("hudBtn");
   const hudTestBtn = document.getElementById("hudTestBtn");
   const protectBtn = document.getElementById("protectBtn");
@@ -122,7 +154,52 @@ document.addEventListener("DOMContentLoaded", async () => {
   let lastSentVoiceText = "";
   let lastSentVoiceAt = 0;
   let captureProtectionEnabled = false;
+  let liveStateEnabled = localStorage.getItem("live-state") === "on";
+  let liveStatePollTimer = null;
+  let latestLiveStateStatus = null;
+  let selectedGameId = localStorage.getItem("currentGameId") || "";
+  let selectedGameName = "";
+  let gameCatalog = [{ id: "", name: "Game" }];
+  let toolPanelStateFrame = 0;
+  let virtualCursorEnabled = false;
+  let standbyWindowMode = "collapsed";
+  let standbyDetailedConversation = false;
   localStorage.setItem("protect-mode", "off");
+
+  const normalizeStandbyMode = (value) => {
+    const normalized = String(value || "").toLowerCase();
+    if (normalized === "collapsed" || normalized === "typein" || normalized === "thinking" || normalized === "response" || normalized === "detail") {
+      return normalized;
+    }
+    return null;
+  };
+
+  const buildToolPanelState = () => ({
+    games: gameCatalog,
+    selectedGameId,
+    selectedGameName: selectedGameName || selectedGameId,
+    gameDetectMode,
+    autoMode: gameDetectMode !== "manual",
+    liveStateEnabled,
+    liveStateStatus: latestLiveStateStatus || {},
+    captureProtectionEnabled,
+    virtualCursorEnabled,
+    perfEnabled: document.body.classList.contains("perf-mode"),
+    opacity: Number(localStorage.getItem("ui-opacity") || "100")
+  });
+
+  const syncToolPanelState = (immediate = false) => {
+    const emitState = () => {
+      toolPanelStateFrame = 0;
+      events.emit?.("tool-panel-state", buildToolPanelState()).catch(() => {});
+    };
+    if (immediate) {
+      emitState();
+      return;
+    }
+    if (toolPanelStateFrame) return;
+    toolPanelStateFrame = window.requestAnimationFrame(emitState);
+  };
 
   localStorage.removeItem("hud-overlay");
   await invoke?.("hide_hud_window").catch((err) => {
@@ -137,6 +214,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (opacityValue) opacityValue.textContent = String(numeric);
     localStorage.setItem("ui-opacity", String(numeric));
     events.emit?.("ui-opacity-updated", { opacity: numeric }).catch(() => {});
+    syncToolPanelState();
   };
   applyOpacity(localStorage.getItem("ui-opacity") || "100");
   opacitySlider?.addEventListener("input", (event) => applyOpacity(event.target.value));
@@ -145,6 +223,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   await invoke?.("set_main_capture_exclusion", { excluded: false }).catch((err) => {
     console.warn("Could not clear window capture exclusion:", err);
+  });
+  await invoke?.("set_app_capture_exclusion", { excluded: false }).catch((err) => {
+    console.warn("Could not clear app capture exclusion:", err);
   });
 
   if (localStorage.getItem("perf-mode") === "true") {
@@ -160,6 +241,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         : "Screenshot protection off";
     }
     localStorage.setItem("protect-mode", captureProtectionEnabled ? "software-redact" : "off");
+    syncToolPanelState();
   };
 
   updateProtectButton();
@@ -170,6 +252,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     windowLabel: "main",
     controller: true,
     onStateChange: (enabled) => {
+      virtualCursorEnabled = Boolean(enabled);
       virtualCursorBtn?.classList.toggle("active", enabled);
       if (virtualCursorBtn) {
         setButtonContent(virtualCursorBtn, "cursor", enabled ? "Cursor" : "Cursor");
@@ -177,6 +260,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           ? "Companion virtual cursor on (F11). WASD/arrows move, Tab targets, Enter clicks, Esc exits."
           : "Companion virtual cursor (F11)";
       }
+      syncToolPanelState();
     }
   });
   virtualCursorBtn?.addEventListener("click", () => virtualCursor.toggle());
@@ -200,6 +284,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     await invoke?.("set_main_capture_exclusion", { excluded: captureProtectionEnabled }).catch((err) => {
       appendMessage(`Protect command failed: ${err?.message || err}`, "bot");
     });
+    if (!captureProtectionEnabled && liveStateEnabled) {
+      await setAppCaptureExclusion(true);
+    }
     appendMessage(
       captureProtectionEnabled
         ? "Content protection on. Main, Task, Game Search, and HUD are controlled by this lock; app screenshots still ignore them cleanly."
@@ -213,7 +300,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   perfBtn?.addEventListener("click", () => {
     const enabled = document.body.classList.toggle("perf-mode");
     localStorage.setItem("perf-mode", enabled ? "true" : "false");
+    syncToolPanelState();
   });
+
+  const setAppCaptureExclusion = async (excluded, { quiet = true } = {}) => {
+    if (!invoke) return false;
+    try {
+      await invoke("set_app_capture_exclusion", { excluded });
+      if (excluded) await new Promise((resolve) => window.setTimeout(resolve, 70));
+      return true;
+    } catch (err) {
+      if (!quiet) appendMessage(`Capture exclusion failed: ${err?.message || err}`, "bot");
+      console.warn("App capture exclusion unavailable:", err);
+      return false;
+    }
+  };
 
   const clearHudOverlay = async () => {
     localStorage.removeItem("hud-overlay");
@@ -343,18 +444,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     return false;
   };
 
-  hudBtn?.addEventListener("click", async () => {
+  const handleHudClear = async () => {
     await clearHudOverlay();
     appendMessage("HUD cleared.", "bot");
-  });
+  };
 
-  hudTestBtn?.addEventListener("click", async () => {
+  const handleHudTest = async () => {
     const target = hudTargetFromSource(null);
     target.imageWidth = Number(target.width);
     target.imageHeight = Number(target.height);
     const ok = await showHudOverlay(makeTestOverlay(target), null);
     appendMessage(ok ? "HUD test sent." : `HUD test failed. ${lastHudError}`, "bot");
-  });
+  };
+
+  hudBtn?.addEventListener("click", handleHudClear);
+  hudTestBtn?.addEventListener("click", handleHudTest);
 
   let chatScrollFrame = 0;
   const scrollChatToBottom = () => {
@@ -460,6 +564,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     chatWindow.appendChild(msgDiv);
     scrollChatToBottom();
     return msgDiv;
+  };
+
+  const updateBotMessage = (msgDiv, text) => {
+    if (!msgDiv) return;
+    msgDiv.textContent = "";
+    renderFormattedMessage(msgDiv, text || "");
+    scrollChatToBottom();
   };
 
   const createBotResponseMessage = (statusText) => {
@@ -760,6 +871,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const shouldAutoCapture = (text) => AUTO_CAPTURE_RE.test(text || "");
   const shouldTaskIntent = (text) => TASK_INTENT_RE.test(text || "") || VOICE_TASK_INTENT_RE.test(text || "");
+  const isScreenshotIntentRoute = (route) => String(route || "").trim().startsWith("screenshot_");
 
   const routeUserIntent = async (text, signal = null) => {
     const trimmed = String(text || "").trim();
@@ -770,7 +882,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: trimmed,
-          game_id: gameSelect?.value || null
+          game_id: selectedGameId || null
         }),
         signal
       });
@@ -847,22 +959,186 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const captureScreen = async (profile = "turbo") => {
     const monitor = selectedCaptureMonitor();
+    const exclusionApplied = await setAppCaptureExclusion(true);
+    const restoreAfterCapture = exclusionApplied && !captureProtectionEnabled && !liveStateEnabled;
     const params = new URLSearchParams({
       mode: monitor ? "screen" : "foreground",
-      // App-initiated captures should always ignore the companion overlay,
-      // including the virtual cursor layer, so the model sees the game.
+      // App-initiated captures use Tauri capture exclusion first. The backend
+      // keeps this flag for metadata/fallback policy but should not move windows.
       redact: "1",
       profile
     });
-    if (monitor) params.set("monitor", monitor);
-    const res = await fetch(`${API_BASE}/screenshot?${params.toString()}`);
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
+    try {
+      if (monitor) params.set("monitor", monitor);
+      const res = await fetch(`${API_BASE}/screenshot?${params.toString()}`);
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Screenshot failed: ${res.status}${detail ? ` ${detail}` : ""}`);
+      }
+      const data = await res.json();
+      if (!data.image_base64) throw new Error("Screenshot API returned no image.");
+      return data;
+    } finally {
+      if (restoreAfterCapture) await setAppCaptureExclusion(false);
     }
-    const data = await res.json();
-    if (!data.image_base64) throw new Error("Screenshot API returned no image.");
-    return data;
+  };
+
+  const liveStateCapturePayload = () => {
+    const monitor = selectedCaptureMonitor();
+    return {
+      mode: monitor ? "screen" : "foreground",
+      monitor: monitor ? Number(monitor) : null
+    };
+  };
+
+  const setLiveStateUi = (status = {}) => {
+    latestLiveStateStatus = status || {};
+    const enabled = Boolean(status.enabled);
+    const state = String(status.status || (enabled ? "Watching" : "Off"));
+    liveStateEnabled = enabled;
+    localStorage.setItem("live-state", enabled ? "on" : "off");
+    liveStateBtn?.classList.toggle("active", enabled && !["Off", "Error"].includes(state));
+    liveStateBtn?.classList.toggle("thinking", state === "Thinking");
+    liveStateBtn?.classList.toggle("paused", state === "Paused" || state === "uncertain");
+    liveStateBtn?.classList.toggle("error", state === "Error" || state === "capture_failed");
+    if (liveStateBtn) {
+      const label = state === "Thinking"
+        ? "Think"
+        : state === "Paused"
+          ? "Pause"
+          : state === "Error" || state === "capture_failed"
+            ? "Err"
+            : enabled
+              ? "Watch"
+              : "Live";
+      setButtonContent(liveStateBtn, enabled ? "radio" : "square", label);
+      const scene = status.scene ? ` Scene: ${status.scene}` : "";
+      const error = status.last_error ? ` Error: ${status.last_error}` : "";
+      liveStateBtn.title = `Live State: ${state}.${scene}${error}`;
+    }
+    if (liveStateAnalyzeBtn) {
+      liveStateAnalyzeBtn.disabled = state === "Thinking";
+      liveStateAnalyzeBtn.title = state === "Thinking"
+        ? "Live State is analyzing now"
+        : "Scan current screen with Hermes agent";
+    }
+    syncToolPanelState();
+  };
+
+  const refreshLiveStateStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/live-state/status`);
+      if (!res.ok) throw new Error(`Live State status ${res.status}`);
+      const status = await res.json();
+      setLiveStateUi(status);
+      return status;
+    } catch (err) {
+      if (liveStateBtn) {
+        liveStateBtn.classList.add("error");
+        setButtonContent(liveStateBtn, "square", "Err");
+        liveStateBtn.title = `Live State status unavailable: ${err.message || err}`;
+      }
+      return null;
+    }
+  };
+
+  const setLiveStatePolling = (enabled) => {
+    if (liveStatePollTimer) {
+      window.clearInterval(liveStatePollTimer);
+      liveStatePollTimer = null;
+    }
+    if (enabled) {
+      liveStatePollTimer = window.setInterval(() => {
+        refreshLiveStateStatus().catch(() => {});
+      }, 5000);
+    }
+  };
+
+  const startLiveState = async () => {
+    const payload = liveStateCapturePayload();
+    await setAppCaptureExclusion(true);
+    try {
+      const res = await fetch(`${API_BASE}/live-state/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(`Live State start failed: ${res.status}`);
+      const status = await res.json();
+      setLiveStateUi(status);
+      setLiveStatePolling(true);
+      return status;
+    } catch (err) {
+      if (!captureProtectionEnabled) await setAppCaptureExclusion(false);
+      throw err;
+    }
+  };
+
+  const stopLiveState = async () => {
+    const res = await fetch(`${API_BASE}/live-state/stop`, { method: "POST" });
+    if (!res.ok) throw new Error(`Live State stop failed: ${res.status}`);
+    const status = await res.json();
+    setLiveStateUi(status);
+    setLiveStatePolling(false);
+    if (!captureProtectionEnabled) await setAppCaptureExclusion(false);
+    return status;
+  };
+
+  const analyzeLiveStateNow = async () => {
+    const payload = { ...liveStateCapturePayload(), force: true };
+    const exclusionApplied = await setAppCaptureExclusion(true);
+    const restoreAfterAnalyze = exclusionApplied && !captureProtectionEnabled && !liveStateEnabled;
+    if (liveStateAnalyzeBtn) liveStateAnalyzeBtn.disabled = true;
+    setButtonContent(liveStateAnalyzeBtn, "loader", "Scan");
+    try {
+      const res = await fetch(`${API_BASE}/live-state/analyze-now`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(`Live State analyze failed: ${res.status}`);
+      const data = await res.json();
+      setLiveStateUi(data.status || {});
+      return data;
+    } finally {
+      setButtonContent(liveStateAnalyzeBtn, "target", "Scan");
+      if (liveStateAnalyzeBtn) liveStateAnalyzeBtn.disabled = false;
+      if (restoreAfterAnalyze) await setAppCaptureExclusion(false);
+    }
+  };
+
+  const formatLiveStateResult = (data) => {
+    const status = data?.status || {};
+    const state = data?.state || {};
+    if (state.scene) {
+      const reason = status.last_skip_reason || state.last_skip_reason || "";
+      const error = status.last_error || state.last_error || "";
+      const retainedPrevious = reason === "parse_failed_retained_previous";
+      const headline = retainedPrevious
+        ? "Live State 這次輸出格式不完整，已保留上一筆有效狀態。"
+        : data?.fresh
+        ? "Live State 已更新。"
+        : "Live State 目前使用上一筆可用狀態。";
+      const objects = Array.isArray(state.visible_objects) && state.visible_objects.length
+        ? `\n可見物件：${state.visible_objects.slice(0, 5).join("、")}`
+        : "";
+      const ui = Array.isArray(state.visible_ui) && state.visible_ui.length
+        ? `\n畫面 UI：${state.visible_ui.slice(0, 4).join("、")}`
+        : "";
+      return [
+        headline,
+        `場景：${state.scene}`,
+        `狀態：${state.player_status || "未知"} / 意圖：${state.possible_intent || "未知"}`,
+        `信心：${Math.round(Number(state.confidence || 0) * 100)}%${objects}${ui}`,
+        retainedPrevious && error ? `本次未更新原因：${error}` : ""
+      ].filter(Boolean).join("\n");
+    }
+    const reason = status.last_skip_reason || state.last_skip_reason || "";
+    const error = status.last_error || state.last_error || "";
+    if (reason === "image_input_unsupported" || /image input is not supported|mmproj/i.test(error)) {
+      return "Live State 截圖成功，但目前地端 Qwen 是文字 GGUF，不能讀圖片。需要改成支援 vision/mmproj 的地端模型，或把 Live State 改走雲端 vision。";
+    }
+    return `Live State 沒有產生可用狀態。${reason ? `\n原因：${reason}` : ""}${error ? `\n錯誤：${error}` : ""}`.trim();
   };
 
   const appendUserMessage = (text, imageBase64, mimeType = "image/jpeg") => {
@@ -917,7 +1193,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const openSearchWindow = async () => {
-    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    const game = selectedGameId || localStorage.getItem("currentGameId") || "";
     localStorage.setItem("currentGameId", game);
     localStorage.removeItem("igpu-game-search-pending-keyword");
     localStorage.removeItem("igpu-game-search-auto-run");
@@ -942,7 +1218,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const openGamePathWindow = async () => {
-    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    const game = selectedGameId || localStorage.getItem("currentGameId") || "";
     localStorage.setItem("currentGameId", game);
     if (invoke) {
       await invoke("show_gamepath_window").catch((err) => {
@@ -962,8 +1238,31 @@ document.addEventListener("DOMContentLoaded", async () => {
     await setVirtualCursorActiveWindow("main");
   };
 
+  const restoreMainFromStandby = async () => {
+    await invoke?.("restore_main_from_standby").catch(async (err) => {
+      console.warn("Could not restore main from standby:", err);
+      await appWindow?.show?.().catch(() => {});
+      await appWindow?.setFocus?.().catch(() => {});
+    });
+    await setVirtualCursorActiveWindow("main");
+  };
+
+  const openToolsWindow = async (options = {}) => {
+    const { quiet = false, retry = false } = options;
+    if (invoke) {
+      await invoke("show_tools_window").catch((err) => {
+        if (retry) {
+          window.setTimeout(() => openToolsWindow({ quiet: true }), 450);
+        } else if (!quiet) {
+          appendMessage(`Tools panel failed: ${err?.message || err}`, "bot");
+        }
+      });
+    }
+    syncToolPanelState(true);
+  };
+
   const notifyGamePathChanged = async (details = {}) => {
-    const game = gameSelect?.value || localStorage.getItem("currentGameId") || "";
+    const game = selectedGameId || localStorage.getItem("currentGameId") || "";
     const payload = {
       ...details,
       game,
@@ -973,6 +1272,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     await events.emit?.("gamepath:changed", payload).catch(() => {});
   };
 
+  toolsBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    openToolsWindow();
+  });
+  const collapseToStandby = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await invoke?.("collapse_main_to_standby").catch((err) => {
+      appendMessage(`Standby failed: ${err?.message || err}`, "bot");
+    });
+  };
+
+  standbyBtn?.addEventListener("pointerdown", collapseToStandby);
+  standbyBtn?.addEventListener("click", collapseToStandby);
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target?.closest?.("#standbyBtn")) return;
+    collapseToStandby(event);
+  }, true);
   tasksBtn?.addEventListener("click", (event) => {
     event.preventDefault();
     openTasksWindow();
@@ -1216,7 +1533,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       confidence: Number.isFinite(Number(analysis?.confidence)) ? Number(analysis.confidence) : 0.4,
       summary: analysis?.summary || "",
       note: note || "",
-      gameId: analysis?.game_id || gameSelect?.value || "global",
+      gameId: analysis?.game_id || selectedGameId || "global",
       sourceTitle: captureSource?.window_title || "",
       sourceSize: sourceWidth && sourceHeight ? `${sourceWidth}x${sourceHeight}` : "",
       memoryId: analysis?.memory_item?.id || null,
@@ -1271,7 +1588,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: JSON.stringify({
           message: originalNote,
           image_base64: imageBase64,
-          game_id: gameSelect?.value || null,
+          game_id: selectedGameId || null,
           source_title: captureSource?.window_title || ""
         }),
         signal: context.signal || abortController?.signal
@@ -1314,21 +1631,35 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const currentGameLabel = () => {
     const selected = gameSelect?.selectedOptions?.[0]?.textContent?.trim() || "";
-    return selected && selected.toLowerCase() !== "game" ? selected : (gameSelect?.value || "");
+    if (selected && selected.toLowerCase() !== "game") return selected;
+    if (selectedGameName) return selectedGameName;
+    const known = gameCatalog.find((item) => item.id === selectedGameId);
+    return known?.name || selectedGameId;
   };
 
   const ensureGameOption = (gameId, name = "") => {
-    if (!gameSelect) return null;
     const value = String(gameId || "").trim();
     if (!value) return null;
+    const label = gameOptionLabel(value, name);
+    const existing = gameCatalog.find((item) => item.id === value);
+    if (existing) {
+      if (label) existing.name = label;
+    } else {
+      gameCatalog.push({ id: value, name: label || value });
+    }
+    gameCatalog.sort((a, b) => (a.id ? 1 : -1) - (b.id ? 1 : -1) || a.name.localeCompare(b.name));
+    if (!gameSelect) {
+      syncToolPanelState();
+      return { value, textContent: label || value };
+    }
     let option = Array.from(gameSelect.options).find((item) => item.value === value);
     if (!option) {
       option = document.createElement("option");
       option.value = value;
       gameSelect.appendChild(option);
     }
-    const label = gameOptionLabel(value, name);
     if (label) option.textContent = label;
+    syncToolPanelState();
     return option;
   };
 
@@ -1351,19 +1682,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     gameDetectMode = mode === "manual" ? "manual" : "auto";
     localStorage.setItem("game-detect-mode", gameDetectMode);
     updateGameAutoButton();
+    syncToolPanelState();
   };
 
   const applyGameSelection = (gameId, name = "", options = {}) => {
-    if (!gameSelect) return false;
     const value = String(gameId || "").trim();
-    const previous = gameSelect.value || "";
+    const previous = selectedGameId || "";
     if (value) ensureGameOption(value, name);
-    gameSelect.value = value;
+    selectedGameId = value;
+    selectedGameName = value ? gameOptionLabel(value, name) : "";
+    if (gameSelect) gameSelect.value = value;
     localStorage.setItem("currentGameId", value);
     if (options.emit !== false && (options.forceEmit || previous !== value)) {
       events.emit?.("search:context", { game: value, source: options.source || "game-select" }).catch(() => {});
       events.emit?.("gamepath:context", { game: value, source: options.source || "game-select" }).catch(() => {});
     }
+    syncToolPanelState();
     return previous !== value;
   };
 
@@ -1380,13 +1714,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       throw new Error(`Game learn failed: ${resp.status}${detail ? ` ${detail}` : ""}`);
     }
     const data = await resp.json();
-    if (data?.profile?.name) ensureGameOption(value, data.profile.name);
+    if (data?.profile?.name) {
+      ensureGameOption(value, data.profile.name);
+      if (value === selectedGameId) selectedGameName = gameOptionLabel(value, data.profile.name);
+    }
     updateGameAutoButton(data?.detection || null);
+    syncToolPanelState();
     return data;
   };
 
   const pollActiveGame = async (options = {}) => {
-    if (!gameSelect || !isGameAutoMode()) return null;
+    if (!isGameAutoMode()) return null;
     try {
       const resp = await fetch(`${API_BASE}/active-game`, { cache: "no-store" });
       if (!resp.ok) return null;
@@ -1409,22 +1747,27 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   const loadGuideGames = async () => {
-    if (!gameSelect) return;
     try {
       const resp = await fetch(`${API_BASE}/game-profiles`);
       const data = await resp.json();
       const savedGameId = localStorage.getItem("currentGameId") || "";
       const profiles = data.profiles || {};
-      gameSelect.innerHTML = '<option value="">Game</option>';
+      gameCatalog = [{ id: "", name: "Game" }];
+      if (gameSelect) gameSelect.innerHTML = '<option value="">Game</option>';
       for (const game of data.games || []) {
         ensureGameOption(game, profiles[game]?.name || game);
       }
       if (savedGameId) ensureGameOption(savedGameId, profiles[savedGameId]?.name || savedGameId);
-      gameSelect.value = savedGameId;
+      selectedGameId = savedGameId;
+      const savedProfileName = profiles[savedGameId]?.name || savedGameId;
+      selectedGameName = savedGameId ? gameOptionLabel(savedGameId, savedProfileName) : "";
+      if (gameSelect) gameSelect.value = savedGameId;
       updateGameAutoButton();
+      syncToolPanelState();
     } catch (err) {
       console.warn("Guide list unavailable:", err);
       updateGameAutoButton();
+      syncToolPanelState();
     }
   };
 
@@ -1435,16 +1778,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     learnCurrentGameMapping(gameId).catch((err) => console.warn("Game profile learn unavailable:", err));
   });
 
-  gameAutoBtn?.addEventListener("click", async () => {
+  const handleGameAutoToggle = async () => {
     const nextMode = isGameAutoMode() ? "manual" : "auto";
     setGameDetectMode(nextMode);
     if (nextMode === "auto") {
       const detection = await pollActiveGame({ announce: true });
       if (!detection?.game_id) appendMessage("Auto game: no foreground game detected yet.", "bot");
-    } else if (gameSelect?.value) {
-      learnCurrentGameMapping(gameSelect.value).catch((err) => console.warn("Game profile learn unavailable:", err));
+    } else if (selectedGameId) {
+      learnCurrentGameMapping(selectedGameId).catch((err) => console.warn("Game profile learn unavailable:", err));
     }
-  });
+    syncToolPanelState();
+  };
+
+  gameAutoBtn?.addEventListener("click", handleGameAutoToggle);
 
   await loadGuideGames();
   await pollActiveGame();
@@ -1453,11 +1799,155 @@ document.addEventListener("DOMContentLoaded", async () => {
     localStorage.setItem("capture-monitor", captureDisplaySelect.value || "auto");
   });
   await loadCaptureMonitors();
+  const initialLiveStateStatus = await refreshLiveStateStatus();
+  setLiveStatePolling(Boolean(initialLiveStateStatus?.enabled));
+  const handleLiveStateToggle = async () => {
+    try {
+      if (liveStateEnabled) {
+        await stopLiveState();
+        appendMessage("Live State 已關閉。", "bot");
+      } else {
+        const status = await startLiveState();
+        const scene = status?.scene ? `\n目前上一筆狀態：${status.scene}` : "";
+        appendMessage(`Live State 已開啟。\n背景觀察不會主動回覆；按 Scan 會擷取目前畫面並交給雲端 Hermes agent 分析。${scene}`, "bot");
+      }
+    } catch (err) {
+      appendMessage(`Live State failed: ${err.message || err}`, "bot");
+      await refreshLiveStateStatus();
+    }
+  };
+
+  const handleLiveStateAnalyze = async () => {
+    const pendingMsg = appendMessage("Scan 正在擷取目前畫面...\n接著會交給雲端 Hermes agent 分析。", "bot");
+    try {
+      if (liveStateAnalyzeBtn) liveStateAnalyzeBtn.disabled = true;
+      setButtonContent(liveStateAnalyzeBtn, "loader", "Scan");
+      const data = await captureScreen("turbo");
+      const imageBase64 = data.image_base64;
+      const imageMimeType = data.mime_type || "image/jpeg";
+      const captureSource = data.source || null;
+      const sourceWidth = data.source?.capture_width || data.original_width || data.width;
+      const sourceHeight = data.source?.capture_height || data.original_height || data.height;
+      updateBotMessage(
+        pendingMsg,
+        `Scan 已擷取 ${data.width}x${data.height}（來源 ${sourceWidth}x${sourceHeight}），正在送給 Hermes agent...`
+      );
+      appendUserMessage("Scan current game screen with Hermes.", imageBase64, imageMimeType);
+      await sendToAI(
+        [
+          "請透過這張目前遊戲畫面，用繁體中文幫玩家做短分析。",
+          "請優先回答：",
+          "1. 你判斷玩家目前可能在什麼狀態或場景。",
+          "2. 下一步可以做什麼，先給一句短教學，再補充必要細節；不要使用分級提示標籤。",
+          "3. 如果畫面不足以判斷，請明確說還需要玩家補什麼資訊。",
+          "不要主動暴雷；除非玩家問題需要，否則不要列來源。"
+        ].join("\n"),
+        imageBase64,
+        captureSource
+      );
+      await refreshLiveStateStatus();
+    } catch (err) {
+      updateBotMessage(pendingMsg, `Hermes Scan failed: ${err.message || err}`);
+      await refreshLiveStateStatus();
+    } finally {
+      setButtonContent(liveStateAnalyzeBtn, "target", "Scan");
+      if (liveStateAnalyzeBtn) liveStateAnalyzeBtn.disabled = false;
+    }
+  };
+
+  liveStateBtn?.addEventListener("click", handleLiveStateToggle);
+  liveStateAnalyzeBtn?.addEventListener("click", handleLiveStateAnalyze);
+
+  const handleToolPanelCommand = async (payload = {}) => {
+    const command = String(payload.command || "");
+    try {
+      switch (command) {
+        case "game_select": {
+          const gameId = String(payload.game_id || "");
+          setGameDetectMode("manual");
+          applyGameSelection(gameId, String(payload.name || gameId), {
+            source: "tools-panel",
+            forceEmit: true
+          });
+          if (gameId) {
+            learnCurrentGameMapping(gameId).catch((err) => console.warn("Game profile learn unavailable:", err));
+          }
+          break;
+        }
+        case "game_auto_toggle":
+          await handleGameAutoToggle();
+          break;
+        case "live_toggle":
+          await handleLiveStateToggle();
+          break;
+        case "live_scan":
+          await handleLiveStateAnalyze();
+          break;
+        case "open_search":
+          await openSearchWindow();
+          break;
+        case "open_tasks":
+          await openTasksWindow();
+          break;
+        case "open_gamepath":
+          await openGamePathWindow();
+          break;
+        case "hud_clear":
+          await handleHudClear();
+          break;
+        case "hud_test":
+          await handleHudTest();
+          break;
+        case "protect_toggle":
+          await toggleCaptureProtection();
+          break;
+        case "cursor_toggle":
+          virtualCursor.toggle();
+          break;
+        case "perf_toggle": {
+          const enabled = document.body.classList.toggle("perf-mode");
+          localStorage.setItem("perf-mode", enabled ? "true" : "false");
+          syncToolPanelState();
+          break;
+        }
+        case "opacity_set":
+          applyOpacity(payload.opacity);
+          break;
+        case "state_request":
+          syncToolPanelState(true);
+          break;
+        default:
+          if (command) console.warn("Unknown tool panel command:", command);
+      }
+    } finally {
+      syncToolPanelState();
+    }
+  };
+
+  await events.listen?.("tool-panel-command", (event) => {
+    handleToolPanelCommand(event.payload || {}).catch((err) => {
+      appendMessage(`Tool panel command failed: ${err?.message || err}`, "bot");
+      syncToolPanelState();
+    });
+  }).catch(() => {});
+  await events.listen?.("tool-panel-ready", () => {
+    syncToolPanelState(true);
+  }).catch(() => {});
+  await openToolsWindow({ quiet: true, retry: true });
 
   const setBusy = (busy) => {
+    const nextMode = busy
+      ? (standbyWindowMode === "collapsed" ? "collapsed" : "thinking")
+      : (standbyDetailedConversation ? "detail" : (standbyWindowMode === "response" || standbyWindowMode === "detail" ? standbyWindowMode : (standbyWindowMode === "typein" || standbyWindowMode === "thinking" ? "typein" : "collapsed")));
+
     isSending = busy;
     sendBtn.style.display = busy ? "none" : "block";
     stopBtn.style.display = busy ? "block" : "none";
+
+    events.emit?.("standby:set-mode", {
+      expanded: nextMode !== "collapsed",
+      mode: nextMode
+    }).catch(() => {});
   };
 
   const setVoiceRecording = (recording) => {
@@ -1976,12 +2466,64 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
     let collected = "";
     let showedOverlay = false;
+    let lastStandbyResponseText = "";
+    let lastStandbyDetailText = "";
+    let latestResponseFormat = null;
+
+    const formatStandbyResponseText = (value) => {
+      const cleaned = String(value || "")
+        .replace(/```[\s\S]*?```/g, " ")
+        .replace(/[`*_>#-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (cleaned.length <= 118) return cleaned;
+      return `${cleaned.slice(0, 115).trim()}...`;
+    };
+
+    const normalizeResponseFormat = (payload) => {
+      const source = payload?.response_format || payload || {};
+      const shortText = String(source.short ?? source.Short ?? "").trim();
+      const longText = String(source.long ?? source.Long ?? source.content ?? "").trim();
+      if (!shortText && !longText) return null;
+      return {
+        short: shortText || formatStandbyResponseText(longText),
+        long: longText || shortText
+      };
+    };
+
+    const emitStandbyResponse = (shortText, longText) => {
+      if (standbyWindowMode === "collapsed") return;
+      const responseText = String(shortText || "").trim();
+      const detailText = String(longText || shortText || "").trim();
+      if (!responseText || (responseText === lastStandbyResponseText && detailText === lastStandbyDetailText)) return;
+      lastStandbyResponseText = responseText;
+      lastStandbyDetailText = detailText;
+      const responseMode = standbyDetailedConversation || standbyWindowMode === "detail" ? "detail" : "response";
+      standbyWindowMode = responseMode;
+      events.emit?.("standby:set-response", {
+        text: responseText,
+        detailText,
+        question: text,
+        title: selectedGameName || selectedGameId || "Game Companion",
+        mode: responseMode
+      }).catch(() => {});
+    };
+
+    const syncStandbyResponse = () => {
+      if (latestResponseFormat) {
+        emitStandbyResponse(latestResponseFormat.short, latestResponseFormat.long);
+        return;
+      }
+      const detailText = collected.trim();
+      emitStandbyResponse(formatStandbyResponseText(detailText), detailText);
+    };
 
     try {
       const body = {
         message: text,
-        game_id: gameSelect?.value || null,
-        use_memory: true
+        game_id: selectedGameId || null,
+        use_memory: true,
+        use_live_state: liveStateEnabled
       };
       if (imageBase64) body.image_base64 = imageBase64;
 
@@ -2020,10 +2562,22 @@ document.addEventListener("DOMContentLoaded", async () => {
               scrollChatToBottom();
             }
           }
+          if (dataObj.response_format) {
+            const responseFormat = normalizeResponseFormat(dataObj.response_format);
+            if (responseFormat) {
+              latestResponseFormat = responseFormat;
+              collected = responseFormat.long || collected;
+              renderFormattedMessage(contentDiv, collected.trim());
+              syncStandbyResponse();
+              scrollChatToBottom();
+            }
+            return;
+          }
           const content = dataObj.content || "";
           if (!content) return;
           collected += content;
           renderFormattedMessage(contentDiv, collected.trimStart());
+          syncStandbyResponse();
           scrollChatToBottom();
         } catch (err) {
           console.warn("Could not parse SSE line:", line, err);
@@ -2129,8 +2683,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
 
-      if (!imageBase64 && intentRoute === "screenshot_hud") {
-        const status = appendMessage(`${formatIntentRouteStatus(intent, "screenshot_hud")}\nAuto-capturing screen...`, "bot");
+      if (!imageBase64 && isScreenshotIntentRoute(intentRoute)) {
+        const status = appendMessage(`${formatIntentRouteStatus(intent, intentRoute || "screenshot_visual")}\nQwen requested screen context. Auto-capturing for Hermes vision...`, "bot");
         try {
           screenshotBtn.disabled = true;
           setButtonContent(screenshotBtn, "camera", "Shot...");
@@ -2140,7 +2694,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           captureSource = data.source || null;
           const sourceWidth = data.source?.capture_width || data.original_width || data.width;
           const sourceHeight = data.source?.capture_height || data.original_height || data.height;
-          status.textContent = `Auto-captured ${data.width}x${data.height} from source ${sourceWidth}x${sourceHeight}.`;
+          status.textContent = `Auto-captured ${data.width}x${data.height} from source ${sourceWidth}x${sourceHeight}. Sending to cloud Hermes agent...`;
         } catch (err) {
           status.textContent = `Auto screenshot failed: ${err.message || err}`;
           setButtonContent(screenshotBtn, "camera", "Shot");
@@ -2241,7 +2795,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   minBtn?.addEventListener("click", async () => {
-    await appWindow?.minimize?.().catch(() => {});
+    await invoke?.("collapse_main_to_standby").catch(async (err) => {
+      console.warn("Could not collapse to standby:", err);
+      await appWindow?.minimize?.().catch(() => {});
+    });
   });
 
   maxBtn?.addEventListener("click", async () => {
@@ -2264,6 +2821,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (captureProtectionEnabled === enabled) return;
     captureProtectionEnabled = enabled;
     updateProtectButton();
+    if (!enabled && liveStateEnabled) {
+      setAppCaptureExclusion(true).catch(() => {});
+    }
     appendMessage(enabled ? "Content protection on. (F4)" : "Screenshot protection off. (F4)", "bot");
   }).catch(() => {});
   await events.listen?.("task-hotkey", () => {
@@ -2279,6 +2839,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   await events.listen?.("clear-hud-hotkey", async () => {
     await clearHudOverlay();
     appendMessage("HUD cleared.", "bot");
+  }).catch(() => {});
+
+  await events.listen?.("standby:submit", async (event) => {
+    const text = String(event.payload?.text || "").trim();
+    if (!text) return;
+    standbyDetailedConversation = event.payload?.source === "detail";
+    messageInput.value = text;
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await sendMessage(text);
+  }).catch(() => {});
+
+  await events.listen?.("standby:voice-toggle", async () => {
+    await restoreMainFromStandby();
+    toggleVoiceMode({ source: "standby" });
+  }).catch(() => {});
+
+  await events.listen?.("standby:mode-change", (event) => {
+    const mode = normalizeStandbyMode(event.payload?.mode)
+      || (event.payload?.expanded ? "typein" : "collapsed");
+    standbyWindowMode = mode;
+    if (mode === "detail") {
+      standbyDetailedConversation = true;
+    } else if (mode === "collapsed" || mode === "typein" || mode === "response") {
+      standbyDetailedConversation = false;
+    }
   }).catch(() => {});
 
   const applyGamePathAsk = async (entry = {}) => {

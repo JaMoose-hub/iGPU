@@ -1,0 +1,243 @@
+:root {
+  --ui-opacity: 1;
+  --ui-bg-alpha: 0.97;
+  --bg-base: 28, 30, 36;
+  --panel: rgba(255, 255, 255, 0.08);
+  --panel-strong: rgba(255, 255, 255, 0.13);
+  --border: rgba(255, 255, 255, 0.12);
+  --text: #f4f5fb;
+  --muted: rgba(244, 245, 251, 0.62);
+  --accent: #7c9cff;
+  --good: #65d49a;
+  --warn: #ffd166;
+  --danger: #ff6b6b;
+  --font: 'Segoe UI', Inter, Roboto, sans-serif;
+}
+
+html {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font);
+  background: rgba(var(--bg-base), var(--ui-bg-alpha));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-sizing: border-box;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.36);
+}
+
+.tools-drag {
+  height: 42px;
+  padding: 0 8px 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tools-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.tools-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tools-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tools-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+}
+
+.tool-section {
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-title {
+  font-size: 11px;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.tool-grid {
+  display: grid;
+  gap: 7px;
+}
+
+.tool-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tool-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.game-select,
+.tool-btn,
+.window-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font);
+  outline: none;
+}
+
+.game-select {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.game-select option {
+  background: #202024;
+  color: white;
+}
+
+.tool-btn {
+  height: 34px;
+  min-width: 0;
+  border-radius: 8px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, transform 0.08s;
+}
+
+.tool-btn.wide {
+  width: 100%;
+}
+
+.tool-btn:hover,
+.window-btn:hover {
+  background: var(--panel-strong);
+}
+
+.tool-btn:active,
+.window-btn:active {
+  transform: scale(0.96);
+}
+
+.tool-btn.active {
+  border-color: rgba(101, 212, 154, 0.58);
+  background: rgba(101, 212, 154, 0.15);
+  color: #caffdf;
+}
+
+.tool-btn.thinking {
+  border-color: rgba(255, 209, 102, 0.58);
+  color: var(--warn);
+}
+
+.tool-btn.error {
+  border-color: rgba(255, 107, 107, 0.58);
+  color: #ffc4c4;
+}
+
+.tool-btn:disabled {
+  opacity: 0.48;
+  cursor: default;
+  transform: none;
+}
+
+.window-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.opacity-row {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opacity-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.opacity-value {
+  width: 28px;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  line-height: 0;
+  pointer-events: none;
+}
+
+.icon svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+.button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
