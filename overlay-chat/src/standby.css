@@ -165,8 +165,8 @@ button {
   overflow: visible;
   background: url("./assets/standby-glow-001.svg") right center / 141px 282px no-repeat !important;
   filter: none;
-  opacity: 1;
-  animation: standbyCollapsedGlowBreath 3600ms ease-in-out infinite;
+  opacity: 0;
+  animation: none;
   -webkit-mask-image: none;
   mask-image: none;
 }
@@ -186,28 +186,39 @@ button {
 .standby-root.collapsed .standby-glow::before {
   background-image: url("./assets/standby-glow-002.svg");
   opacity: 0;
-  animation: standbyCollapsedGlowShiftA 5400ms ease-in-out infinite;
+  animation: none;
 }
 
 .standby-root.collapsed .standby-glow::after {
   background-image: url("./assets/standby-glow-003.svg");
   opacity: 0;
-  animation: standbyCollapsedGlowShiftB 5400ms ease-in-out infinite;
+  animation: none;
 }
 
 .standby-root.collapsed .standby-handle {
   width: 8px;
   height: 65px;
-  background: #fff;
+  background: rgba(255, 255, 255, 0.10);
   box-shadow: none;
   animation: none;
 }
 
+.standby-root.collapsed.awake .standby-glow,
 .standby-root.collapsed.armed .standby-glow {
   opacity: 1;
   transform: translateY(var(--standby-glow-y)) scale(1.025);
+  animation: standbyCollapsedGlowBreath 3600ms ease-in-out infinite;
 }
 
+.standby-root.collapsed.awake .standby-glow::before {
+  animation: standbyCollapsedGlowShiftA 5400ms ease-in-out infinite;
+}
+
+.standby-root.collapsed.awake .standby-glow::after {
+  animation: standbyCollapsedGlowShiftB 5400ms ease-in-out infinite;
+}
+
+.standby-root.collapsed.awake .standby-handle,
 .standby-root.collapsed.armed .standby-handle {
   background: rgba(255, 255, 255, 0.42);
   box-shadow:
@@ -539,6 +550,44 @@ button {
   white-space: nowrap;
 }
 
+.standby-response-action {
+  position: absolute;
+  right: 8px;
+  bottom: 24px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1.5px solid #666666;
+  border-radius: 999px;
+  background: #f2f2f2;
+  color: #0f0f0f;
+  cursor: pointer;
+  z-index: 2;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.standby-response-action:hover {
+  background: #ffffff;
+  border-color: #8a8a8a;
+}
+
+.standby-response-action:active {
+  transform: scale(0.94);
+}
+
+.standby-response-action svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+  flex: 0 0 auto;
+}
+
 .standby-detail-glow {
   position: absolute;
   display: block;
@@ -714,13 +763,13 @@ button {
 
 .standby-detail-content {
   width: 100%;
-  max-height: calc(100vh - 108px);
+  height: min(calc(var(--standby-detail-height) - 60px), calc(100vh - 108px));
   box-sizing: border-box;
-  padding: 24px;
+  padding: 18px 20px 20px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 16px;
+  gap: 12px;
 }
 
 .standby-detail-question-row {
@@ -745,15 +794,98 @@ button {
   overflow-wrap: break-word;
 }
 
+.standby-detail-question-row,
 .standby-detail-answer {
+  display: none;
+}
+
+.standby-detail-context {
   width: 100%;
-  min-height: 96px;
-  max-height: min(330px, calc(100vh - 280px));
+  flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
-  padding: 8px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.standby-detail-context[hidden] {
+  display: none;
+}
+
+.standby-detail-context-title {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  color: rgba(242, 242, 242, 0.58);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.standby-detail-context-list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 6px 2px 0;
+  scroll-behavior: smooth;
+}
+
+.standby-detail-context-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.standby-detail-context-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.standby-detail-chat-message {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.standby-detail-chat-message.user {
+  align-items: flex-end;
+}
+
+.standby-detail-chat-message.assistant {
+  align-items: flex-start;
+}
+
+.standby-detail-chat-message.status {
+  align-items: stretch;
+}
+
+.standby-detail-chat-role {
+  color: rgba(242, 242, 242, 0.5);
+  font-weight: 700;
+  padding: 0 4px;
+}
+
+.standby-detail-chat-role-repeat {
+  opacity: 0;
+}
+
+.standby-detail-chat-bubble {
+  max-width: 86%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 16px;
   color: var(--standby-text);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 400;
   line-height: 1.42;
   letter-spacing: 0;
@@ -761,13 +893,132 @@ button {
   overflow-wrap: break-word;
 }
 
-.standby-detail-answer::-webkit-scrollbar {
-  width: 6px;
+.standby-detail-chat-message.user .standby-detail-chat-bubble {
+  background: #4d4d4d;
+  border-top-right-radius: 6px;
 }
 
-.standby-detail-answer::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.3);
+.standby-detail-chat-message.assistant .standby-detail-chat-bubble {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top-left-radius: 6px;
+}
+
+.standby-detail-chat-message.status .standby-detail-chat-role {
+  color: rgba(221, 186, 113, 0.78);
+}
+
+.standby-detail-chat-message.status .standby-detail-chat-bubble {
+  max-width: 100%;
+  padding: 9px 11px;
+  border-radius: 10px;
+  color: rgba(242, 242, 242, 0.76);
+  background: rgba(221, 186, 113, 0.10);
+  border: 1px solid rgba(221, 186, 113, 0.18);
+  font-size: 11px;
+  line-height: 1.36;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_hit"] .standby-detail-chat-role {
+  color: #b8f7d4;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_hit"] .standby-detail-chat-bubble {
+  color: #b8f7d4;
+  border-color: rgba(91, 232, 150, 0.32);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="response_done"] .standby-detail-chat-role {
+  color: #f9a8d4;
+}
+
+.standby-detail-chat-message.status[data-stage="response_done"] .standby-detail-chat-bubble {
+  color: #f9a8d4;
+  border-color: rgba(244, 114, 182, 0.36);
+  background: rgba(236, 72, 153, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_miss"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="agent_may_search_web"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="agent_web_search"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="agent_no_tools"] .standby-detail-chat-role {
+  color: #ffd89a;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_miss"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="agent_may_search_web"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="agent_web_search"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="agent_no_tools"] .standby-detail-chat-bubble {
+  color: #ffd89a;
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_summarizing"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="gamepath_context"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="guide_context"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="memory_context"] .standby-detail-chat-role {
+  color: #c7d2fe;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_summarizing"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="gamepath_context"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="guide_context"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="memory_context"] .standby-detail-chat-bubble {
+  color: #c7d2fe;
+  border-color: rgba(129, 140, 248, 0.34);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_stored"] .standby-detail-chat-role {
+  color: #bfdbfe;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_stored"] .standby-detail-chat-bubble {
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_not_stored"] .standby-detail-chat-role {
+  color: #fff2c3;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_not_stored"] .standby-detail-chat-bubble {
+  color: #fff2c3;
+  border-color: rgba(255, 213, 111, 0.36);
+  background: rgba(255, 213, 111, 0.1);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_disputed"] .standby-detail-chat-role,
+.standby-detail-chat-message.status[data-stage="gamepath_feedback_missing"] .standby-detail-chat-role {
+  color: #fed7aa;
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_disputed"] .standby-detail-chat-bubble,
+.standby-detail-chat-message.status[data-stage="gamepath_feedback_missing"] .standby-detail-chat-bubble {
+  color: #fed7aa;
+  border-color: rgba(251, 146, 60, 0.36);
+  background: rgba(251, 146, 60, 0.12);
+}
+
+.standby-detail-chat-message.status[data-stage="error"] .standby-detail-chat-role {
+  color: #fecaca;
+}
+
+.standby-detail-chat-message.status[data-stage="error"] .standby-detail-chat-bubble {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.36);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.standby-detail-chat-message.assistant:last-child .standby-detail-chat-bubble {
+  max-width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 0;
+  font-size: 15px;
 }
 
 .standby-detail-divider {
@@ -810,9 +1061,14 @@ button {
   outline: 0;
   background: transparent;
   color: var(--standby-text);
+  -webkit-text-fill-color: var(--standby-text);
+  caret-color: var(--standby-text);
   font-size: 16px;
   line-height: 1.2;
   letter-spacing: 0;
+  opacity: 1;
+  position: relative;
+  z-index: 1;
 }
 
 .standby-detail-input::placeholder {
@@ -956,7 +1212,7 @@ button {
 }
 
 .standby-root.response .standby-response-panel {
-  right: 96px;
+  right: var(--standby-pill-right);
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -1089,28 +1345,12 @@ button {
   pointer-events: none;
 }
 
-.standby-type-left {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-}
-
-.standby-type-line {
-  width: 1px;
-  height: 24px;
-  background: var(--standby-muted);
-  opacity: 0.58;
-  flex: 0 0 auto;
-  z-index: 2;
-}
-
 .standby-input {
   min-width: 0;
   height: 100%;
   flex: 1 1 auto;
+  position: relative;
+  z-index: 2;
   border: 0;
   outline: 0;
   color: var(--standby-text);
@@ -1126,6 +1366,67 @@ button {
 .standby-input::placeholder {
   color: var(--standby-muted);
   opacity: 1;
+}
+
+.standby-input-hint {
+  position: absolute;
+  left: 24px;
+  top: 50%;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  max-width: calc(100% - 84px);
+  color: #b1b1b1;
+  font-size: 16px;
+  line-height: 19px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-50%);
+  opacity: 1;
+  transition:
+    opacity 120ms ease,
+    visibility 0ms linear 0ms;
+}
+
+.standby-mini-form.has-draft .standby-input-hint {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 90ms ease,
+    visibility 0ms linear 90ms;
+}
+
+.standby-hint-text {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+}
+
+.standby-hotkeys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 23px;
+}
+
+.standby-hotkey-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 23px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  border: 1px solid #666666;
+  border-radius: 4px;
+  background: #000000;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 15px;
+  letter-spacing: 0;
 }
 
 .standby-send {

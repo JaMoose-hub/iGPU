@@ -5,7 +5,7 @@ cd /d "%SCRIPT_DIR%"
 
 echo Starting Game Companion hybrid mode...
 echo Cloud chat: Hermes config in WSL
-echo Local router: llama.cpp Qwen3.5-4B Q4_K_M
+echo Local router: llama.cpp Qwen3.5-2B Q4_K_M
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_game_companion_hybrid_qwen35_4b.ps1" %*
 
 if errorlevel 1 (

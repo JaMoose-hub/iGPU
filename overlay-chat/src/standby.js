@@ -53,6 +53,7 @@ const STANDBY_WAKE_CLICK_WINDOW_MS = 5000;
 const STANDBY_OPENING_FADE_MS = 90;
 const STANDBY_OPENING_SETTLE_MS = 36;
 const STANDBY_COLLAPSE_ANIMATION_MS = 180;
+const STANDBY_VOICE_SILENCE_MS = 1400;
 
 const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 const nextFrame = () => new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
@@ -77,9 +78,12 @@ runWhenDomReady(async () => {
   const thinkingLoading = document.getElementById("standbyThinkingLoading");
   const responsePanel = document.getElementById("standbyResponsePanel");
   const responseText = document.getElementById("standbyResponseText");
+  const responseEnterBtn = document.getElementById("standbyResponseEnterBtn");
   const detailPanel = document.getElementById("standbyDetailPanel");
   const detailTitle = document.getElementById("standbyDetailTitle");
   const detailQuestion = document.getElementById("standbyDetailQuestion");
+  const detailContext = document.getElementById("standbyDetailContext");
+  const detailContextList = document.getElementById("standbyDetailContextList");
   const detailAnswer = document.getElementById("standbyDetailAnswer");
   const detailForm = document.getElementById("standbyDetailForm");
   const detailInput = document.getElementById("standbyDetailInput");
@@ -124,6 +128,8 @@ runWhenDomReady(async () => {
   let lastResponseSummary = "";
   let lastDetailTitle = "Game Companion";
   let lastDetailQuestion = "Your last question";
+  let lastDetailContext = [];
+  let lastDetailRouteTrace = [];
   let lastDetailAnswer = "I have a response ready.";
   let collapsedIdleTimer = null;
   let collapsedArmTimer = null;
@@ -134,17 +140,133 @@ runWhenDomReady(async () => {
   let nativeModeEchoToIgnore = null;
   let ignoreNextCollapsedClick = false;
   let pointerInsideStandby = false;
+  let standbySpeechRecognition = null;
+  let standbySpeechSilenceTimer = null;
+  let standbyVoiceActive = false;
+  let standbyVoiceStopRequested = false;
+  let standbyVoiceSent = false;
+  let standbyVoiceBaseText = "";
+  let standbyVoiceFinalText = "";
+  let standbyVoiceInterimText = "";
+  const TYPEWRITER_DELAY_MS = 16;
+  let detailAutoScrollFrame = 0;
+
+  const scrollDetailContextToBottom = () => {
+    if (!detailContextList) return;
+    if (detailAutoScrollFrame) return;
+    detailAutoScrollFrame = window.requestAnimationFrame(() => {
+      detailAutoScrollFrame = 0;
+      detailContextList.scrollTop = detailContextList.scrollHeight;
+    });
+  };
+
+  const prefersReducedMotion = () => {
+    try {
+      return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    } catch {
+      return false;
+    }
+  };
+
+  const commonPrefixByChar = (left, right) => {
+    const leftChars = Array.from(String(left || ""));
+    const rightChars = Array.from(String(right || ""));
+    let index = 0;
+    while (index < leftChars.length && index < rightChars.length && leftChars[index] === rightChars[index]) {
+      index += 1;
+    }
+    return rightChars.slice(0, index).join("");
+  };
+
+  const createTypewriter = (fallbackText = "", onCommit = null) => {
+    let element = null;
+    let target = "";
+    let visible = "";
+    let timer = null;
+
+    const stop = () => {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const commit = () => {
+      if (!element) return;
+      element.textContent = visible || fallbackText;
+      onCommit?.();
+    };
+
+    const tick = () => {
+      timer = null;
+      if (visible === target) {
+        commit();
+        return;
+      }
+      const targetChars = Array.from(target);
+      const visibleLength = Array.from(visible).length;
+      visible = targetChars.slice(0, Math.min(targetChars.length, visibleLength + 1)).join("");
+      commit();
+      if (visible !== target) {
+        timer = window.setTimeout(tick, TYPEWRITER_DELAY_MS);
+      }
+    };
+
+    return {
+      reset(nextText = "") {
+        stop();
+        target = String(nextText || "");
+        visible = "";
+        commit();
+      },
+      setElement(nextElement) {
+        element = nextElement || null;
+        commit();
+      },
+      setTarget(nextText, options = {}) {
+        const nextTarget = String(nextText || fallbackText || "");
+        const instant = Boolean(options.instant) || prefersReducedMotion();
+        if (nextTarget === target && visible === target) {
+          commit();
+          return;
+        }
+        target = nextTarget;
+        if (instant) {
+          stop();
+          visible = target;
+          commit();
+          return;
+        }
+        if (!target.startsWith(visible)) {
+          visible = commonPrefixByChar(visible, target);
+        }
+        commit();
+        if (!timer && visible !== target) {
+          timer = window.setTimeout(tick, TYPEWRITER_DELAY_MS);
+        }
+      },
+      value() {
+        return visible;
+      },
+    };
+  };
+
+  const responseTypewriter = createTypewriter("I have a response ready.");
+  const detailTypewriter = createTypewriter("I have a response ready.", scrollDetailContextToBottom);
 
   const hasDraftText = () => Boolean((input?.value || "").trim());
   const hasDetailDraftText = () => Boolean((detailInput?.value || "").trim());
+  const normalizeSpeechText = (text) => (text || "").replace(/\s+/g, " ").trim();
 
   const updateActionButtonMode = () => {
     if (!sendBtn) return;
     const typing = hasDraftText();
+    form?.classList.toggle("has-draft", typing);
     sendBtn.classList.toggle("typing", typing);
     sendBtn.classList.toggle("default", !typing);
-    sendBtn.title = typing ? "Send" : "Voice mode";
-    sendBtn.setAttribute("aria-label", typing ? "Send" : "Voice mode");
+    const voiceLabel = standbyVoiceActive ? "Listening..." : "Voice mode";
+    sendBtn.title = typing ? "Send" : voiceLabel;
+    sendBtn.setAttribute("aria-label", typing ? "Send" : voiceLabel);
   };
 
   const updateDetailActionButtonMode = () => {
@@ -156,10 +278,136 @@ runWhenDomReady(async () => {
     detailSendBtn.setAttribute("aria-label", typing ? "Reply" : "Voice mode");
   };
 
+  const focusStandbyInput = ({ select = false } = {}) => {
+    if (!input || standbyMode !== "typein") return;
+    const focusOnce = () => {
+      if (standbyMode !== "typein" || input.disabled) return;
+      window.focus();
+      input.focus({ preventScroll: true });
+      const cursor = input.value.length;
+      if (select && input.value) {
+        input.select?.();
+      } else {
+        input.setSelectionRange?.(cursor, cursor);
+      }
+    };
+    focusOnce();
+    window.requestAnimationFrame(focusOnce);
+    [50, 140, 260].forEach((delay) => window.setTimeout(focusOnce, delay));
+  };
+
   const renderDetailContext = () => {
     if (detailTitle) detailTitle.textContent = lastDetailTitle || "Game Companion";
     if (detailQuestion) detailQuestion.textContent = lastDetailQuestion || "Your last question";
-    if (detailAnswer) detailAnswer.textContent = lastDetailAnswer || lastResponseSummary || "I have a response ready.";
+    if (detailContext && detailContextList) {
+      detailContextList.textContent = "";
+      const contextItems = Array.isArray(lastDetailContext) ? lastDetailContext.slice(-10) : [];
+      const conversationItems = contextItems.filter((item) => item.role !== "status");
+      const statusItems = lookupTraceToDetailItems(lastDetailRouteTrace);
+      const currentQuestion = normalizeSpeechText(lastDetailQuestion || "");
+      const currentAnswer = String(lastDetailAnswer || lastResponseSummary || detailTypewriter.value() || "").trim();
+      const chatItems = [...conversationItems];
+      const lastContextItem = chatItems[chatItems.length - 1];
+      if (currentQuestion && !(lastContextItem?.role === "user" && lastContextItem?.text === currentQuestion)) {
+        chatItems.push({ role: "user", text: currentQuestion });
+      }
+      chatItems.push(...statusItems);
+      if (currentAnswer) {
+        chatItems.push({ role: "assistant", text: currentAnswer, live: true });
+      }
+      detailContext.hidden = chatItems.length === 0;
+      let statusLabelShown = false;
+      for (const item of chatItems) {
+        const row = document.createElement("div");
+        const isAssistant = item.role === "assistant";
+        const isStatus = item.role === "status";
+        row.className = `standby-detail-chat-message ${isStatus ? "status" : isAssistant ? "assistant" : "user"}`;
+        if (isStatus && item.stage) row.dataset.stage = item.stage;
+
+        const role = document.createElement("span");
+        role.className = "standby-detail-chat-role";
+        if (isStatus && statusLabelShown) {
+          role.classList.add("standby-detail-chat-role-repeat");
+          role.setAttribute("aria-hidden", "true");
+          role.textContent = "Status";
+        } else {
+          role.textContent = isStatus ? "Status" : isAssistant ? "AI" : "You";
+        }
+        if (isStatus) statusLabelShown = true;
+
+        const text = document.createElement("span");
+        text.className = "standby-detail-chat-bubble";
+        if (item.live) {
+          detailTypewriter.setElement(text);
+          detailTypewriter.setTarget(item.text || "I have a response ready.");
+        } else {
+          text.textContent = item.text || "";
+        }
+
+        row.append(role, text);
+        detailContextList.appendChild(row);
+      }
+      scrollDetailContextToBottom();
+    }
+    if (detailAnswer) detailAnswer.textContent = detailTypewriter.value() || lastDetailAnswer || lastResponseSummary || "";
+  };
+
+  const normalizeDetailContext = (value) => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        const roleValue = String(item?.role || "").trim().toLowerCase();
+        const role = roleValue === "assistant" ? "assistant" : roleValue === "status" ? "status" : "user";
+        return {
+          role,
+          text: String(item?.text || "").replace(/\s+/g, " ").trim(),
+        };
+      })
+      .filter((item) => item.text)
+      .slice(-10);
+  };
+
+  const normalizeLookupTrace = (value) => {
+    const items = Array.isArray(value) ? value : [];
+    return items
+      .map((item) => ({
+        stage: String(item?.stage || "").trim(),
+        summary: String(item?.summary || "").replace(/\s+/g, " ").trim(),
+        detail: String(item?.detail || "").replace(/\s+/g, " ").trim(),
+        time: String(item?.time || "").trim(),
+      }))
+      .filter((item) => item.summary || item.detail)
+      .slice(-8);
+  };
+
+  const lookupTraceToDetailItems = (trace) => normalizeLookupTrace(trace)
+    .map((item) => {
+      const lines = [];
+      if (item.summary) lines.push(item.summary);
+      if (item.detail && item.detail !== item.summary) lines.push(item.detail);
+      return {
+        role: "status",
+        text: lines.join("\n"),
+        stage: item.stage,
+      };
+    })
+    .filter((item) => item.text);
+
+  const appendDetailContextMessage = (role, text) => {
+    const normalizedRole = role === "assistant" ? "assistant" : "user";
+    const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
+    if (!normalizedText || normalizedText === "Your last question" || normalizedText === "I have a response ready.") return;
+    const items = normalizeDetailContext(lastDetailContext);
+    const last = items[items.length - 1];
+    if (last?.role !== normalizedRole || last?.text !== normalizedText) {
+      items.push({ role: normalizedRole, text: normalizedText });
+    }
+    lastDetailContext = items.slice(-10);
+  };
+
+  const promoteCurrentDetailExchange = () => {
+    appendDetailContextMessage("user", lastDetailQuestion);
+    appendDetailContextMessage("assistant", lastDetailAnswer || lastResponseSummary || detailTypewriter.value());
   };
 
   const announceMode = (mode) => {
@@ -216,7 +464,7 @@ runWhenDomReady(async () => {
     standbyWakeActive = Boolean(awake);
     root?.classList.toggle("awake", Boolean(awake));
     setCollapsedArmed(Boolean(awake));
-    await setStandbyPointerPassthrough(!awake);
+    await setStandbyPointerPassthrough(false);
     if (!awake) {
       scheduleCollapsedIdle();
       return;
@@ -275,8 +523,7 @@ runWhenDomReady(async () => {
       clearCollapsedArmTimer();
       setCollapsedArmed(false);
       await setMode("typein", { syncWindow: true, emitMode: true, focusInput: false });
-      root?.classList.add("listening");
-      await events.emit?.("standby:voice-toggle", { source: "standby-long-press" }).catch(() => {});
+      startStandbyVoice().catch(() => {});
     }, COLLAPSED_LONG_PRESS_MS);
   };
 
@@ -314,7 +561,7 @@ runWhenDomReady(async () => {
     const willExpand = wasCollapsed && !isStandbyModeCollapsed(mode);
     standbyMode = mode;
     if (isStandbyModeCollapsed(mode)) {
-      await setStandbyPointerPassthrough(!standbyWakeActive);
+      await setStandbyPointerPassthrough(false);
     } else {
       standbyWakeActive = false;
       clearStandbyWakeTimer();
@@ -358,7 +605,7 @@ runWhenDomReady(async () => {
     if (sendBtn) sendBtn.hidden = mode !== "typein";
     if (detailSendBtn) detailSendBtn.hidden = mode !== "detail";
     if (mode === "typein" && focusInput) {
-      window.setTimeout(() => input?.focus(), willExpand ? 180 : 80);
+      window.setTimeout(() => focusStandbyInput(), willExpand ? 180 : 80);
     }
     if (mode === "detail") {
       renderDetailContext();
@@ -380,8 +627,213 @@ runWhenDomReady(async () => {
     return applyStandbyMode(nextMode, options);
   };
 
+  const standbyVoiceSpokenText = (includeInterim = true) => normalizeSpeechText(
+    `${standbyVoiceFinalText} ${includeInterim ? standbyVoiceInterimText : ""}`
+  );
+
+  const composeStandbyVoiceText = (includeInterim = true) => {
+    const spoken = standbyVoiceSpokenText(includeInterim);
+    return normalizeSpeechText([standbyVoiceBaseText, spoken].filter(Boolean).join(" "));
+  };
+
+  const clearStandbySpeechSilence = () => {
+    if (!standbySpeechSilenceTimer) return;
+    window.clearTimeout(standbySpeechSilenceTimer);
+    standbySpeechSilenceTimer = null;
+  };
+
+  const setStandbyVoiceActive = (active) => {
+    standbyVoiceActive = Boolean(active);
+    root?.classList.toggle("listening", standbyVoiceActive);
+    updateActionButtonMode();
+  };
+
+  const updateStandbyVoiceInput = () => {
+    if (!input || standbyVoiceSent) return;
+    input.value = composeStandbyVoiceText(true);
+    input.focus();
+    const cursor = input.value.length;
+    input.setSelectionRange?.(cursor, cursor);
+    updateActionButtonMode();
+  };
+
+  const stopStandbySpeechRecognition = (abort = false) => {
+    standbyVoiceStopRequested = true;
+    clearStandbySpeechSilence();
+    if (!standbySpeechRecognition) return;
+    try {
+      if (abort) {
+        standbySpeechRecognition.abort?.();
+      } else {
+        standbySpeechRecognition.stop?.();
+      }
+    } catch (err) {
+      console.warn("Standby speech stop failed:", err);
+    }
+  };
+
+  const resetStandbyVoiceDraft = ({ restoreBase = false } = {}) => {
+    const baseText = standbyVoiceBaseText;
+    standbyVoiceBaseText = "";
+    standbyVoiceFinalText = "";
+    standbyVoiceInterimText = "";
+    standbyVoiceSent = false;
+    if (restoreBase && input) {
+      input.value = baseText;
+      updateActionButtonMode();
+    }
+  };
+
+  const sendStandbyVoiceTranscript = async ({ includeInterim = false } = {}) => {
+    if (standbyVoiceSent) return false;
+    const spoken = standbyVoiceSpokenText(includeInterim);
+    if (!spoken) return false;
+
+    const messageText = composeStandbyVoiceText(includeInterim);
+    standbyVoiceSent = true;
+    stopStandbySpeechRecognition(true);
+    setStandbyVoiceActive(false);
+    resetStandbyVoiceDraft();
+    if (input) {
+      input.value = messageText;
+      updateActionButtonMode();
+    }
+    await submit();
+    return true;
+  };
+
+  const scheduleStandbyVoiceAutoSend = () => {
+    clearStandbySpeechSilence();
+    if (!standbyVoiceSpokenText(true) || standbyVoiceSent) return;
+    standbySpeechSilenceTimer = window.setTimeout(() => {
+      if (!standbyVoiceActive || standbyVoiceSent || !standbyVoiceSpokenText(true)) return;
+      sendStandbyVoiceTranscript({ includeInterim: true }).catch((err) => {
+        console.warn("Standby voice auto-send failed:", err);
+        setStandbyVoiceActive(false);
+      });
+    }, STANDBY_VOICE_SILENCE_MS);
+  };
+
+  const startStandbyVoice = async () => {
+    if (standbyMode !== "typein") {
+      await setMode("typein", { syncWindow: true, emitMode: true, focusInput: true });
+    }
+    if (standbyVoiceActive) return;
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn("Standby voice is unavailable in this WebView.");
+      return;
+    }
+
+    standbyVoiceBaseText = (input?.value || "").trim();
+    standbyVoiceFinalText = "";
+    standbyVoiceInterimText = "";
+    standbyVoiceSent = false;
+    standbyVoiceStopRequested = false;
+    clearStandbySpeechSilence();
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = localStorage.getItem("speech-lang") || "zh-TW";
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      recognition.addEventListener("start", () => {
+        setStandbyVoiceActive(true);
+        input?.focus();
+      });
+
+      recognition.addEventListener("result", (event) => {
+        let finalText = "";
+        let interimText = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const transcript = result?.[0]?.transcript || "";
+          if (result.isFinal) {
+            finalText = `${finalText} ${transcript}`;
+          } else {
+            interimText = `${interimText} ${transcript}`;
+          }
+        }
+        if (finalText) {
+          standbyVoiceFinalText = normalizeSpeechText(`${standbyVoiceFinalText} ${finalText}`);
+        }
+        standbyVoiceInterimText = normalizeSpeechText(interimText);
+        updateStandbyVoiceInput();
+        scheduleStandbyVoiceAutoSend();
+      });
+
+      recognition.addEventListener("error", (event) => {
+        const error = event.error || "speech-recognition";
+        if (error === "no-speech") return;
+        console.warn("Standby voice error:", error);
+        if (["not-allowed", "service-not-allowed", "audio-capture"].includes(error)) {
+          standbyVoiceStopRequested = true;
+          setStandbyVoiceActive(false);
+        }
+      });
+
+      recognition.addEventListener("end", () => {
+        if (standbySpeechRecognition !== recognition) return;
+        standbySpeechRecognition = null;
+        standbyVoiceInterimText = "";
+        updateStandbyVoiceInput();
+        if (standbyVoiceSent) return;
+        if (standbyVoiceSpokenText(false)) {
+          sendStandbyVoiceTranscript({ includeInterim: false }).catch(() => {});
+          return;
+        }
+        if (!standbyVoiceStopRequested && standbyVoiceActive) {
+          window.setTimeout(() => {
+            if (standbyVoiceStopRequested || !standbyVoiceActive || standbySpeechRecognition) return;
+            startStandbyVoice().catch(() => {});
+          }, 150);
+          return;
+        }
+        setStandbyVoiceActive(false);
+        resetStandbyVoiceDraft({ restoreBase: true });
+      });
+
+      recognition.start();
+      standbySpeechRecognition = recognition;
+      setStandbyVoiceActive(true);
+    } catch (err) {
+      console.warn("Standby voice start failed:", err);
+      setStandbyVoiceActive(false);
+      resetStandbyVoiceDraft({ restoreBase: true });
+    }
+  };
+
+  const stopStandbyVoice = async ({ submitTranscript = true } = {}) => {
+    if (!standbyVoiceActive && !standbySpeechRecognition) return;
+    if (submitTranscript && await sendStandbyVoiceTranscript({ includeInterim: true })) return;
+    standbyVoiceStopRequested = true;
+    stopStandbySpeechRecognition(true);
+    setStandbyVoiceActive(false);
+    resetStandbyVoiceDraft({ restoreBase: true });
+  };
+
+  const toggleStandbyVoice = async () => {
+    if (standbyVoiceActive || standbySpeechRecognition) {
+      await stopStandbyVoice({ submitTranscript: true });
+      return;
+    }
+    await startStandbyVoice();
+  };
+
   const submit = async () => {
     const text = (input?.value || "").trim();
+    if (standbyVoiceActive || standbySpeechRecognition) {
+      standbyVoiceSent = true;
+      stopStandbySpeechRecognition(true);
+      clearStandbySpeechSilence();
+      setStandbyVoiceActive(false);
+      standbyVoiceBaseText = "";
+      standbyVoiceFinalText = "";
+      standbyVoiceInterimText = "";
+    }
     if (!text) {
       await invoke?.("restore_main_from_standby").catch(() => {});
       await setMode("collapsed", { syncWindow: false, emitMode: false });
@@ -400,9 +852,16 @@ runWhenDomReady(async () => {
       await events.emit?.("standby:voice-toggle", {}).catch(() => {});
       return;
     }
-    await setMode("thinking", { syncWindow: true });
+    promoteCurrentDetailExchange();
+    lastDetailQuestion = text;
+    lastDetailAnswer = "";
+    lastResponseSummary = "";
+    lastDetailRouteTrace = [];
+    detailTypewriter.reset();
+    await setMode("detail", { syncWindow: false, emitMode: true });
     detailInput.value = "";
     updateDetailActionButtonMode();
+    renderDetailContext();
     await events.emit?.("standby:submit", { text, source: "detail" }).catch(() => {});
   };
 
@@ -423,6 +882,7 @@ runWhenDomReady(async () => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
     root?.classList.remove("listening");
+    stopStandbyVoice({ submitTranscript: false }).catch(() => {});
     standbyWakeActive = false;
     clearStandbyWakeTimer();
     clearCollapsedArmTimer();
@@ -442,6 +902,18 @@ runWhenDomReady(async () => {
     setMode(nextExpanded, { syncWindow: false, emitMode: false });
   };
 
+  window.__igpuSetStandbyMode = (nextMode, options = {}) => {
+    setMode(nextMode, {
+      syncWindow: false,
+      emitMode: false,
+      focusInput: Boolean(options?.focusInput),
+    });
+  };
+
+  window.__igpuFocusStandbyInput = () => {
+    focusStandbyInput();
+  };
+
   collapsedButton?.addEventListener("click", (event) => {
     if (ignoreNextCollapsedClick) {
       ignoreNextCollapsedClick = false;
@@ -457,8 +929,7 @@ runWhenDomReady(async () => {
       await submit();
       return;
     }
-    root?.classList.toggle("listening");
-    await events.emit?.("standby:voice-toggle", {}).catch(() => {});
+    await toggleStandbyVoice();
   });
 
   form?.addEventListener("submit", (event) => {
@@ -469,6 +940,12 @@ runWhenDomReady(async () => {
   input?.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       collapseStandby(event);
+      return;
+    }
+    if (!event.isComposing && event.key.toLowerCase() === "m" && event.shiftKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleStandbyVoice().catch(() => {});
     }
   });
 
@@ -500,6 +977,13 @@ runWhenDomReady(async () => {
 
   detailCloseBtn?.addEventListener("click", () => {
     setMode("response", { syncWindow: true });
+  });
+
+  responseEnterBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (standbyMode !== "response") return;
+    goTypeIn();
   });
 
   collapsedButton?.addEventListener("pointerenter", () => {
@@ -535,6 +1019,9 @@ runWhenDomReady(async () => {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       collapseStandby(event);
+    } else if (!event.isComposing && event.key.toLowerCase() === "m" && event.shiftKey && standbyMode === "typein") {
+      event.preventDefault();
+      toggleStandbyVoice().catch(() => {});
     } else if (event.key === "Enter" && standbyMode === "response") {
       event.preventDefault();
       goTypeIn();
@@ -550,7 +1037,11 @@ runWhenDomReady(async () => {
       nativeModeEchoToIgnore = null;
       return;
     }
-    setMode(mode, { syncWindow: false, emitMode: false });
+    setMode(mode, {
+      syncWindow: false,
+      emitMode: false,
+      focusInput: Boolean(event.payload?.focusInput),
+    });
   }).catch(() => {});
 
   await events.listen?.("standby:wake", (event) => {
@@ -563,22 +1054,60 @@ runWhenDomReady(async () => {
     })().catch(() => {});
   }).catch(() => {});
 
+  await events.listen?.("standby:focus-input", () => {
+    focusStandbyInput();
+  }).catch(() => {});
+
   await events.listen?.("standby:set-response", (event) => {
     const text = String(event.payload?.text || "").trim();
     const detailText = String(event.payload?.detailText || "").trim();
     const question = String(event.payload?.question || "").trim();
     const title = String(event.payload?.title || "").trim();
+    lastDetailRouteTrace = normalizeLookupTrace(event.payload?.routeTrace || event.payload?.trace || lastDetailRouteTrace);
+    const isNewQuestion = Boolean(question && question !== lastDetailQuestion);
+    if (isNewQuestion) {
+      responseTypewriter.reset();
+      detailTypewriter.reset();
+    }
     lastResponseSummary = text || lastResponseSummary;
     lastDetailAnswer = detailText || text || lastDetailAnswer;
     lastDetailQuestion = question || lastDetailQuestion;
+    lastDetailContext = normalizeDetailContext(event.payload?.context);
     lastDetailTitle = title || lastDetailTitle;
     if (responseText) {
-      responseText.textContent = text || "I have a response ready.";
+      responseTypewriter.setElement(responseText);
+      responseTypewriter.setTarget(text || "I have a response ready.");
     }
     renderDetailContext();
     const responseMode = standbyModeFromInput(event.payload?.mode) || (standbyMode === "detail" ? "detail" : "response");
     const modeChanged = standbyMode !== responseMode;
     setMode(responseMode, { syncWindow: modeChanged, emitMode: modeChanged });
+  }).catch(() => {});
+
+  await events.listen?.("standby:set-lookup-status", (event) => {
+    lastDetailRouteTrace = normalizeLookupTrace(event.payload?.trace || []);
+    if (standbyMode === "detail") {
+      renderDetailContext();
+    }
+  }).catch(() => {});
+
+  await events.listen?.("standby:clear-response", () => {
+    lastResponseSummary = "";
+    lastDetailTitle = "Game Companion";
+    lastDetailQuestion = "Your last question";
+    lastDetailContext = [];
+    lastDetailRouteTrace = [];
+    lastDetailAnswer = "";
+    responseTypewriter.reset();
+    detailTypewriter.reset();
+    if (responseText) responseText.textContent = "";
+    if (detailAnswer) detailAnswer.textContent = "";
+    if (detailQuestion) detailQuestion.textContent = "";
+    if (detailContextList) detailContextList.textContent = "";
+    if (detailContext) detailContext.hidden = true;
+    if (standbyMode === "response" || standbyMode === "detail") {
+      setMode("typein", { syncWindow: true, emitMode: true, focusInput: true });
+    }
   }).catch(() => {});
 
   await events.listen?.("standby:set-tone", (event) => {
@@ -587,7 +1116,7 @@ runWhenDomReady(async () => {
   }).catch(() => {});
 
   window.addEventListener("blur", () => {
-    root?.classList.remove("listening");
+    if (!standbyVoiceActive) root?.classList.remove("listening");
   });
 
   scheduleCollapsedIdle();

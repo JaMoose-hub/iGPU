@@ -1,6 +1,6 @@
 param(
     [int]$TimeoutSeconds = 900,
-    [string]$VulkanDevice = "1",
+    [string]$VulkanDevice = "0",
     [int]$LlamaCtxSize = 32768,
     [int]$LlamaGpuLayers = 99,
     [ValidateSet("llama", "hermes")]

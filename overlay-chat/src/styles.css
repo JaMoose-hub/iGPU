@@ -287,6 +287,12 @@ body.perf-mode {
   background: rgba(34, 197, 94, 0.12);
 }
 
+.lookup-status[data-stage="response_done"] {
+  color: #f9a8d4;
+  border-color: rgba(244, 114, 182, 0.36);
+  background: rgba(236, 72, 153, 0.12);
+}
+
 .lookup-status[data-stage="gamepath_miss"],
 .lookup-status[data-stage="agent_may_search_web"],
 .lookup-status[data-stage="agent_web_search"],
@@ -361,6 +367,10 @@ body.perf-mode {
 
 .lookup-route-line[data-stage="gamepath_hit"] {
   color: rgba(184, 247, 212, 0.72);
+}
+
+.lookup-route-line[data-stage="response_done"] {
+  color: rgba(249, 168, 212, 0.8);
 }
 
 .lookup-route-line[data-stage="gamepath_miss"],

@@ -9,7 +9,7 @@ param(
     [int]$LlamaParallel = 0,
     [int]$LlamaCacheRamMiB = -1,
     [bool]$LlamaSkipChatParsing = $true,
-    [string]$VulkanDevice = "1",
+    [string]$VulkanDevice = "0",
     [string]$ChatBackend = "llama",
     [string]$LlamaHfRepo = "unsloth/Qwen3-VL-8B-Instruct-GGUF",
     [string]$LlamaHfFile = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",

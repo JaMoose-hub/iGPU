@@ -133,6 +133,14 @@ export const ToolsWindow = () => (
       </section>
 
       <section className="tool-section">
+        <div className="section-title">Chat</div>
+        <button id="clearChatBtn" className="tool-btn wide" title="Clear chat window">
+          <Icon name="trash" />
+          <span className="button-label">Clear chat</span>
+        </button>
+      </section>
+
+      <section className="tool-section">
         <div className="section-title">Overlay</div>
         <div className="tool-grid two">
           <button id="hudBtn" className="tool-btn active" title="Clear HUD">
@@ -148,7 +156,7 @@ export const ToolsWindow = () => (
 
       <section className="tool-section">
         <div className="section-title">Controls</div>
-        <div className="tool-grid three">
+        <div className="tool-grid two">
           <button id="protectBtn" className="tool-btn" title="Content protection">
             <Icon name="shield" />
             <span className="button-label">Protect</span>
@@ -160,6 +168,10 @@ export const ToolsWindow = () => (
           <button id="perfBtn" className="tool-btn" title="Performance mode">
             <Icon name="gauge" />
             <span className="button-label">Perf</span>
+          </button>
+          <button id="gamePilotBtn" className="tool-btn" title="AI game pilot">
+            <Icon name="gamepad" />
+            <span className="button-label">Pilot</span>
           </button>
         </div>
       </section>
@@ -374,6 +386,18 @@ export const StandbyWindow = () => (
           </div>
           <span className="standby-response-hint">for more detailed response</span>
         </div>
+        <button
+          id="standbyResponseEnterBtn"
+          className="standby-response-action"
+          type="button"
+          title="Back to input"
+          aria-label="Back to input"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M16.85 7.25V11.65C16.85 13.58 15.28 15.15 13.35 15.15H6.95" stroke="#0F0F0F" strokeWidth="1.5" strokeLinecap="round" />
+            <path d="M10.15 11.95L6.85 15.25L10.15 18.55" stroke="#0F0F0F" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
     </section>
 
@@ -405,6 +429,16 @@ export const StandbyWindow = () => (
         <div className="standby-detail-question-row">
           <p id="standbyDetailQuestion" className="standby-detail-question">Which weapon should I choose for this build</p>
         </div>
+        <section id="standbyDetailContext" className="standby-detail-context" hidden>
+          <div className="standby-detail-context-title">Conversation</div>
+          <div
+            id="standbyDetailContextList"
+            className="standby-detail-context-list"
+            data-cursor-action="scroll-drag"
+            data-cursor-scroll=""
+            data-cursor-label="Scroll detailed conversation"
+          ></div>
+        </section>
         <div id="standbyDetailAnswer" className="standby-detail-answer">
           I have a response ready.
         </div>
@@ -435,8 +469,13 @@ export const StandbyWindow = () => (
     </section>
 
     <form id="standbyForm" className="standby-mini-form" aria-hidden="true">
-      <div className="standby-type-left" aria-hidden="true">
-        <span className="standby-type-line"></span>
+      <div className="standby-input-hint" aria-hidden="true">
+        <span className="standby-hint-text">Type or</span>
+        <span className="standby-hotkeys">
+          <span className="standby-hotkey-key">Shift</span>
+          <span className="standby-hotkey-key">M</span>
+        </span>
+        <span className="standby-hint-text">to speak</span>
       </div>
       <input
         id="standbyInput"

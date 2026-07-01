@@ -1,5 +1,8 @@
 use serde::Serialize;
 use std::{
+    fs::{self, OpenOptions},
+    path::Path,
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
@@ -7,7 +10,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{webview::Color, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WindowEvent};
+use tauri::{
+    webview::Color, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WindowEvent,
+};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(windows)]
@@ -33,6 +38,14 @@ static VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED: AtomicBool = AtomicBool::new(fals
 static VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIRTUAL_CURSOR_STATE: OnceLock<Mutex<VirtualCursorState>> = OnceLock::new();
 static CAPTURE_PROTECTION_BOOT_RESET_UNTIL: OnceLock<Instant> = OnceLock::new();
+static STANDBY_CTRL_G_LAST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static NITROGEN_PILOT_PROCESS: OnceLock<Mutex<Option<NitrogenPilotProcess>>> = OnceLock::new();
+const STANDBY_CTRL_G_DEBOUNCE_MS: u64 = 650;
+const NITROGEN_REPO_DIR: &str = r"C:\Projects\ai_auto";
+const NITROGEN_PYTHON: &str = r"C:\Users\Administrator\Miniconda3\python.exe";
+const NITROGEN_PLAY_SCRIPT: &str = r"C:\Projects\ai_auto\scripts\play.py";
+const NITROGEN_STOP_FILE: &str = r"C:\Projects\ai_auto\STOP_AGENT";
+const NITROGEN_LOG_DIR: &str = r"C:\Projects\ai_auto\logs";
 const VIRTUAL_CURSOR_STEP: f64 = 16.0;
 const VIRTUAL_CURSOR_GAMEPAD_STEP: f64 = 20.0;
 const VIRTUAL_CURSOR_SCREEN_MARGIN: f64 = 12.0;
@@ -46,6 +59,25 @@ struct VirtualCursorWindowFrame {
     height: u32,
     scale_factor: f64,
     visible: bool,
+}
+
+struct NitrogenPilotProcess {
+    child: Child,
+    host: String,
+    port: u16,
+    process_name: String,
+    started_at: Instant,
+}
+
+#[derive(Clone, Serialize)]
+struct NitrogenPilotStatus {
+    running: bool,
+    pid: Option<u32>,
+    host: String,
+    port: u16,
+    process_name: String,
+    elapsed_ms: Option<u64>,
+    message: String,
 }
 
 struct VirtualCursorState {
@@ -131,7 +163,9 @@ fn apply_current_capture_protection(window: &tauri::WebviewWindow) {
 }
 
 fn apply_capture_protection_to_all_windows(app: &tauri::AppHandle, excluded: bool) {
-    for label in ["main", "hud", "tasks", "search", "gamepath", "tools", "standby"] {
+    for label in [
+        "main", "hud", "tasks", "search", "gamepath", "tools", "standby",
+    ] {
         if let Some(window) = app.get_webview_window(label) {
             set_window_display_excluded(&window, excluded);
         }
@@ -728,9 +762,23 @@ fn virtual_key_down(vkey: i32) -> bool {
     unsafe { (GetAsyncKeyState(vkey) as u16 & 0x8000) != 0 }
 }
 
+fn emit_standby_hotkey(app: &tauri::AppHandle, source: &str) {
+    if app
+        .emit_to(
+            "main",
+            "standby-hotkey",
+            serde_json::json!({ "source": source }),
+        )
+        .is_err()
+    {
+        let _ = open_standby_typein_window(app);
+    }
+}
+
 #[cfg(windows)]
 fn start_virtual_cursor_keyboard_poll(app: tauri::AppHandle) {
     thread::spawn(move || {
+        let mut was_standby_hotkey = false;
         let mut was_tab = false;
         let mut was_activate = false;
         let mut pending_activate = false;
@@ -739,6 +787,22 @@ fn start_virtual_cursor_keyboard_poll(app: tauri::AppHandle) {
         let mut was_f11 = false;
 
         loop {
+            let ctrl = virtual_key_down(0x11) || virtual_key_down(0xA2) || virtual_key_down(0xA3);
+            let alt = virtual_key_down(0x12) || virtual_key_down(0xA4) || virtual_key_down(0xA5);
+            let g = virtual_key_down(0x47);
+            let standby_hotkey = ctrl && g;
+            if standby_hotkey && !was_standby_hotkey && should_accept_standby_ctrl_g() {
+                emit_standby_hotkey(
+                    &app,
+                    if alt {
+                        "poll_ctrl_alt_g"
+                    } else {
+                        "poll_ctrl_g"
+                    },
+                );
+            }
+            was_standby_hotkey = standby_hotkey;
+
             let f11 = virtual_key_down(0x7A);
             if f11 && !was_f11 {
                 let enabled = !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed);
@@ -1425,11 +1489,7 @@ fn ensure_standby_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow,
     Ok(standby)
 }
 
-fn standby_window_position(
-    app: &tauri::AppHandle,
-    width: u32,
-    height: u32,
-) -> (i32, i32) {
+fn standby_window_position(app: &tauri::AppHandle, width: u32, height: u32) -> (i32, i32) {
     let main = app.get_webview_window("main");
     let monitor = main
         .as_ref()
@@ -1638,29 +1698,337 @@ fn show_tools_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn show_standby_window(app: tauri::AppHandle) -> Result<(), String> {
     let standby = configure_standby_window(&app, false)?;
-    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+    let _ =
+        standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, true);
-    let position = standby.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    let _ = set_standby_pointer_passthrough_state(&app, false);
+    let position = standby
+        .outer_position()
+        .unwrap_or(PhysicalPosition::new(0, 0));
     force_companion_window_repaint(&standby, position.x, position.y);
-    let _ = app.emit_to("standby", "standby:set-mode", serde_json::json!({ "expanded": false }));
-    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+    let _ = app.emit_to(
+        "standby",
+        "standby:set-mode",
+        serde_json::json!({ "expanded": false }),
+    );
+    let _ =
+        standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
     Ok(())
 }
 
-fn wake_standby_window(app: &tauri::AppHandle) -> Result<(), String> {
-    let standby = configure_standby_window_mode(app, "collapsed")?;
-    let _ = standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
+fn should_accept_standby_ctrl_g() -> bool {
+    let now = Instant::now();
+    let guard = STANDBY_CTRL_G_LAST_AT.get_or_init(|| Mutex::new(None));
+    let Ok(mut last_at) = guard.lock() else {
+        return true;
+    };
+    if let Some(previous) = last_at.as_ref() {
+        if now.duration_since(*previous) < Duration::from_millis(STANDBY_CTRL_G_DEBOUNCE_MS) {
+            return false;
+        }
+    }
+    *last_at = Some(now);
+    true
+}
+
+fn pilot_process_name(value: &str) -> String {
+    let trimmed = value.trim();
+    let file_name = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(trimmed)
+        .trim();
+    if file_name.is_empty() {
+        "re9.exe".to_string()
+    } else {
+        file_name.to_string()
+    }
+}
+
+fn pilot_status(
+    running: bool,
+    pid: Option<u32>,
+    host: String,
+    port: u16,
+    process_name: String,
+    elapsed_ms: Option<u64>,
+    message: String,
+) -> NitrogenPilotStatus {
+    NitrogenPilotStatus {
+        running,
+        pid,
+        host,
+        port,
+        process_name,
+        elapsed_ms,
+        message,
+    }
+}
+
+fn stopped_pilot_status(message: String) -> NitrogenPilotStatus {
+    pilot_status(false, None, String::new(), 0, String::new(), None, message)
+}
+
+fn current_nitrogen_pilot_status() -> NitrogenPilotStatus {
+    let lock = NITROGEN_PILOT_PROCESS.get_or_init(|| Mutex::new(None));
+    let Ok(mut guard) = lock.lock() else {
+        return stopped_pilot_status("Pilot status lock unavailable".to_string());
+    };
+
+    let Some(process) = guard.as_mut() else {
+        return stopped_pilot_status("NitroGen pilot is stopped".to_string());
+    };
+
+    match process.child.try_wait() {
+        Ok(Some(status)) => {
+            let host = process.host.clone();
+            let port = process.port;
+            let process_name = process.process_name.clone();
+            *guard = None;
+            pilot_status(
+                false,
+                None,
+                host,
+                port,
+                process_name,
+                None,
+                format!("NitroGen pilot exited: {status}"),
+            )
+        }
+        Ok(None) => pilot_status(
+            true,
+            Some(process.child.id()),
+            process.host.clone(),
+            process.port,
+            process.process_name.clone(),
+            Some(
+                process
+                    .started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            ),
+            "NitroGen pilot is running".to_string(),
+        ),
+        Err(err) => pilot_status(
+            false,
+            Some(process.child.id()),
+            process.host.clone(),
+            process.port,
+            process.process_name.clone(),
+            Some(
+                process
+                    .started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            ),
+            format!("Pilot status failed: {err}"),
+        ),
+    }
+}
+
+#[tauri::command]
+fn get_nitrogen_pilot_status() -> Result<NitrogenPilotStatus, String> {
+    Ok(current_nitrogen_pilot_status())
+}
+
+#[tauri::command]
+fn start_nitrogen_pilot(
+    host: String,
+    port: u16,
+    process_name: String,
+) -> Result<NitrogenPilotStatus, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("NitroGen host is empty".to_string());
+    }
+    if port == 0 {
+        return Err("NitroGen port is invalid".to_string());
+    }
+
+    let process_name = pilot_process_name(&process_name);
+    if !Path::new(NITROGEN_PYTHON).exists() {
+        return Err(format!("Python venv not found: {NITROGEN_PYTHON}"));
+    }
+    if !Path::new(NITROGEN_PLAY_SCRIPT).exists() {
+        return Err(format!(
+            "NitroGen play.py not found: {NITROGEN_PLAY_SCRIPT}"
+        ));
+    }
+
+    let lock = NITROGEN_PILOT_PROCESS.get_or_init(|| Mutex::new(None));
+    let mut guard = lock
+        .lock()
+        .map_err(|_| "Pilot lock unavailable".to_string())?;
+    if let Some(existing) = guard.as_mut() {
+        if existing
+            .child
+            .try_wait()
+            .map_err(|err| err.to_string())?
+            .is_none()
+        {
+            return Ok(pilot_status(
+                true,
+                Some(existing.child.id()),
+                existing.host.clone(),
+                existing.port,
+                existing.process_name.clone(),
+                Some(
+                    existing
+                        .started_at
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                ),
+                "NitroGen pilot is already running".to_string(),
+            ));
+        }
+        *guard = None;
+    }
+
+    let _ = fs::remove_file(NITROGEN_STOP_FILE);
+    fs::create_dir_all(NITROGEN_LOG_DIR).map_err(|err| err.to_string())?;
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{NITROGEN_LOG_DIR}\\pilot_from_companion.out.log"))
+        .map_err(|err| err.to_string())?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{NITROGEN_LOG_DIR}\\pilot_from_companion.err.log"))
+        .map_err(|err| err.to_string())?;
+
+    let child = Command::new(NITROGEN_PYTHON)
+        .current_dir(NITROGEN_REPO_DIR)
+        .arg(NITROGEN_PLAY_SCRIPT)
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--process")
+        .arg(&process_name)
+        .arg("--low-latency")
+        .arg("--capture-width")
+        .arg("2560")
+        .arg("--capture-height")
+        .arg("1440")
+        .arg("--env-fps")
+        .arg("90")
+        .arg("--realtime")
+        .arg("--no-record")
+        .arg("--no-debug-frames")
+        .arg("--no-actions-log")
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|err| format!("Failed to start NitroGen pilot: {err}"))?;
+
+    let pid = child.id();
+    *guard = Some(NitrogenPilotProcess {
+        child,
+        host: host.to_string(),
+        port,
+        process_name: process_name.clone(),
+        started_at: Instant::now(),
+    });
+
+    Ok(pilot_status(
+        true,
+        Some(pid),
+        host.to_string(),
+        port,
+        process_name,
+        Some(0),
+        "NitroGen pilot started".to_string(),
+    ))
+}
+
+#[tauri::command]
+fn stop_nitrogen_pilot() -> Result<NitrogenPilotStatus, String> {
+    fs::write(NITROGEN_STOP_FILE, "stop\n").map_err(|err| err.to_string())?;
+    let lock = NITROGEN_PILOT_PROCESS.get_or_init(|| Mutex::new(None));
+    let mut guard = lock
+        .lock()
+        .map_err(|_| "Pilot lock unavailable".to_string())?;
+    let Some(process) = guard.as_mut() else {
+        return Ok(stopped_pilot_status(
+            "NitroGen pilot was not running".to_string(),
+        ));
+    };
+
+    let host = process.host.clone();
+    let port = process.port;
+    let process_name = process.process_name.clone();
+    let pid = process.child.id();
+    let started_at = process.started_at;
+    let mut exited_status: Option<String> = None;
+
+    for _ in 0..30 {
+        match process.child.try_wait() {
+            Ok(Some(status)) => {
+                exited_status = Some(status.to_string());
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(err) => {
+                return Ok(pilot_status(
+                    true,
+                    Some(pid),
+                    host,
+                    port,
+                    process_name,
+                    Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+                    format!("Stop requested, but status check failed: {err}"),
+                ));
+            }
+        }
+    }
+
+    if let Some(status) = exited_status {
+        *guard = None;
+        return Ok(pilot_status(
+            false,
+            None,
+            host,
+            port,
+            process_name,
+            None,
+            format!("NitroGen pilot exited safely: {status}"),
+        ));
+    }
+
+    Ok(pilot_status(
+        true,
+        Some(pid),
+        host,
+        port,
+        process_name,
+        Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        "Stop requested; waiting for NitroGen to release controls".to_string(),
+    ))
+}
+
+fn open_standby_typein_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let standby = configure_standby_window_mode(app, "typein")?;
     standby.show().map_err(|err| err.to_string())?;
     let _ = set_standby_pointer_passthrough_state(app, false);
-    let position = standby.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    let position = standby
+        .outer_position()
+        .unwrap_or(PhysicalPosition::new(0, 0));
     force_companion_window_repaint(&standby, position.x, position.y);
     let _ = standby.set_focus();
     let _ = standby.eval("window.focus();");
     let _ = app.emit_to(
         "standby",
-        "standby:wake",
-        serde_json::json!({ "source": "ctrl-g", "timeoutMs": 5000 }),
+        "standby:set-mode",
+        serde_json::json!({ "expanded": true, "mode": "typein", "focusInput": true }),
+    );
+    let _ = standby.eval(
+        "window.__igpuSetStandbyMode && window.__igpuSetStandbyMode('typein', { focusInput: true });",
     );
     Ok(())
 }
@@ -1674,11 +2042,15 @@ fn set_standby_window_expanded(app: tauri::AppHandle, expanded: bool) -> Result<
     );
     let _ = standby.eval(&script);
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
+    let _ = set_standby_pointer_passthrough_state(&app, false);
     if expanded {
         let _ = standby.set_focus();
     }
-    let _ = app.emit_to("standby", "standby:set-mode", serde_json::json!({ "expanded": expanded }));
+    let _ = app.emit_to(
+        "standby",
+        "standby:set-mode",
+        serde_json::json!({ "expanded": expanded }),
+    );
     let _ = standby.eval(&script);
     Ok(())
 }
@@ -1696,7 +2068,7 @@ fn set_standby_window_mode(app: tauri::AppHandle, mode: String) -> Result<(), St
     let expanded = normalized != "collapsed";
     let standby = configure_standby_window_mode(&app, normalized)?;
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
+    let _ = set_standby_pointer_passthrough_state(&app, false);
     if expanded {
         let _ = standby.set_focus();
     }
@@ -1709,10 +2081,7 @@ fn set_standby_window_mode(app: tauri::AppHandle, mode: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn set_standby_pointer_passthrough(
-    app: tauri::AppHandle,
-    passthrough: bool,
-) -> Result<(), String> {
+fn set_standby_pointer_passthrough(app: tauri::AppHandle, passthrough: bool) -> Result<(), String> {
     set_standby_pointer_passthrough_state(&app, passthrough)
 }
 
@@ -1746,7 +2115,9 @@ fn restore_main_from_standby(app: tauri::AppHandle) -> Result<(), String> {
     main.show().map_err(|err| err.to_string())?;
     let _ = main.unminimize();
     let _ = main.set_always_on_top(true);
-    let position = main.outer_position().unwrap_or(PhysicalPosition::new(80, 80));
+    let position = main
+        .outer_position()
+        .unwrap_or(PhysicalPosition::new(80, 80));
     force_companion_window_repaint(&main, position.x, position.y);
     let _ = main.set_focus();
     let _ = show_tools_window(app);
@@ -2468,7 +2839,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-                if matches!(window.label(), "main" | "tasks" | "search" | "gamepath" | "tools") {
+                if matches!(
+                    window.label(),
+                    "main" | "tasks" | "search" | "gamepath" | "tools"
+                ) {
                     let _ = emit_virtual_cursor_frames_changed(window.app_handle());
                 }
             }
@@ -2508,8 +2882,19 @@ pub fn run() {
                                 return;
                             }
                         }
-                        if shortcut.matches(Modifiers::CONTROL, Code::KeyG) {
-                            let _ = wake_standby_window(app);
+                        if shortcut.matches(Modifiers::CONTROL, Code::KeyG)
+                            || shortcut.matches(Modifiers::CONTROL | Modifiers::ALT, Code::KeyG)
+                        {
+                            if should_accept_standby_ctrl_g() {
+                                let source = if shortcut
+                                    .matches(Modifiers::CONTROL | Modifiers::ALT, Code::KeyG)
+                                {
+                                    "ctrl_alt_g"
+                                } else {
+                                    "ctrl_g"
+                                };
+                                emit_standby_hotkey(app, source);
+                            }
                             return;
                         }
                         match shortcut.key {
@@ -2538,6 +2923,16 @@ pub fn run() {
                                 let enabled =
                                     !VIRTUAL_CURSOR_GLOBAL_CONTROLS_ENABLED.load(Ordering::Relaxed);
                                 let _ = set_virtual_cursor_enabled(app, enabled);
+                            }
+                            Code::ScrollLock => {
+                                if should_accept_standby_ctrl_g() {
+                                    emit_standby_hotkey(app, "scroll_lock");
+                                }
+                            }
+                            Code::Pause => {
+                                if should_accept_standby_ctrl_g() {
+                                    emit_standby_hotkey(app, "pause");
+                                }
                             }
                             _ => {}
                         }
@@ -2575,13 +2970,26 @@ pub fn run() {
                 Code::F8,
                 Code::F9,
                 Code::F10,
+                Code::ScrollLock,
+                Code::Pause,
             ] {
                 let shortcut = Shortcut::new(None, key);
-                let _ = app.global_shortcut().register(shortcut);
+                if let Err(err) = app.global_shortcut().register(shortcut) {
+                    eprintln!("global shortcut {:?} registration failed: {}", key, err);
+                }
             }
-            let _ = app
+            if let Err(err) = app
                 .global_shortcut()
-                .register(Shortcut::new(Some(Modifiers::CONTROL), Code::KeyG));
+                .register(Shortcut::new(Some(Modifiers::CONTROL), Code::KeyG))
+            {
+                eprintln!("global shortcut Ctrl+G registration failed: {}", err);
+            }
+            if let Err(err) = app.global_shortcut().register(Shortcut::new(
+                Some(Modifiers::CONTROL | Modifiers::ALT),
+                Code::KeyG,
+            )) {
+                eprintln!("global shortcut Ctrl+Alt+G registration failed: {}", err);
+            }
 
             if let Some(hud) = app.get_webview_window("hud") {
                 clear_window_capture_protection(&hud);
@@ -2664,7 +3072,10 @@ pub fn run() {
             focus_companion_window,
             virtual_cursor_window_frames,
             virtual_cursor_transfer_window,
-            virtual_cursor_transfer_at_edge
+            virtual_cursor_transfer_at_edge,
+            get_nitrogen_pilot_status,
+            start_nitrogen_pilot,
+            stop_nitrogen_pilot
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

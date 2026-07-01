@@ -6,19 +6,58 @@
         "Resident Evil Requiem"
       ],
       "processes": [
-        "codex.exe"
+        "re9.exe"
       ],
       "window_titles": [
-        "Codex"
+        "RESIDENT EVIL requiem",
+        "RESIDENT EVIL requiem (Not Responding)"
       ],
       "process_paths": [
-        "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.11010.0_x64__2p2nqsd0c76g0\\app\\Codex.exe"
+        "C:\\Program Files (x86)\\Steam\\steamapps\\common\\RESIDENT EVIL requiem BIOHAZARD requiem\\re9.exe"
       ],
       "learned": true,
-      "updated_at": "2026-05-31T18:16:25+0800"
+      "updated_at": "2026-06-30T22:23:56+0800"
+    },
+    "NineSols": {
+      "name": "NineSols",
+      "aliases": [
+        "Ninesols"
+      ],
+      "processes": [
+        "ms-teams.exe"
+      ],
+      "window_titles": [],
+      "process_paths": [
+        "C:\\Program Files\\WindowsApps\\MSTeams_26149.1205.4798.6437_x64__8wekyb3d8bbwe\\ms-teams.exe"
+      ],
+      "learned": true,
+      "updated_at": "2026-06-30T10:37:16+0800"
+    },
+    "Asphalt_-_v51.1.0a_-_D3D12": {
+      "name": "Asphalt - v51.1.0a - D3D12",
+      "aliases": [
+        "Asphalt V51.1.0A D3D12"
+      ],
+      "processes": [
+        "asphalt9_steam_x64_rtl.exe",
+        "steamwebhelper.exe"
+      ],
+      "window_titles": [
+        "Asphalt - v51.1.0a - D3D12",
+        "Steam"
+      ],
+      "process_paths": [
+        "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Asphalt 9 Legends\\Asphalt9_Steam_x64_rtl.exe",
+        "C:\\Program Files (x86)\\Steam\\bin\\cef\\cef.win64\\steamwebhelper.exe"
+      ],
+      "learned": true,
+      "updated_at": "2026-06-30T22:23:47+0800"
     }
   },
   "process_mappings": {
-    "codex.exe": "RESIDENT_EVIL_requiem"
+    "re9.exe": "RESIDENT_EVIL_requiem",
+    "ms-teams.exe": "NineSols",
+    "asphalt9_steam_x64_rtl.exe": "Asphalt_-_v51.1.0a_-_D3D12",
+    "steamwebhelper.exe": "Asphalt_-_v51.1.0a_-_D3D12"
   }
 }

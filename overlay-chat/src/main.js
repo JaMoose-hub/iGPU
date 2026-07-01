@@ -160,10 +160,17 @@ runWhenDomReady(async () => {
   let selectedGameId = localStorage.getItem("currentGameId") || "";
   let selectedGameName = "";
   let gameCatalog = [{ id: "", name: "Game" }];
+  let gameProfiles = {};
+  let latestActiveGameDetection = null;
+  let gamePilotEnabled = false;
+  let pilotStopPollTimer = null;
   let toolPanelStateFrame = 0;
   let virtualCursorEnabled = false;
   let standbyWindowMode = "collapsed";
   let standbyDetailedConversation = false;
+  let latestStandbyResponse = null;
+  let latestStandbyRouteTrace = [];
+  const standbyConversationHistory = [];
   localStorage.setItem("protect-mode", "off");
 
   const normalizeStandbyMode = (value) => {
@@ -184,6 +191,7 @@ runWhenDomReady(async () => {
     liveStateStatus: latestLiveStateStatus || {},
     captureProtectionEnabled,
     virtualCursorEnabled,
+    gamePilotEnabled,
     perfEnabled: document.body.classList.contains("perf-mode"),
     opacity: Number(localStorage.getItem("ui-opacity") || "100")
   });
@@ -199,6 +207,104 @@ runWhenDomReady(async () => {
     }
     if (toolPanelStateFrame) return;
     toolPanelStateFrame = window.requestAnimationFrame(emitState);
+  };
+
+  const compactStandbyContextText = (value, maxLength = 180) => {
+    const text = String(value || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength - 3).trim()}...`;
+  };
+
+  const rememberConversationMessage = (role, text) => {
+    const normalizedRole = role === "assistant" ? "assistant" : "user";
+    const normalizedText = compactStandbyContextText(text);
+    if (!normalizedText) return;
+    const last = standbyConversationHistory[standbyConversationHistory.length - 1];
+    if (last?.role === normalizedRole && last?.text === normalizedText) return;
+    standbyConversationHistory.push({
+      role: normalizedRole,
+      text: normalizedText
+    });
+    while (standbyConversationHistory.length > 12) standbyConversationHistory.shift();
+  };
+
+  const buildStandbyContext = (currentQuestion = "") => {
+    const normalizedQuestion = compactStandbyContextText(currentQuestion, 220);
+    const items = standbyConversationHistory.slice();
+    const last = items[items.length - 1];
+    if (last?.role === "user" && normalizedQuestion && normalizedQuestion.includes(last.text)) {
+      items.pop();
+    }
+    return items.slice(-10);
+  };
+
+  const rememberStandbyResponse = ({ shortText, detailText, question, title, context, routeTrace }) => {
+    const text = String(shortText || "").trim();
+    const longText = String(detailText || shortText || "").trim();
+    if (!text && !longText) return;
+    latestStandbyResponse = {
+      text: text || longText,
+      detailText: longText || text,
+      question: String(question || "").trim(),
+      title: String(title || selectedGameName || selectedGameId || "Game Companion").trim(),
+      context: Array.isArray(context) ? context : buildStandbyContext(question),
+      routeTrace: Array.isArray(routeTrace) ? routeTrace.slice(-8) : latestStandbyRouteTrace.slice(-8),
+      updatedAt: Date.now()
+    };
+  };
+
+  const clearStandbyResponseMemory = () => {
+    latestStandbyResponse = null;
+    latestStandbyRouteTrace = [];
+    standbyDetailedConversation = false;
+    standbyConversationHistory.length = 0;
+    events.emit?.("standby:clear-response", {}).catch(() => {});
+  };
+
+  const openStandbyMode = async (mode, payload = {}) => {
+    const normalizedMode = normalizeStandbyMode(mode) || "typein";
+    standbyWindowMode = normalizedMode;
+    standbyDetailedConversation = normalizedMode === "detail";
+    await invoke?.("set_standby_window_mode", { mode: normalizedMode }).catch((err) => {
+      console.warn("Could not set standby mode:", err);
+    });
+    events.emit?.("standby:set-mode", {
+      expanded: normalizedMode !== "collapsed",
+      mode: normalizedMode,
+      ...payload
+    }).catch(() => {});
+  };
+
+  const openStandbyTypeIn = async () => {
+    standbyDetailedConversation = false;
+    await openStandbyMode("typein", { focusInput: true });
+    events.emit?.("standby:focus-input", {}).catch(() => {});
+  };
+
+  const showLatestStandbyResponse = async () => {
+    if (!latestStandbyResponse?.text) return false;
+    standbyDetailedConversation = false;
+    standbyWindowMode = "response";
+    await invoke?.("set_standby_window_mode", { mode: "response" }).catch((err) => {
+      console.warn("Could not open standby response:", err);
+    });
+    events.emit?.("standby:set-response", {
+      ...latestStandbyResponse,
+      mode: "response"
+    }).catch(() => {});
+    return true;
+  };
+
+  const handleStandbyHotkey = async () => {
+    if (isSending) {
+      await openStandbyMode("thinking");
+      return;
+    }
+    if (await showLatestStandbyResponse()) return;
+    await openStandbyTypeIn();
   };
 
   localStorage.removeItem("hud-overlay");
@@ -573,6 +679,12 @@ runWhenDomReady(async () => {
     scrollChatToBottom();
   };
 
+  const clearChatWindow = () => {
+    abortController?.abort();
+    clearNode(chatWindow);
+    clearStandbyResponseMemory();
+  };
+
   const createBotResponseMessage = (statusText) => {
     const msgDiv = appendMessage("", "bot");
     msgDiv.classList.add("lookup-message");
@@ -620,7 +732,8 @@ runWhenDomReady(async () => {
     if (stage === "agent_no_tools") return path(["GamePath 未命中", "Hermes 回答"]);
     if (stage === "gamepath_stored") return "保存：已寫入 GamePath";
     if (stage === "gamepath_not_stored") return "保存：未寫入 GamePath";
-    return status?.message || "Checking guide source...";
+    if (stage === "response_done") return `${status?.message || "回覆完成"}${suffix}`;
+    return `${status?.message || "Checking guide source..."}${suffix}`;
   };
 
   const compactLookupValue = (value, maxLen = 90) => {
@@ -717,6 +830,7 @@ runWhenDomReady(async () => {
     const sqliteMs = formatLookupDuration(status?.search_elapsed_ms);
     const retrievalMs = formatLookupDuration(retrievalRouter?.latency_ms);
     const hintMs = formatLookupDuration(status?.gamepath_hint_ms);
+    const responseMs = formatLookupDuration(status?.response_elapsed_ms ?? status?.total_elapsed_ms);
 
     const isVisionRoute = router?.route_source === "vision"
       || String(router?.intent_route || "").startsWith("screenshot_");
@@ -724,6 +838,7 @@ runWhenDomReady(async () => {
     if (sqliteMs) parts.push(`SQLite ${sqliteMs}`);
     if (retrievalMs) parts.push(`Qwen評估 ${retrievalMs}`);
     if (hintMs) parts.push(`Qwen提示 ${hintMs}`);
+    if (responseMs) parts.push(`總耗時 ${responseMs}`);
 
     if (stage === "gamepath_miss") {
       parts.push("Hermes/Tavily 待開始");
@@ -752,6 +867,11 @@ runWhenDomReady(async () => {
       segments.push(route ? `${label}:${route}` : label);
     }
     const pushRetrievalSegment = () => {
+      if (retrievalRouter?.skipped) {
+        const skippedRoute = retrievalLabel(retrievalRouter.confidence || retrievalRouter.route || retrievalRouter.reason);
+        segments.push(skippedRoute ? `規則評估:${skippedRoute}` : "規則評估");
+        return;
+      }
       if (!retrievalRouter?.used) return;
       const retrievalRoute = retrievalLabel(retrievalRouter.confidence || retrievalRouter.route || retrievalRouter.reason);
       segments.push(retrievalRoute ? `Qwen評估:${retrievalRoute}` : "Qwen評估");
@@ -779,6 +899,7 @@ runWhenDomReady(async () => {
     else if (stage === "gamepath_not_stored") segments.push("GamePath未寫入");
     else if (stage === "gamepath_disputed") segments.push("玩家回報", "GamePath降權");
     else if (stage === "gamepath_feedback_missing") segments.push("玩家回報", "找不到紀錄");
+    else if (stage === "response_done") segments.push("回覆完成");
     else if (stage === "error") segments.push("錯誤");
     else if (status?.source) segments.push(compactLookupValue(status.source, 40));
 
@@ -829,6 +950,12 @@ runWhenDomReady(async () => {
       });
     }
 
+    latestStandbyRouteTrace = routeTrace.slice(-8);
+    events.emit?.("standby:set-lookup-status", {
+      latest: latestStandbyRouteTrace[latestStandbyRouteTrace.length - 1] || null,
+      trace: latestStandbyRouteTrace
+    }).catch(() => {});
+
     if (!routeLogDiv) return;
     routeLogDiv.replaceChildren();
     routeTrace.forEach((item, index) => {
@@ -869,7 +996,68 @@ runWhenDomReady(async () => {
   const VOICE_TASK_INTENT_RE =
     /(任務記錄|任務紀錄|任務記一下|記一下任務|幫我記任務|幫我記錄任務|幫我建立任務|建立任務|加入任務|新增任務|列為任務|列為目標|作為目標|當成目標|追蹤這個|幫我追蹤|目標清單|待辦|我拿到|我取得|我獲得|拿到這個|取得這個|獲得這個|這個物品|這個道具|這個材料|這個能幹嘛|這個能做什麼|用途|用在哪|能用在哪|不知道.*用|task|quest log|objective|goal|todo|log this|track this)/i;
 
-  const shouldAutoCapture = (text) => AUTO_CAPTURE_RE.test(text || "");
+  const AUTO_CAPTURE_TOKENS = [
+    "\u4f60\u770b\u898b", // 你看見
+    "\u4f60\u770b\u5230", // 你看到
+    "\u770b\u898b\u4ec0\u9ebc", // 看見什麼
+    "\u770b\u5230\u4ec0\u9ebc", // 看到什麼
+    "\u5e6b\u6211\u770b", // 幫我看
+    "\u770b\u4e00\u4e0b", // 看一下
+    "\u756b\u9762", // 畫面
+    "\u87a2\u5e55", // 螢幕
+    "\u622a\u5716", // 截圖
+    "\u5708\u51fa", // 圈出
+    "\u5708\u8d77", // 圈起
+    "\u6846\u51fa", // 框出
+    "\u6a19\u8a18", // 標記
+    "\u6a19\u51fa", // 標出
+    "\u6307\u7d66", // 指給
+    "\u6307\u5f15", // 指引
+    "\u7bad\u982d", // 箭頭
+    "\u73fe\u5728\u5728\u54ea", // 現在在哪
+    "\u73fe\u5728\u8a72", // 現在該
+    "\u8a72\u600e\u9ebc\u505a", // 該怎麼做
+    "\u6211\u5728\u54ea" // 我在哪
+  ];
+  const AUTO_CAPTURE_EN_RE =
+    /(what.*see|what.*screen|describe.*screen|look.*screen|look at my screen|current screen|circle|mark|highlight|arrow|where|target|objective|hud)/i;
+  const shouldAutoCapture = (text) => {
+    const value = String(text || "").trim().toLowerCase();
+    if (!value) return false;
+    return AUTO_CAPTURE_TOKENS.some((token) => value.includes(token)) || AUTO_CAPTURE_RE.test(value) || AUTO_CAPTURE_EN_RE.test(value);
+  };
+  const screenIntentFallbackRoute = (text) => {
+    if (!shouldAutoCapture(text)) return "";
+    const value = String(text || "").trim().toLowerCase();
+    const wantsHud = [
+      "\u5708\u51fa",
+      "\u5708\u8d77",
+      "\u6846\u51fa",
+      "\u6a19\u8a18",
+      "\u6a19\u51fa",
+      "\u6307\u7d66",
+      "\u6307\u5f15",
+      "\u7bad\u982d",
+      "circle",
+      "mark",
+      "highlight",
+      "arrow",
+      "hud"
+    ].some((token) => value.includes(token));
+    if (wantsHud) return "screenshot_hud";
+    const wantsNextStep = [
+      "\u73fe\u5728\u8a72",
+      "\u8a72\u600e\u9ebc\u505a",
+      "\u600e\u9ebc\u505a",
+      "\u53bb\u54ea",
+      "\u904e\u95dc",
+      "\u600e\u9ebc\u904e",
+      "what should i do",
+      "where should i go",
+      "next step"
+    ].some((token) => value.includes(token));
+    return wantsNextStep ? "screenshot_gamepath_query" : "screenshot_visual";
+  };
   const shouldTaskIntent = (text) => TASK_INTENT_RE.test(text || "") || VOICE_TASK_INTENT_RE.test(text || "");
   const isScreenshotIntentRoute = (route) => String(route || "").trim().startsWith("screenshot_");
 
@@ -922,7 +1110,18 @@ runWhenDomReady(async () => {
     const decision = intent?.decision || {};
     const reason = decision.raw_reason || decision.reason || "";
     const elapsed = Number(intent?.elapsedMs ?? decision.latency_ms);
-    const parts = [`Qwen route: ${route}`];
+    const routeSource = String(decision.route_source || "").trim();
+    const usedQwen = decision.used !== false && routeSource !== "frontend";
+    const sourceLabel = routeSource === "frontend"
+      ? "\u524d\u7aef\u898f\u5247\u4fdd\u5e95"
+      : routeSource === "qwen_then_backend_guard"
+        ? "\u5730\u7aef Qwen \u5224\u65b7\u5f8c\u4fdd\u5e95"
+      : decision.used === false
+        ? "\u5f8c\u7aef\u898f\u5247\u4fdd\u5e95"
+        : "\u5730\u7aef Qwen \u5224\u65b7";
+    const parts = [`${sourceLabel}: ${route}`];
+    if (usedQwen && decision.model) parts.push(`model=${decision.model}`);
+    if (decision.qwen_route && decision.qwen_route !== route) parts.push(`qwen_route=${decision.qwen_route}`);
     if (reason) parts.push(`${reason}`);
     if (Number.isFinite(elapsed) && elapsed > 0) parts.push(`${Math.round(elapsed)}ms`);
     return parts.join(" | ");
@@ -1153,6 +1352,7 @@ runWhenDomReady(async () => {
       msgDiv.appendChild(img);
     }
     chatWindow.appendChild(msgDiv);
+    rememberConversationMessage("user", text || (imageBase64 ? "Sent a screenshot." : ""));
     scrollChatToBottom();
   };
 
@@ -1729,6 +1929,7 @@ runWhenDomReady(async () => {
       const resp = await fetch(`${API_BASE}/active-game`, { cache: "no-store" });
       if (!resp.ok) return null;
       const detection = await resp.json();
+      latestActiveGameDetection = detection || null;
       updateGameAutoButton(detection);
       const gameId = String(detection?.game_id || "").trim();
       const confidence = Number(detection?.confidence || 0);
@@ -1746,12 +1947,92 @@ runWhenDomReady(async () => {
     }
   };
 
+  const resolvePilotProcessName = async () => {
+    const detection = await pollActiveGame({ announce: false }).catch(() => null);
+    const detectedProcess = String(detection?.process_name || latestActiveGameDetection?.process_name || "").trim();
+    if (detectedProcess) return detectedProcess;
+
+    const selectedProfile = selectedGameId ? gameProfiles?.[selectedGameId] : null;
+    const profileProcess = Array.isArray(selectedProfile?.processes)
+      ? String(selectedProfile.processes[0] || "").trim()
+      : "";
+    if (profileProcess) return profileProcess;
+
+    return "re9.exe";
+  };
+
+  const clearPilotStopPoll = () => {
+    if (pilotStopPollTimer) {
+      window.clearInterval(pilotStopPollTimer);
+      pilotStopPollTimer = null;
+    }
+  };
+
+  const pollPilotUntilStopped = () => {
+    clearPilotStopPoll();
+    let attempts = 0;
+    pilotStopPollTimer = window.setInterval(async () => {
+      attempts += 1;
+      try {
+        const status = await invoke?.("get_nitrogen_pilot_status");
+        gamePilotEnabled = Boolean(status?.running);
+        syncToolPanelState();
+        if (!status?.running) {
+          clearPilotStopPoll();
+          appendMessage(`遊戲代打已安全退出。${status?.message ? `\n${status.message}` : ""}`, "bot");
+        } else if (attempts >= 15) {
+          clearPilotStopPoll();
+          appendMessage("遊戲代打已送出停止訊號，但 NitroGen 還在釋放控制權。請先不要強制關閉，避免影響遊戲。", "bot");
+        }
+      } catch (err) {
+        clearPilotStopPoll();
+        console.warn("Pilot stop poll failed:", err);
+      }
+    }, 1000);
+  };
+
+  const startGamePilot = async () => {
+    if (!invoke) throw new Error("Tauri invoke is unavailable");
+    clearPilotStopPoll();
+    const host = localStorage.getItem("nitrogen-pilot-host") || "192.168.50.138";
+    const port = Number(localStorage.getItem("nitrogen-pilot-port") || "5655");
+    const processName = await resolvePilotProcessName();
+    const status = await invoke?.("start_nitrogen_pilot", {
+      host,
+      port,
+      processName
+    });
+    gamePilotEnabled = Boolean(status?.running);
+    syncToolPanelState();
+    appendMessage(
+      `遊戲代打已啟動。\nNitroGen: ${status?.host || host}:${status?.port || port}\nProcess: ${status?.process_name || processName}\nPID: ${status?.pid || "-"}`,
+      "bot"
+    );
+    return status;
+  };
+
+  const stopGamePilot = async () => {
+    if (!invoke) throw new Error("Tauri invoke is unavailable");
+    const status = await invoke?.("stop_nitrogen_pilot");
+    gamePilotEnabled = Boolean(status?.running);
+    syncToolPanelState();
+    if (status?.running) {
+      appendMessage(`已送出遊戲代打停止訊號，正在等待 NitroGen 安全釋放控制器。\n${status?.message || ""}`, "bot");
+      pollPilotUntilStopped();
+    } else {
+      clearPilotStopPoll();
+      appendMessage(`遊戲代打已關閉。${status?.message ? `\n${status.message}` : ""}`, "bot");
+    }
+    return status;
+  };
+
   const loadGuideGames = async () => {
     try {
       const resp = await fetch(`${API_BASE}/game-profiles`);
       const data = await resp.json();
       const savedGameId = localStorage.getItem("currentGameId") || "";
       const profiles = data.profiles || {};
+      gameProfiles = profiles;
       gameCatalog = [{ id: "", name: "Game" }];
       if (gameSelect) gameSelect.innerHTML = '<option value="">Game</option>';
       for (const game of data.games || []) {
@@ -1892,6 +2173,9 @@ runWhenDomReady(async () => {
         case "open_gamepath":
           await openGamePathWindow();
           break;
+        case "chat_clear":
+          clearChatWindow();
+          break;
         case "hud_clear":
           await handleHudClear();
           break;
@@ -1908,6 +2192,14 @@ runWhenDomReady(async () => {
           const enabled = document.body.classList.toggle("perf-mode");
           localStorage.setItem("perf-mode", enabled ? "true" : "false");
           syncToolPanelState();
+          break;
+        }
+        case "game_pilot_toggle": {
+          if (gamePilotEnabled) {
+            await stopGamePilot();
+          } else {
+            await startGamePilot();
+          }
           break;
         }
         case "opacity_set":
@@ -1937,7 +2229,7 @@ runWhenDomReady(async () => {
 
   const setBusy = (busy) => {
     const nextMode = busy
-      ? (standbyWindowMode === "collapsed" ? "collapsed" : "thinking")
+      ? (standbyDetailedConversation || standbyWindowMode === "detail" ? "detail" : (standbyWindowMode === "collapsed" ? "collapsed" : "thinking"))
       : (standbyDetailedConversation ? "detail" : (standbyWindowMode === "response" || standbyWindowMode === "detail" ? standbyWindowMode : (standbyWindowMode === "typein" || standbyWindowMode === "thinking" ? "typein" : "collapsed")));
 
     isSending = busy;
@@ -2454,6 +2746,8 @@ runWhenDomReady(async () => {
   const sendToAI = async (text, imageBase64 = null, captureSource = null, options = {}) => {
     const manageBusy = options.manageBusy !== false;
     if (manageBusy && isSending) return;
+    latestStandbyRouteTrace = [];
+    events.emit?.("standby:set-lookup-status", { latest: null, trace: [] }).catch(() => {});
     if (manageBusy) {
       setBusy(true);
       abortController = new AbortController();
@@ -2464,11 +2758,13 @@ runWhenDomReady(async () => {
     const { statusDiv, routeLogDiv, routeTrace, contentDiv } = createBotResponseMessage(
       imageBase64 ? "Reading compressed screenshot..." : "Preparing response..."
     );
+    const responseStartedAt = performance.now();
     let collected = "";
     let showedOverlay = false;
     let lastStandbyResponseText = "";
     let lastStandbyDetailText = "";
     let latestResponseFormat = null;
+    let finalLookupStatusRecorded = false;
 
     const formatStandbyResponseText = (value) => {
       const cleaned = String(value || "")
@@ -2492,9 +2788,19 @@ runWhenDomReady(async () => {
     };
 
     const emitStandbyResponse = (shortText, longText) => {
-      if (standbyWindowMode === "collapsed") return;
       const responseText = String(shortText || "").trim();
       const detailText = String(longText || shortText || "").trim();
+      if (!responseText && !detailText) return;
+      const responseContext = buildStandbyContext(text);
+      rememberStandbyResponse({
+        shortText: responseText,
+        detailText,
+        question: text,
+        title: selectedGameName || selectedGameId || "Game Companion",
+        context: responseContext,
+        routeTrace: latestStandbyRouteTrace
+      });
+      if (standbyWindowMode === "collapsed") return;
       if (!responseText || (responseText === lastStandbyResponseText && detailText === lastStandbyDetailText)) return;
       lastStandbyResponseText = responseText;
       lastStandbyDetailText = detailText;
@@ -2505,6 +2811,8 @@ runWhenDomReady(async () => {
         detailText,
         question: text,
         title: selectedGameName || selectedGameId || "Game Companion",
+        context: responseContext,
+        routeTrace: latestStandbyRouteTrace,
         mode: responseMode
       }).catch(() => {});
     };
@@ -2516,6 +2824,22 @@ runWhenDomReady(async () => {
       }
       const detailText = collected.trim();
       emitStandbyResponse(formatStandbyResponseText(detailText), detailText);
+    };
+
+    const recordFinalLookupTiming = (stage = "response_done", message = "回覆完成") => {
+      if (finalLookupStatusRecorded) return;
+      finalLookupStatusRecorded = true;
+      recordLookupStatus(
+        {
+          stage,
+          message,
+          response_elapsed_ms: performance.now() - responseStartedAt
+        },
+        statusDiv,
+        routeLogDiv,
+        routeTrace
+      );
+      syncStandbyResponse();
     };
 
     try {
@@ -2607,19 +2931,22 @@ runWhenDomReady(async () => {
         for (const line of lines) await handleSseLine(line.trimEnd());
       }
 
-      renderFormattedMessage(contentDiv, collected.trim() || (
+      const finalAnswerText = collected.trim() || (
         showedOverlay
           ? "HUD 已標記。"
           : "這次沒有產生可用回覆；請換個問法，或指定要看的畫面位置。"
-      ));
+      );
+      renderFormattedMessage(contentDiv, finalAnswerText);
+      rememberConversationMessage("assistant", finalAnswerText);
+      recordFinalLookupTiming("response_done", "回覆完成");
       scrollChatToBottom();
     } catch (error) {
       if (error.name === "AbortError") {
         renderFormattedMessage(contentDiv, `${collected.trim()}\n\nStopped.`.trim());
+        recordFinalLookupTiming("response_done", "回覆已停止");
       } else {
         console.error(error);
-        statusDiv.textContent = "Connection failed";
-        statusDiv.dataset.stage = "error";
+        recordFinalLookupTiming("error", "Connection failed");
         renderFormattedMessage(contentDiv, `${error.message || error}`);
       }
     } finally {
@@ -2653,9 +2980,26 @@ runWhenDomReady(async () => {
       appendUserMessage(text || "Analyze this screenshot.", imageBase64, imageMimeType);
       userAlreadyAppended = true;
 
-      const intent = text ? await routeUserIntent(text, abortController.signal) : null;
+      let intent = text ? await routeUserIntent(text, abortController.signal) : null;
       if (abortController?.signal?.aborted) return;
-      const intentRoute = String(intent?.route || "").trim();
+      let intentRoute = String(intent?.route || "").trim();
+      if (text && !imageBase64 && !isScreenshotIntentRoute(intentRoute)) {
+        const fallbackRoute = screenIntentFallbackRoute(text);
+        if (fallbackRoute) {
+          intentRoute = fallbackRoute;
+          intent = {
+            route: fallbackRoute,
+            decision: {
+              used: false,
+              intent_route: fallbackRoute,
+              route_source: "frontend",
+              reason: "frontend_screen_intent_guard",
+              raw_reason: "frontend_screen_intent_guard"
+            },
+            elapsedMs: 0
+          };
+        }
+      }
 
       if (text && !imageBase64 && intentRoute === "ui_command") {
         abortController = null;
@@ -2864,6 +3208,13 @@ runWhenDomReady(async () => {
     } else if (mode === "collapsed" || mode === "typein" || mode === "response") {
       standbyDetailedConversation = false;
     }
+  }).catch(() => {});
+
+  await events.listen?.("standby-hotkey", () => {
+    handleStandbyHotkey().catch((err) => {
+      console.warn("Standby hotkey failed:", err);
+      openStandbyTypeIn().catch(() => {});
+    });
   }).catch(() => {});
 
   const applyGamePathAsk = async (entry = {}) => {

@@ -29,6 +29,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageGrab, ImageStat
 from pydantic import BaseModel
 
 
+def float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 LLAMA_HOST = os.environ.get("LLAMA_HOST", "127.0.0.1")
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "18080"))
 API_HOST = os.environ.get("IGPU_API_HOST", "127.0.0.1")
@@ -93,6 +101,11 @@ LOCAL_ROUTER_RETRIEVAL_EVAL = os.environ.get("IGPU_LOCAL_ROUTER_RETRIEVAL_EVAL",
     "yes",
     "on",
 }
+GAMEPATH_QWEN_EVAL_FAST_HIT_SCORE = float_env("IGPU_GAMEPATH_QWEN_EVAL_FAST_HIT_SCORE", 0.62, 0.0, 1.0)
+GAMEPATH_QWEN_EVAL_FAST_HIT_GAP = float_env("IGPU_GAMEPATH_QWEN_EVAL_FAST_HIT_GAP", 0.12, 0.0, 1.0)
+GAMEPATH_QWEN_EVAL_FAST_HIT_COVERAGE = float_env("IGPU_GAMEPATH_QWEN_EVAL_FAST_HIT_COVERAGE", 0.30, 0.0, 1.0)
+GAMEPATH_QWEN_EVAL_FAST_HIT_CORE = float_env("IGPU_GAMEPATH_QWEN_EVAL_FAST_HIT_CORE", 0.30, 0.0, 1.0)
+GAMEPATH_QWEN_EVAL_FAST_MISS_SCORE = float_env("IGPU_GAMEPATH_QWEN_EVAL_FAST_MISS_SCORE", 0.38, 0.0, 1.0)
 LOCAL_ROUTER_ALWAYS_ROUTE = os.environ.get("IGPU_LOCAL_ROUTER_ALWAYS_ROUTE", "1").strip().lower() in {
     "1",
     "true",
@@ -100,7 +113,7 @@ LOCAL_ROUTER_ALWAYS_ROUTE = os.environ.get("IGPU_LOCAL_ROUTER_ALWAYS_ROUTE", "1"
     "on",
 }
 LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS = int(os.environ.get("IGPU_LOCAL_ROUTER_CACHE_TTL", "600"))
-LOCAL_ROUTER_INTENT_CACHE_VERSION = "intent-route-v3-screen-guard"
+LOCAL_ROUTER_INTENT_CACHE_VERSION = "intent-route-v4-qwen-first-screen-guard"
 
 ASSET_ROOT = Path(
     os.environ.get(
@@ -169,6 +182,23 @@ IGNORED_CAPTURE_TITLES = (
 IGNORED_CAPTURE_PROCESSES = (
     "overlay-chat.exe",
     "textinputhost.exe",
+    "applicationframehost.exe",
+    "searchhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "widgets.exe",
+    "ms-teams.exe",
+    "teams.exe",
+    "msteams.exe",
+    "msedgewebview2.exe",
+    "msedge.exe",
+    "chrome.exe",
+    "outlook.exe",
+    "onenote.exe",
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "officeclicktorun.exe",
 )
 GENERATED_DIR = Path(__file__).resolve().parent / "generated_files"
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -351,6 +381,27 @@ def get_system_prompt() -> str:
     )
 
 
+def response_format_contract() -> str:
+    return (
+        "\n\nUI response contract:\n"
+        "Return exactly one JSON object and nothing else. Do not wrap it in Markdown.\n"
+        "Schema: {\"short\":\"...\",\"long\":\"...\"}\n"
+        "- short: Traditional Chinese, 1-2 short sentences for the compact in-game UI. "
+        "It must prioritize the next concrete action the player can do now; do not only describe background.\n"
+        "- long: Traditional Chinese, the complete reply for the detailed chat. Include enough context, "
+        "reasoning, steps, and caveats when useful.\n"
+        "Do not use Hint 1/2/3 labels. Do not include source lists or URLs unless the player explicitly asks."
+    )
+
+
+def with_response_format_contract(prompt: str) -> str:
+    text = str(prompt or "").strip()
+    marker = '"short":"..."'
+    if marker in text or "UI response contract" in text:
+        return text
+    return f"{text}{response_format_contract()}" if text else response_format_contract().strip()
+
+
 def llama_base_url() -> str:
     return f"http://{LLAMA_HOST}:{LLAMA_PORT}"
 
@@ -437,7 +488,7 @@ def get_hermes_agent_web_system_prompt() -> str:
         "game mechanics, or when the player explicitly asks to check the web. If local context is enough, "
         "answer directly without web search. Default to no-spoiler guidance: avoid story twists, later "
         "area names, character fate, endings, and surprise encounters unless the player explicitly asks "
-        "for the full solution. Prefer one direct teaching hint first, then add details only when useful. "
+        "for the full solution. Prefer one direct next-step suggestion first, then add details only when useful. "
         "Do not label answers with tiered hint markers. If the player asks for the answer directly, "
         "give a clear solution but still avoid unnecessary story spoilers. When you do "
         "search, use retrieved pages only as private background material. Condense them into useful player "
@@ -481,7 +532,7 @@ def build_hermes_agent_web_prompt(
         "\nUse your own judgment: answer directly if enough context exists; otherwise use Tavily web "
         "search through the web toolset. For guide searches, build queries from game + platform/version "
         "+ scene/item/objective + guide/walkthrough/tips/no spoilers. If GamePath context is present, "
-        "first extract only the relevant passages and turn them into a compact player hint; do not paste "
+        "first extract only the relevant passages and turn them into a compact player-facing suggestion; do not paste "
         "the whole local document. If you search, summarize the result for the player and omit "
         "references/URLs unless explicitly requested."
     )
@@ -584,7 +635,7 @@ def call_hermes_no_tools(
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     result = subprocess.run(
         args,
-        input=prompt,
+        input=with_response_format_contract(prompt),
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -649,7 +700,7 @@ def call_hermes_web_agent(
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     result = subprocess.run(
         args,
-        input=prompt,
+        input=with_response_format_contract(prompt),
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -729,22 +780,31 @@ def parse_response_format_object(answer: str) -> Optional[dict[str, str]]:
     raw = str(answer or "").strip()
     if not raw:
         return None
-    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
-    if fenced:
-        raw = fenced.group(1).strip()
-    if not raw.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    short = str(parsed.get("short") or parsed.get("Short") or "").strip()
-    long = str(parsed.get("long") or parsed.get("Long") or parsed.get("content") or "").strip()
-    if not short and not long:
-        return None
-    return {"short": short, "long": long}
+    candidates = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    candidates.append(raw)
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        starts = [0] if text.startswith("{") else []
+        starts.extend(match.start() for match in re.finditer(r"\{", text))
+        seen_starts: set[int] = set()
+        for start in starts:
+            if start in seen_starts:
+                continue
+            seen_starts.add(start)
+            try:
+                parsed, _ = decoder.raw_decode(text[start:])
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            short = str(parsed.get("short") or parsed.get("Short") or "").strip()
+            long = str(parsed.get("long") or parsed.get("Long") or parsed.get("content") or "").strip()
+            if short or long:
+                return {"short": short, "long": long}
+    return None
 
 
 def parse_response_format_labels(answer: str) -> Optional[dict[str, str]]:
@@ -792,11 +852,26 @@ def extract_hint_line(answer: str, number: int = 3) -> str:
     return truncate_response_short(" ".join(capture), 118) if capture else ""
 
 
+def strip_tiered_hint_markers(text: str) -> str:
+    """Remove old Hint 1/2/3 labels while preserving useful answer text."""
+    hint_label_re = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?\s*Hint\s*[123]\s*(?:\*\*)?\s*[:：]\s*",
+        re.IGNORECASE,
+    )
+    zh_hint_label_re = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?\s*提示\s*[一二三123]\s*(?:\*\*)?\s*[:：]\s*",
+        re.IGNORECASE,
+    )
+    cleaned_lines: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = hint_label_re.sub("", line)
+        stripped = zh_hint_label_re.sub("", stripped)
+        cleaned_lines.append(stripped)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned_lines)).strip()
+
+
 def derive_response_short(answer: str) -> str:
-    # Compatibility only: older cached answers may still contain tiered hint markers.
-    hint3 = extract_hint_line(answer, 3)
-    if hint3:
-        return hint3
+    answer = strip_tiered_hint_markers(answer)
     for line in str(answer or "").splitlines():
         stripped = line.strip()
         if not stripped:
@@ -814,8 +889,12 @@ def derive_response_short(answer: str) -> str:
 
 def build_response_format(answer: str) -> dict[str, str]:
     parsed = parse_response_format_object(answer) or parse_response_format_labels(answer)
-    long_text = (parsed or {}).get("long") or str(answer or "").strip()
-    short_text = (parsed or {}).get("short") or derive_response_short(long_text)
+    if parsed:
+        long_text = strip_tiered_hint_markers(parsed.get("long") or parsed.get("short") or "")
+        short_text = strip_tiered_hint_markers(parsed.get("short") or derive_response_short(long_text))
+    else:
+        long_text = strip_tiered_hint_markers(str(answer or "").strip())
+        short_text = strip_tiered_hint_markers(derive_response_short(long_text))
     return {
         "short": short_text.strip(),
         "long": long_text.strip(),
@@ -1859,6 +1938,12 @@ GAMEPATH_SAVE_ONLY_RE = re.compile(
     r"(存下來|保存|存起來|記錄下來|刪掉|刪除|打開|開啟|關閉|刷新|有幾筆|多少資料|資料庫|狀態|機制)",
     re.IGNORECASE,
 )
+GAMEPATH_EXPLICIT_STORE_RE = re.compile(
+    r"(\b(save|store|record)\b|"
+    r"(幫我|請|把|將|直接)?.{0,10}"
+    r"(存下來|保存|存起來|記錄下來|記下來|寫入\s*GamePath|存進\s*GamePath|加到\s*GamePath))",
+    re.IGNORECASE,
+)
 GAMEPATH_NEGATED_GUIDE_RE = re.compile(
     r"(不用|不要|先不用|不需要|別).{0,10}(查|搜尋|搜索|找|攻略|網路|上網|web|guide)",
     re.IGNORECASE,
@@ -2285,6 +2370,72 @@ def game_platform_marker(process_path: str) -> Optional[str]:
     return next((marker for marker in markers if marker in path_lower), None)
 
 
+def is_companion_or_dev_process(
+    process_name: str,
+    process_path: str = "",
+    window_title: str = "",
+) -> bool:
+    name = Path(str(process_name or "")).name.lower()
+    path_lower = str(process_path or "").lower().replace("/", "\\")
+    title_lower = str(window_title or "").strip().lower()
+    blocked_names = {
+        "codex.exe",
+        "overlay-chat.exe",
+        "tauri.exe",
+        "node.exe",
+        "npm.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "cmd.exe",
+        "python.exe",
+        "pythonw.exe",
+        *IGNORED_CAPTURE_PROCESSES,
+    }
+    blocked_titles = {
+        "codex",
+        "game companion",
+        "game companion standby",
+        "overlay hud",
+        "gamepath",
+        "game search",
+        "任務紀錄",
+    }
+    blocked_title_markers = (
+        "microsoft teams",
+        "teams",
+        "outlook",
+        "microsoft edge",
+        "google chrome",
+        "chrome",
+        "copilot",
+        "office",
+        "word",
+        "excel",
+        "powerpoint",
+        "onenote",
+    )
+    if name in blocked_names:
+        return True
+    if title_lower in blocked_titles:
+        return True
+    if any(marker in title_lower for marker in blocked_title_markers):
+        return True
+    return any(
+        marker in path_lower
+        for marker in (
+            "\\openai.codex_",
+            "\\projects\\igpu\\overlay-chat\\",
+            "\\projects\\igpu\\.venv\\",
+            "\\windowsapps\\msteams_",
+            "\\microsoft\\msteams\\",
+            "\\microsoft\\teams\\",
+            "\\microsoft\\edge\\",
+            "\\google\\chrome\\",
+            "\\microsoft office\\",
+        )
+    )
+
+
 def candidate_from_profile(
     game_id: str,
     profile: dict[str, Any],
@@ -2315,6 +2466,26 @@ def resolve_game_from_window(window: Optional[dict[str, Any]]) -> dict[str, Any]
     process_name = Path(str(window.get("process_name") or "")).name.lower()
     process_path = str(window.get("process_path") or "")
     title = str(window.get("title") or "")
+    if is_companion_or_dev_process(process_name, process_path, title):
+        return {
+            "active": False,
+            "game_id": None,
+            "name": "",
+            "confidence": 0.0,
+            "source": "ignored_process",
+            "match": process_name or title,
+            "process_name": process_name,
+            "process_path": process_path,
+            "window_title": title,
+            "window": {
+                "title": title,
+                "process_name": process_name,
+                "process_path": process_path,
+                "width": int(window.get("width") or 0),
+                "height": int(window.get("height") or 0),
+            },
+            "stale": False,
+        }
     profiles_data = load_game_profiles_sync()
     profiles = dict(profiles_data.get("profiles") or {})
 
@@ -2424,6 +2595,8 @@ def learn_active_game_sync(request: GameProfileLearnRequest) -> dict[str, Any]:
     process_name = Path(str(request.process_name or window.get("process_name") or "")).name.lower()
     process_path = str(request.process_path or window.get("process_path") or "").strip()
     window_title = str(request.window_title or window.get("title") or "").strip()
+    if is_companion_or_dev_process(process_name, process_path, window_title):
+        raise ValueError(f"Refusing to learn companion/dev foreground process as a game: {process_name or window_title}")
 
     data = load_game_profiles_sync()
     profiles = data.setdefault("profiles", {})
@@ -4950,11 +5123,23 @@ def local_router_gamepath_decision(
         lowered = output.strip().lower()
         parsed = {"route": "gamepath_query" if "gamepath" in lowered or ("true" in lowered and "false" not in lowered) else "general_chat"}
     route = normalize_local_router_intent_route(parsed.get("route", parsed.get("r")), parsed)
-    if route == "gamepath_query" and live_state_prompt_needs_screen(prompt):
-        route = "screenshot_gamepath_query"
+    qwen_route = route
+    if live_state_prompt_needs_screen(prompt) and not str(route or "").startswith("screenshot_"):
+        guard_decision = fallback_screenshot_intent_decision(
+            prompt,
+            game_id,
+            guide_requested,
+            "qwen_then_current_screen_text_guard",
+        )
+        route = str(guard_decision.get("intent_route") or "screenshot_visual").strip() or "screenshot_visual"
         parsed["route"] = route
-        parsed["reason"] = parsed.get("reason") or "current_screen_help_guard"
-    should_search = route == "gamepath_query"
+        parsed["route_source"] = "qwen_then_backend_guard"
+        parsed["qwen_route"] = qwen_route
+        parsed["reason"] = (
+            parsed.get("reason")
+            or f"qwen_then_current_screen_text_guard;qwen_route={qwen_route}"
+        )
+    should_search = route in {"gamepath_query", "screenshot_gamepath_query"}
     prefer_hermes_agent = route == "hermes_web"
     query = str(parsed.get("query") or parsed.get("q") or prompt or "").strip()
     if not query:
@@ -4974,6 +5159,8 @@ def local_router_gamepath_decision(
         "confidence": str(parsed.get("confidence") or parsed.get("c") or ("medium" if should_search else "low")).strip().lower()[:16],
         "reason": "qwen_user_intent_route" if LOCAL_ROUTER_ALWAYS_ROUTE else "qwen_semantic_route",
         "intent_route": route,
+        "route_source": str(parsed.get("route_source") or "").strip()[:64],
+        "qwen_route": str(parsed.get("qwen_route") or qwen_route or "").strip()[:64],
         "ui_action": re.sub(r"[^a-z0-9_\-]+", "_", str(parsed.get("ui_action") or "").strip().lower()).strip("_-")[:48],
         "prefer_hermes_agent": prefer_hermes_agent,
         "raw_reason": str(parsed.get("reason") or "").strip()[:160],
@@ -5434,6 +5621,89 @@ def evaluate_gamepath_retrieval(
     }
 
 
+def gamepath_retrieval_eval_fast_path(
+    evaluation: dict[str, Any],
+    *,
+    tactical_reframe: bool = False,
+) -> Optional[dict[str, Any]]:
+    results = list(evaluation.get("results") or [])
+    if not results:
+        return {
+            "used": False,
+            "skipped": True,
+            "reason": "backend_no_candidates",
+            "confidence": "miss",
+            "score": 0.0,
+            "gap": 0.0,
+        }
+    top = results[0]
+    confidence = str(evaluation.get("confidence") or "").strip().lower()
+    score = float(evaluation.get("score") or top.get("retrieval_score") or 0.0)
+    gap = float(evaluation.get("gap") or 0.0)
+    coverage = float(top.get("match_coverage") or 0.0)
+    core_overlap = float(top.get("core_overlap") or 0.0)
+    answer_len = int(top.get("answer_len") or 0)
+    context_len = int(top.get("context_len") or 0)
+    trust_state = str(top.get("trust_state") or "unverified").strip().lower()
+    bad_trust = trust_state in {"disputed", "needs_review", "deprecated"}
+    top_id = int(top.get("id") or 0)
+
+    base = {
+        "used": False,
+        "skipped": True,
+        "model": LOCAL_ROUTER_MODEL,
+        "confidence": confidence or "miss",
+        "top_id": top_id,
+        "score": round(score, 3),
+        "gap": round(gap, 3),
+        "coverage": round(coverage, 3),
+        "core_overlap": round(core_overlap, 3),
+    }
+    if tactical_reframe:
+        return {
+            **base,
+            "confidence": "summarize",
+            "reason": "backend_skip_tactical_reframe",
+        }
+    if confidence == "direct":
+        return {
+            **base,
+            "confidence": "direct",
+            "reason": "backend_skip_direct_hit",
+        }
+    clear_hit = (
+        confidence == "summarize"
+        and not bad_trust
+        and score >= GAMEPATH_QWEN_EVAL_FAST_HIT_SCORE
+        and max(answer_len, context_len) >= 60
+        and (
+            gap >= GAMEPATH_QWEN_EVAL_FAST_HIT_GAP
+            or coverage >= GAMEPATH_QWEN_EVAL_FAST_HIT_COVERAGE
+            or core_overlap >= GAMEPATH_QWEN_EVAL_FAST_HIT_CORE
+        )
+    )
+    if clear_hit:
+        return {
+            **base,
+            "confidence": "summarize",
+            "reason": "backend_clear_local_hit",
+        }
+    clear_miss = (
+        confidence == "miss"
+        and (
+            score <= GAMEPATH_QWEN_EVAL_FAST_MISS_SCORE
+            or (score < 0.44 and coverage <= 0.18 and core_overlap <= 0.18)
+        )
+    )
+    if clear_miss:
+        return {
+            **base,
+            "confidence": "miss",
+            "reason": "backend_clear_miss",
+        }
+    return None
+
+
 def local_router_retrieval_decision(
     query: str,
     game_id: Optional[str],
@@ -5585,6 +5855,7 @@ def build_gamepath_hint_answer(prompt: str, result: dict[str, Any]) -> str:
                 "你是遊戲攻略提示整理器。只能使用提供的 GamePath 本地資料，不要新增未提供事實，"
                 "不要列來源網址，不要貼原文全文。用繁體中文，輸出給玩家看的短回覆與詳細回覆。"
                 "弱點、密碼、道具名稱、地點名稱必須沿用資料原詞；不要改寫成資料裡沒有的部位或名詞。"
+                "只輸出一個 JSON 物件：{\"short\":\"...\",\"long\":\"...\"}，不要 Markdown。"
             ),
         },
         {
@@ -5593,9 +5864,9 @@ def build_gamepath_hint_answer(prompt: str, result: dict[str, Any]) -> str:
                 f"玩家問題：{status_text(prompt, 180)}\n"
                 f"GamePath 標題：{title}\n"
                 f"GamePath 本地資料：{source_text}\n\n"
-                "請只輸出下面 2 段，不要前言，不要來源，不要使用分級提示標籤：\n"
-                "短回覆：<一句最可執行的教學提示，像玩家真的卡住時需要的下一步>\n"
-                "詳細回覆：<較完整但仍精簡的教學，包含原因、路線/站位/操作，2 到 4 句>\n"
+                "請只輸出 JSON，不要前言，不要來源，不要使用分級提示標籤。\n"
+                "short：一句最可執行的教學提示，像玩家真的卡住時需要的下一步。\n"
+                "long：較完整但仍精簡的教學，包含原因、路線/站位/操作，2 到 4 句。\n"
                 "注意：如果是戰鬥問題，要給站位、迴避或省資源打法；如果是謎題/密碼，先提示再給明確答案。"
                 "禁止使用資料中沒有出現的弱點部位，例如不要把「屁股」改成「關節、核心、腹部」。"
             ),
@@ -5822,16 +6093,19 @@ def gamepath_store_skip_reason(
     answer: str,
     game_id: Optional[str],
     agent_used: bool,
+    *,
+    require_prompt_intent: bool = True,
 ) -> str:
     if not agent_used:
         return "agent_not_used"
     clean_answer = str(answer or "").strip()
     if len(clean_answer) < 40:
         return "answer_too_short"
-    if backend_hard_skips_gamepath(prompt):
-        return "backend_hard_skip"
-    if not should_use_gamepath(prompt, bool(GUIDE_INTENT_RE.search(prompt or ""))):
-        return "not_guide_intent"
+    if require_prompt_intent:
+        if backend_hard_skips_gamepath(prompt):
+            return "backend_hard_skip"
+        if not should_use_gamepath(prompt, bool(GUIDE_INTENT_RE.search(prompt or ""))):
+            return "not_guide_intent"
     uncertain_near_start = GAMEPATH_UNCERTAIN_RE.search(clean_answer[:220])
     has_actionable_hint = re.search(r"(Hint|提示|直接答案|建議|下一步|步驟|做法|打法)", clean_answer, re.IGNORECASE)
     if uncertain_near_start and not has_actionable_hint:
@@ -5856,6 +6130,50 @@ def gamepath_store_skip_reason(
 
 def should_store_gamepath_answer(prompt: str, answer: str, game_id: Optional[str], agent_used: bool) -> bool:
     return not gamepath_store_skip_reason(prompt, answer, game_id, agent_used)
+
+
+def explicit_gamepath_store_requested(prompt: str) -> bool:
+    return bool(GAMEPATH_EXPLICIT_STORE_RE.search(str(prompt or "")))
+
+
+def gamepath_auto_store_skip_reason(
+    prompt: str,
+    answer: str,
+    game_id: Optional[str],
+    agent_used: bool,
+    *,
+    had_gamepath_context: bool = False,
+    tactical_reframe: bool = False,
+) -> str:
+    explicit_store = explicit_gamepath_store_requested(prompt)
+    if tactical_reframe:
+        return "tactical_followup_not_reusable"
+    if had_gamepath_context and not explicit_store:
+        return "local_gamepath_context_reuse"
+    return gamepath_store_skip_reason(
+        prompt,
+        answer,
+        game_id,
+        agent_used,
+        require_prompt_intent=not explicit_store,
+    )
+
+
+def should_auto_store_gamepath_answer(
+    prompt: str,
+    answer: str,
+    game_id: Optional[str],
+    agent_used: bool,
+    *,
+    had_gamepath_context: bool = False,
+) -> bool:
+    return not gamepath_auto_store_skip_reason(
+        prompt,
+        answer,
+        game_id,
+        agent_used,
+        had_gamepath_context=had_gamepath_context,
+    )
 
 
 def resolve_gamepath_store_game_id(
@@ -8053,6 +8371,22 @@ def live_state_prompt_needs_screen(prompt: str) -> bool:
     text = str(prompt or "").strip().lower()
     if not text:
         return False
+    explicit_screen_tokens = (
+        "\u73fe\u5728\u5728\u54ea",  # 現在在哪
+        "\u73fe\u5728\u8a72",  # 現在該
+        "\u6211\u5728\u54ea",  # 我在哪
+        "\u9019\u756b\u9762",  # 這畫面
+        "\u756b\u9762",  # 畫面
+        "\u87a2\u5e55",  # 螢幕
+        "\u622a\u5716",  # 截圖
+        "\u770b\u756b\u9762",  # 看畫面
+        "\u5e6b\u6211\u770b",  # 幫我看
+        "\u8a72\u600e\u9ebc\u505a",  # 該怎麼做
+        "look at my screen",
+        "current screen",
+    )
+    if any(token in text for token in explicit_screen_tokens):
+        return True
     patterns = (
         "現在在哪",
         "現在該",
@@ -8472,30 +8806,32 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             gamepath_search_query,
             gamepath_search_tags,
         )
-        if (
-            gamepath_results
-            and LOCAL_ROUTER_RETRIEVAL_EVAL
-            and not chat_request.image_base64
-            and str(gamepath_evaluation.get("confidence") or "") != "direct"
-        ):
-            try:
-                retrieval_decision = await asyncio.to_thread(
-                    local_router_retrieval_decision,
-                    gamepath_search_query,
-                    game_id,
-                    gamepath_evaluation,
-                )
-                gamepath_evaluation = apply_local_router_retrieval_decision(
-                    gamepath_evaluation,
-                    retrieval_decision,
-                )
-                gamepath_results = list(gamepath_evaluation.get("results") or gamepath_results)
-            except Exception as exc:
-                gamepath_evaluation["local_router_retrieval"] = {
-                    "used": True,
-                    "reason": f"retrieval_router_failed:{type(exc).__name__}",
-                }
-                print(f"Local router GamePath retrieval eval failed: {exc}")
+        if gamepath_results and LOCAL_ROUTER_RETRIEVAL_EVAL and not chat_request.image_base64:
+            retrieval_fast_path = gamepath_retrieval_eval_fast_path(
+                gamepath_evaluation,
+                tactical_reframe=tactical_gamepath_reframe,
+            )
+            if retrieval_fast_path:
+                gamepath_evaluation["local_router_retrieval"] = retrieval_fast_path
+            elif str(gamepath_evaluation.get("confidence") or "") != "direct":
+                try:
+                    retrieval_decision = await asyncio.to_thread(
+                        local_router_retrieval_decision,
+                        gamepath_search_query,
+                        game_id,
+                        gamepath_evaluation,
+                    )
+                    gamepath_evaluation = apply_local_router_retrieval_decision(
+                        gamepath_evaluation,
+                        retrieval_decision,
+                    )
+                    gamepath_results = list(gamepath_evaluation.get("results") or gamepath_results)
+                except Exception as exc:
+                    gamepath_evaluation["local_router_retrieval"] = {
+                        "used": True,
+                        "reason": f"retrieval_router_failed:{type(exc).__name__}",
+                    }
+                    print(f"Local router GamePath retrieval eval failed: {exc}")
         if tactical_gamepath_reframe and gamepath_results:
             gamepath_evaluation["confidence"] = "summarize"
             gamepath_evaluation["reason"] = "tactical_followup_requires_model_reframe"
@@ -8508,7 +8844,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         guide_results = await asyncio.to_thread(search_guides_sync, prompt, game_id, 5)
 
     fact_answer = answer_fact_lookup(prompt, memory_results)
-    if fact_answer and not chat_request.image_base64:
+    if fact_answer and not chat_request.image_base64 and CHAT_BACKEND != "hermes":
         async def fact_answer_event_generator():
             append_history("user", prompt)
             append_history("assistant", fact_answer)
@@ -8517,7 +8853,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(fact_answer_event_generator(), media_type="text/event-stream")
 
-    if gamepath_route == "direct":
+    if gamepath_route == "direct" and CHAT_BACKEND != "hermes":
         async def gamepath_answer_event_generator():
             top_item = gamepath_results[0]
             remember_gamepath_reference(top_item, route="direct")
@@ -8583,7 +8919,7 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
     live_state_context = live_state_context_for_chat(prompt, use_live_state_context)
     if live_state_context:
         rag_context = f"{live_state_context}\n\n{rag_context}" if rag_context else live_state_context
-    if gamepath_route == "summarize" and rag_context:
+    if gamepath_route in {"direct", "summarize"} and rag_context:
         if tactical_gamepath_reframe:
             rag_context = (
                 "GamePath tactical follow-up: the player needs a different playable tactic, not a repeated route summary. "
@@ -8594,8 +8930,9 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             )
         else:
             rag_context = (
-                "GamePath route: matching local GamePath entries were found. Summarize these entries first. "
-                "Do not use Tavily unless the local entries are clearly insufficient for the player's question.\n"
+                "GamePath route: matching local GamePath entries were found. Hermes must answer the player "
+                "using these entries first. Do not use Tavily unless the local entries are clearly insufficient "
+                "for the player's question. Do not label the answer as Hint 1/2/3.\n"
                 f"{rag_context}"
             )
     model_prompt = gamepath_answer_prompt if chat_request.image_base64 and gamepath_was_requested else prompt
@@ -8667,15 +9004,13 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 display_format = build_response_format(collected)
                 collected = display_format["long"]
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)
-                store_skip_reason = (
-                    "tactical_followup_not_reusable"
-                    if tactical_gamepath_reframe
-                    else gamepath_store_skip_reason(
-                        prompt,
-                        collected,
-                        store_game_id,
-                        HERMES_AGENT_WEB_ENABLED,
-                    )
+                store_skip_reason = gamepath_auto_store_skip_reason(
+                    prompt,
+                    collected,
+                    store_game_id,
+                    HERMES_AGENT_WEB_ENABLED,
+                    had_gamepath_context=bool(gamepath_context_results),
+                    tactical_reframe=tactical_gamepath_reframe,
                 )
                 if not store_skip_reason:
                     try:
@@ -8693,7 +9028,11 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                         yield gamepath_store_lookup_status_event(stored_item, store_game_id)
                     except Exception as exc:
                         print(f"GamePath auto-store failed: {exc}")
-                elif gamepath_was_requested and HERMES_AGENT_WEB_ENABLED:
+                elif (
+                    gamepath_was_requested
+                    and HERMES_AGENT_WEB_ENABLED
+                    and store_skip_reason != "local_gamepath_context_reuse"
+                ):
                     yield lookup_status_event(
                         "gamepath_not_stored",
                         "這次回答沒有符合可重用攻略條件，所以沒有寫入 GamePath。",
@@ -8794,7 +9133,13 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 answer = condense_agent_answer(answer, prompt)
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)
                 store_question = gamepath_answer_prompt if gamepath_was_requested else prompt
-                if should_store_gamepath_answer(store_question, answer, store_game_id, True):
+                if should_auto_store_gamepath_answer(
+                    store_question,
+                    answer,
+                    store_game_id,
+                    True,
+                    had_gamepath_context=bool(gamepath_context_results),
+                ):
                     try:
                         stored_item = await asyncio.to_thread(
                             add_gamepath_sync,

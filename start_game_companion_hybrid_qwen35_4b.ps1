@@ -179,6 +179,7 @@ Write-Host "Local router: $RouterAlias on $routerUrl"
 if ($RouterMmprojPath) {
     Write-Host "Local router mmproj: $RouterMmprojPath"
 }
+Write-Host "Vulkan visible physical device: $VulkanDevice"
 Write-Host "llama.cpp auto-start inside backend: disabled"
 
 Stop-Overlay
@@ -193,12 +194,17 @@ foreach ($log in @($routerStdoutLog, $routerStderrLog, $backendStdoutLog, $backe
     }
 }
 
+$routerDeviceArg = "Vulkan0"
+$env:GGML_VK_VISIBLE_DEVICES = $VulkanDevice
+$env:LLAMA_ARG_DEVICE = $routerDeviceArg
+$env:LLAMA_ARG_MAIN_GPU = "0"
+
 $routerArgs = @(
     "--model", $RouterModelPath,
     "--host", "127.0.0.1",
     "--port", "$RouterPort",
     "--ctx-size", "$RouterCtxSize",
-    "--device", "Vulkan$VulkanDevice",
+    "--device", $routerDeviceArg,
     "--n-gpu-layers", "$RouterGpuLayers",
     "--alias", $RouterAlias,
     "--jinja",
@@ -217,7 +223,6 @@ if ($RouterMmprojPath) {
     )
 }
 
-Remove-Item Env:\GGML_VK_VISIBLE_DEVICES -ErrorAction SilentlyContinue
 $env:LLAMA_ARG_FLASH_ATTN = "0"
 
 $routerProcess = Start-Process `
