@@ -41,7 +41,6 @@ runWhenDomReady(async () => {
   const minBtn = document.getElementById("minBtn");
   const maxBtn = document.getElementById("maxBtn");
   const toolsBtn = document.getElementById("toolsBtn");
-  const standbyBtn = document.getElementById("standbyBtn");
   const searchBtn = document.getElementById("searchBtn");
   const tasksBtn = document.getElementById("tasksBtn");
   const gamepathBtn = document.getElementById("gamepathBtn");
@@ -282,6 +281,11 @@ runWhenDomReady(async () => {
     standbyDetailedConversation = false;
     await openStandbyMode("typein", { focusInput: true });
     events.emit?.("standby:focus-input", {}).catch(() => {});
+    [80, 180, 320, 600, 900].forEach((delay) => {
+      window.setTimeout(() => {
+        events.emit?.("standby:focus-input", {}).catch(() => {});
+      }, delay);
+    });
   };
 
   const showLatestStandbyResponse = async () => {
@@ -299,10 +303,6 @@ runWhenDomReady(async () => {
   };
 
   const handleStandbyHotkey = async () => {
-    if (isSending) {
-      await openStandbyMode("thinking");
-      return;
-    }
     if (await showLatestStandbyResponse()) return;
     await openStandbyTypeIn();
   };
@@ -719,12 +719,26 @@ runWhenDomReady(async () => {
     const evalPrefix = status?.local_router_retrieval?.used ? ["地端 Qwen 評估"] : routePrefix;
     const path = (segments) => `搜尋路徑：${segments.filter(Boolean).join(" → ")}${suffix}`;
     if (stage === "gamepath_hit") return path([...evalPrefix, "GamePath", "本地回答"]);
-    if (stage === "gamepath_summarizing") return path([...evalPrefix, "GamePath", "Hermes 整理"]);
+    if (stage === "gamepath_summarizing") {
+      const next = isStrongLocalGamePathStatus(status)
+        ? "Hermes 整理"
+        : isWebSearchPossibleStatus(status)
+          ? "Hermes 評估（可 Tavily）"
+          : "Hermes 整理";
+      return path([...evalPrefix, "GamePath 本地候選", next]);
+    }
     if (stage === "gamepath_miss") return path([...routePrefix, "GamePath 未命中", "Hermes/Tavily"]);
     if (stage === "gamepath_skipped") return path(["略過 GamePath", "一般聊天"]);
     if (stage === "gamepath_disputed") return "驗證：上一個 GamePath 提示已降權";
     if (stage === "gamepath_feedback_missing") return "驗證：找不到上一筆 GamePath 紀錄";
-    if (stage === "gamepath_context") return path(["GamePath", "Hermes 整理"]);
+    if (stage === "gamepath_context") {
+      const next = isStrongLocalGamePathStatus(status)
+        ? "Hermes 整理"
+        : isWebSearchPossibleStatus(status)
+          ? "Hermes 評估（可 Tavily）"
+          : "Hermes 整理";
+      return path(["GamePath 本地候選", next]);
+    }
     if (stage === "guide_context") return path(["本地攻略", "Hermes 整理"]);
     if (stage === "memory_context") return path(["玩家記憶", "Hermes 整理"]);
     if (stage === "agent_may_search_web") return path(["本地未命中", "Hermes/Tavily"]);
@@ -761,6 +775,41 @@ runWhenDomReady(async () => {
     if (ms < 1000) return `${Math.round(ms)}ms`;
     if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
     return `${Math.round(ms / 1000)}s`;
+  };
+
+  const isWebSearchPossibleStatus = (status) => {
+    const webSearch = String(status?.web_search || "").toLowerCase();
+    const hermesMode = String(status?.hermes_mode || "");
+    return webSearch === "possible"
+      || hermesMode === "hermes_gamepath_eval_agent"
+      || hermesMode === "hermes_tavily_agent";
+  };
+
+  const isStrongLocalGamePathStatus = (status) => {
+    const stage = String(status?.stage || "");
+    if (stage === "gamepath_hit") return true;
+    if (stage !== "gamepath_summarizing" && stage !== "gamepath_context") return false;
+    const score = Number(status?.retrieval_score);
+    const gap = Number(status?.retrieval_gap);
+    const topCandidate = Array.isArray(status?.candidates) ? status.candidates[0] : null;
+    const coverage = Number(topCandidate?.match_coverage);
+    const reason = String(status?.retrieval_reason || "");
+    const hasDirectScore = Number.isFinite(score) && score >= 0.74;
+    const hasClearWinner = Number.isFinite(gap) && gap >= 0.1;
+    const hasUsefulCoverage = Number.isFinite(coverage) && coverage >= 0.3;
+    return hasDirectScore && (hasClearWinner || hasUsefulCoverage || reason === "high_score_clear_winner");
+  };
+
+  const lookupVisualStage = (status) => {
+    const stage = String(status?.stage || "");
+    if (
+      (stage === "gamepath_summarizing" || stage === "gamepath_context")
+      && isWebSearchPossibleStatus(status)
+      && !isStrongLocalGamePathStatus(status)
+    ) {
+      return "agent_may_search_web";
+    }
+    return stage;
   };
 
   const intentRouteLabel = (route) => {
@@ -830,6 +879,15 @@ runWhenDomReady(async () => {
     const sqliteMs = formatLookupDuration(status?.search_elapsed_ms);
     const retrievalMs = formatLookupDuration(retrievalRouter?.latency_ms);
     const hintMs = formatLookupDuration(status?.gamepath_hint_ms);
+    const hermesMs = formatLookupDuration(status?.hermes_elapsed_ms);
+    const hermesMode = String(status?.hermes_mode || "");
+    const hermesModeLabel = hermesMode === "hermes_gamepath_eval_agent"
+      ? "Hermes評估"
+      : hermesMode === "hermes_gamepath_fast_summary"
+        ? "Hermes整理"
+        : hermesMode === "hermes_tavily_agent"
+          ? "Hermes/Tavily"
+          : "Hermes整理";
     const responseMs = formatLookupDuration(status?.response_elapsed_ms ?? status?.total_elapsed_ms);
 
     const isVisionRoute = router?.route_source === "vision"
@@ -838,6 +896,7 @@ runWhenDomReady(async () => {
     if (sqliteMs) parts.push(`SQLite ${sqliteMs}`);
     if (retrievalMs) parts.push(`Qwen評估 ${retrievalMs}`);
     if (hintMs) parts.push(`Qwen提示 ${hintMs}`);
+    if (hermesMs) parts.push(`${hermesModeLabel} ${hermesMs}`);
     if (responseMs) parts.push(`總耗時 ${responseMs}`);
 
     if (stage === "gamepath_miss") {
@@ -882,9 +941,11 @@ runWhenDomReady(async () => {
       pushRetrievalSegment();
       segments.push("本地回答");
     } else if (stage === "gamepath_summarizing" || stage === "gamepath_context") {
-      segments.push("GamePath本地命中");
+      const strongLocal = isStrongLocalGamePathStatus(status);
+      const webPossible = isWebSearchPossibleStatus(status);
+      segments.push(strongLocal ? "GamePath本地命中" : webPossible ? "GamePath本地候選" : "GamePath本地命中");
       pushRetrievalSegment();
-      segments.push("模型整理");
+      segments.push(strongLocal ? "Hermes整理" : webPossible ? "Hermes評估(可Tavily)" : "模型整理");
     } else if (stage === "gamepath_miss") {
       segments.push("GamePath未命中");
       pushRetrievalSegment();
@@ -932,14 +993,16 @@ runWhenDomReady(async () => {
     const summary = formatLookupStatus(status);
     const detail = formatLookupTrace(status);
     const stage = status?.stage || "";
+    const visualStage = lookupVisualStage(status);
     const previous = routeTrace[routeTrace.length - 1];
 
     statusDiv.textContent = summary;
-    statusDiv.dataset.stage = stage;
+    statusDiv.dataset.stage = visualStage;
 
     if (!previous || previous.detail !== detail) {
       routeTrace.push({
-        stage,
+        stage: visualStage,
+        rawStage: stage,
         summary,
         detail,
         time: new Date().toLocaleTimeString([], {
@@ -962,6 +1025,7 @@ runWhenDomReady(async () => {
       const row = document.createElement("div");
       row.className = "lookup-route-line";
       row.dataset.stage = item.stage || "";
+      if (item.rawStage) row.dataset.rawStage = item.rawStage;
       row.textContent = `${index + 1}. ${item.time} ${item.detail}`;
       routeLogDiv.appendChild(row);
     });
@@ -1476,20 +1540,6 @@ runWhenDomReady(async () => {
     event.preventDefault();
     openToolsWindow();
   });
-  const collapseToStandby = async (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    await invoke?.("collapse_main_to_standby").catch((err) => {
-      appendMessage(`Standby failed: ${err?.message || err}`, "bot");
-    });
-  };
-
-  standbyBtn?.addEventListener("pointerdown", collapseToStandby);
-  standbyBtn?.addEventListener("click", collapseToStandby);
-  document.addEventListener("pointerdown", (event) => {
-    if (!event.target?.closest?.("#standbyBtn")) return;
-    collapseToStandby(event);
-  }, true);
   tasksBtn?.addEventListener("click", (event) => {
     event.preventDefault();
     openTasksWindow();
@@ -3139,10 +3189,7 @@ runWhenDomReady(async () => {
   });
 
   minBtn?.addEventListener("click", async () => {
-    await invoke?.("collapse_main_to_standby").catch(async (err) => {
-      console.warn("Could not collapse to standby:", err);
-      await appWindow?.minimize?.().catch(() => {});
-    });
+    await appWindow?.minimize?.().catch(() => {});
   });
 
   maxBtn?.addEventListener("click", async () => {

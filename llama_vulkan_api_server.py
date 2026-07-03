@@ -73,6 +73,17 @@ HERMES_AGENT_WEB_ENABLED = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 HERMES_AGENT_TOOLSETS = os.environ.get("HERMES_AGENT_TOOLSETS", "web").strip() or "web"
 HERMES_AGENT_MAX_TOKENS = int(os.environ.get("HERMES_AGENT_MAX_TOKENS", "360"))
+GAMEPATH_HERMES_MAX_CANDIDATES = max(1, min(5, int(os.environ.get("IGPU_GAMEPATH_HERMES_MAX_CANDIDATES", "3"))))
+GAMEPATH_HERMES_SNIPPET_MAX_CHARS = max(240, min(1600, int(os.environ.get("IGPU_GAMEPATH_HERMES_SNIPPET_MAX_CHARS", "700"))))
+GAMEPATH_HERMES_MAX_TOKENS = max(96, min(512, int(os.environ.get("IGPU_GAMEPATH_HERMES_MAX_TOKENS", "220"))))
+GAMEPATH_HERMES_EVAL_SUMMARIZE = os.environ.get(
+    "IGPU_GAMEPATH_HERMES_EVAL_SUMMARIZE",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
+HERMES_SKIP_LOCAL_RETRIEVAL_EVAL = os.environ.get(
+    "IGPU_HERMES_SKIP_LOCAL_RETRIEVAL_EVAL",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
 OPENAI_MAX_TOKENS_CAP = int(os.environ.get("LLAMA_OPENAI_MAX_TOKENS_CAP", "0"))
 ENABLE_LOCAL_TOOLS = os.environ.get(
     "IGPU_ENABLE_LOCAL_TOOLS",
@@ -6315,6 +6326,9 @@ def format_rag_context(
     memory_results: list[dict[str, Any]],
     guide_was_requested: bool,
     gamepath_results: Optional[list[dict[str, Any]]] = None,
+    *,
+    max_gamepath_results: int = 5,
+    max_gamepath_chars: int = GAMEPATH_HERMES_SNIPPET_MAX_CHARS,
 ) -> str:
     lines: list[str] = []
     if memory_results:
@@ -6326,9 +6340,12 @@ def format_rag_context(
             "GamePath extracted passages (stable local SQLite + Markdown). "
             "Use only the passages relevant to the player's question; never dump the whole document."
         )
-        for index, item in enumerate(gamepath_results[:5], 1):
+        for index, item in enumerate(gamepath_results[:max(1, max_gamepath_results)], 1):
             title = item.get("title") or "GamePath"
             snippet = item.get("relevant_excerpt") or item.get("snippet") or make_snippet(item.get("answer_summary") or "", title)
+            snippet = re.sub(r"\s+", " ", str(snippet or "")).strip()
+            if len(snippet) > max_gamepath_chars:
+                snippet = f"{snippet[:max_gamepath_chars].rstrip()}..."
             tags = item.get("tags") or ""
             path = item.get("markdown_path") or ""
             lines.append(f"{index}. {title} [{tags}] ({path}): {snippet}")
@@ -6905,6 +6922,15 @@ async def health():
         "local_router_always_route": LOCAL_ROUTER_ALWAYS_ROUTE if LOCAL_ROUTER_ENABLED else False,
         "local_router_gamepath_max_chars": LOCAL_ROUTER_GAMEPATH_MAX_CHARS if LOCAL_ROUTER_ENABLED else None,
         "local_router_retrieval_eval": LOCAL_ROUTER_RETRIEVAL_EVAL if LOCAL_ROUTER_ENABLED else False,
+        "local_router_retrieval_eval_effective": (
+            bool(LOCAL_ROUTER_ENABLED and LOCAL_ROUTER_RETRIEVAL_EVAL)
+            and not (CHAT_BACKEND == "hermes" and HERMES_SKIP_LOCAL_RETRIEVAL_EVAL)
+        ),
+        "hermes_skip_local_retrieval_eval": HERMES_SKIP_LOCAL_RETRIEVAL_EVAL if CHAT_BACKEND == "hermes" else False,
+        "gamepath_hermes_max_candidates": GAMEPATH_HERMES_MAX_CANDIDATES,
+        "gamepath_hermes_snippet_max_chars": GAMEPATH_HERMES_SNIPPET_MAX_CHARS,
+        "gamepath_hermes_max_tokens": GAMEPATH_HERMES_MAX_TOKENS,
+        "gamepath_hermes_eval_summarize": GAMEPATH_HERMES_EVAL_SUMMARIZE,
         "local_router_cache_ttl_seconds": LOCAL_ROUTER_DECISION_CACHE_TTL_SECONDS if LOCAL_ROUTER_ENABLED else None,
         "rag_backend": "gamepath_rag_lite_sqlite_fts5_chunks",
         "gamepath_enabled": True,
@@ -8806,7 +8832,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             gamepath_search_query,
             gamepath_search_tags,
         )
-        if gamepath_results and LOCAL_ROUTER_RETRIEVAL_EVAL and not chat_request.image_base64:
+        use_local_retrieval_eval = (
+            LOCAL_ROUTER_RETRIEVAL_EVAL
+            and not chat_request.image_base64
+            and not (CHAT_BACKEND == "hermes" and HERMES_SKIP_LOCAL_RETRIEVAL_EVAL)
+        )
+        if gamepath_results and use_local_retrieval_eval:
             retrieval_fast_path = gamepath_retrieval_eval_fast_path(
                 gamepath_evaluation,
                 tactical_reframe=tactical_gamepath_reframe,
@@ -8839,7 +8870,11 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             local_router_gamepath_result["adaptive_followup"] = adaptive_gamepath_followup
             local_router_gamepath_result["tactical_reframe"] = True
     gamepath_route = str(gamepath_evaluation.get("confidence") or "skipped") if gamepath_was_requested else "skipped"
-    gamepath_context_results = gamepath_results if gamepath_route in {"direct", "summarize"} else []
+    gamepath_context_results = (
+        list(gamepath_results[:GAMEPATH_HERMES_MAX_CANDIDATES])
+        if gamepath_route in {"direct", "summarize"}
+        else []
+    )
     if guide_was_requested:
         guide_results = await asyncio.to_thread(search_guides_sync, prompt, game_id, 5)
 
@@ -8915,7 +8950,14 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         return StreamingResponse(no_guide_event_generator(), media_type="text/event-stream")
 
-    rag_context = format_rag_context(guide_results, memory_results, guide_was_requested, gamepath_context_results)
+    rag_context = format_rag_context(
+        guide_results,
+        memory_results,
+        guide_was_requested,
+        gamepath_context_results,
+        max_gamepath_results=GAMEPATH_HERMES_MAX_CANDIDATES,
+        max_gamepath_chars=GAMEPATH_HERMES_SNIPPET_MAX_CHARS,
+    )
     live_state_context = live_state_context_for_chat(prompt, use_live_state_context)
     if live_state_context:
         rag_context = f"{live_state_context}\n\n{rag_context}" if rag_context else live_state_context
@@ -8928,11 +8970,23 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                 "contain combat details, say so briefly and offer a practical fallback.\n"
                 f"{rag_context}"
             )
+        elif GAMEPATH_HERMES_EVAL_SUMMARIZE and HERMES_AGENT_WEB_ENABLED:
+            rag_context = (
+                "GamePath evaluation route: local GamePath candidates were found, but backend confidence requires "
+                "Hermes judgment. First evaluate whether the local candidates directly answer the player's question. "
+                "If they are sufficient, answer only from GamePath and do not search the web. If they are insufficient, "
+                "stale, contradictory, or miss the player's actual tactic/scene, use Tavily to fill the gap. "
+                "Keep the final response compact in Traditional Chinese: at most 3 short bullets, one concrete next action, "
+                "no long background, no source list, and no Hint 1/2/3 labels.\n"
+                f"{rag_context}"
+            )
         else:
             rag_context = (
                 "GamePath route: matching local GamePath entries were found. Hermes must answer the player "
-                "using these entries first. Do not use Tavily unless the local entries are clearly insufficient "
-                "for the player's question. Do not label the answer as Hint 1/2/3.\n"
+                "using these entries first. Do not use Tavily or web search for this local-hit path. "
+                "Return a compact playable tip in Traditional Chinese: at most 3 short bullets, one concrete next action, "
+                "no long background, no source list, and no Hint 1/2/3 labels. If the local entries are insufficient, "
+                "say the local GamePath entry is not enough and give a safe fallback.\n"
                 f"{rag_context}"
             )
     model_prompt = gamepath_answer_prompt if chat_request.image_base64 and gamepath_was_requested else prompt
@@ -8953,13 +9007,20 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         return StreamingResponse(tool_event_generator(), media_type="text/event-stream")
 
     if CHAT_BACKEND == "hermes" and not chat_request.image_base64:
+        use_fast_gamepath_summary = bool(gamepath_context_results) and (
+            not GAMEPATH_HERMES_EVAL_SUMMARIZE
+            or not HERMES_AGENT_WEB_ENABLED
+        )
         active_game_context = None
-        if HERMES_AGENT_WEB_ENABLED:
+        if HERMES_AGENT_WEB_ENABLED and not use_fast_gamepath_summary:
             try:
                 active_game_context = await asyncio.to_thread(detect_active_game_sync)
             except Exception as exc:
                 print(f"Active game context for Hermes web agent failed: {exc}")
         hermes_prompt = (
+            build_hermes_prompt(augmented_prompt)
+            if use_fast_gamepath_summary
+            else (
             build_hermes_agent_web_prompt(
                 prompt,
                 game_id=game_id,
@@ -8968,8 +9029,22 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             )
             if HERMES_AGENT_WEB_ENABLED
             else build_hermes_prompt(augmented_prompt)
+            )
         )
-        hermes_call = call_hermes_web_agent if HERMES_AGENT_WEB_ENABLED else call_hermes_no_tools
+        hermes_call = (
+            call_hermes_no_tools
+            if use_fast_gamepath_summary
+            else (call_hermes_web_agent if HERMES_AGENT_WEB_ENABLED else call_hermes_no_tools)
+        )
+        hermes_call_max_tokens = GAMEPATH_HERMES_MAX_TOKENS if use_fast_gamepath_summary else None
+        if use_fast_gamepath_summary:
+            hermes_call_mode = "hermes_gamepath_fast_summary"
+        elif gamepath_context_results and HERMES_AGENT_WEB_ENABLED:
+            hermes_call_mode = "hermes_gamepath_eval_agent"
+        elif HERMES_AGENT_WEB_ENABLED:
+            hermes_call_mode = "hermes_tavily_agent"
+        else:
+            hermes_call_mode = "hermes_chat"
 
         async def hermes_event_generator():
             collected = ""
@@ -8985,10 +9060,21 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             )
             if gamepath_context_results:
                 remember_gamepath_reference(gamepath_context_results[0], route="summarize")
+            if gamepath_context_results and not use_fast_gamepath_summary and HERMES_AGENT_WEB_ENABLED:
+                status_extra["web_search"] = "possible"
+                status_extra["hermes_mode"] = hermes_call_mode
+                status_extra["hermes_candidate_count"] = len(gamepath_context_results)
             yield lookup_status_event(stage, status_message, **status_extra)
+            hermes_started = time.perf_counter()
+            hermes_elapsed_ms = 0.0
             async with generate_lock:
                 try:
-                    collected = await asyncio.to_thread(hermes_call, hermes_prompt)
+                    collected = await asyncio.to_thread(
+                        hermes_call,
+                        hermes_prompt,
+                        max_tokens=hermes_call_max_tokens,
+                    )
+                    hermes_elapsed_ms = round((time.perf_counter() - hermes_started) * 1000, 1)
                 except subprocess.TimeoutExpired:
                     error = "Hermes 回應逾時。請稍後再試，或把 IGPU_CHAT_BACKEND 改成 llama 先走直接模型。"
                     yield f"data: {json.dumps({'content': error}, ensure_ascii=False)}\n\n"
@@ -8999,8 +9085,22 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
                     return
 
             if collected:
-                if HERMES_AGENT_WEB_ENABLED:
+                if HERMES_AGENT_WEB_ENABLED and not use_fast_gamepath_summary:
                     collected = condense_agent_answer(collected, prompt)
+                completed_status_extra = dict(status_extra)
+                completed_status_extra.update(
+                    {
+                        "hermes_elapsed_ms": hermes_elapsed_ms,
+                        "hermes_mode": hermes_call_mode,
+                        "hermes_max_tokens": hermes_call_max_tokens,
+                        "hermes_candidate_count": len(gamepath_context_results),
+                    }
+                )
+                yield lookup_status_event(
+                    stage,
+                    "Hermes 已完成整理。",
+                    **completed_status_extra,
+                )
                 display_format = build_response_format(collected)
                 collected = display_format["long"]
                 store_game_id = resolve_gamepath_store_game_id(game_id, active_game_context)

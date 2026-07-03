@@ -145,6 +145,7 @@ runWhenDomReady(async () => {
   let standbyVoiceActive = false;
   let standbyVoiceStopRequested = false;
   let standbyVoiceSent = false;
+  let standbyVoiceTarget = "typein";
   let standbyVoiceBaseText = "";
   let standbyVoiceFinalText = "";
   let standbyVoiceInterimText = "";
@@ -264,7 +265,7 @@ runWhenDomReady(async () => {
     form?.classList.toggle("has-draft", typing);
     sendBtn.classList.toggle("typing", typing);
     sendBtn.classList.toggle("default", !typing);
-    const voiceLabel = standbyVoiceActive ? "Listening..." : "Voice mode";
+    const voiceLabel = standbyVoiceActive && standbyVoiceTarget === "typein" ? "Listening..." : "Voice mode";
     sendBtn.title = typing ? "Send" : voiceLabel;
     sendBtn.setAttribute("aria-label", typing ? "Send" : voiceLabel);
   };
@@ -274,15 +275,24 @@ runWhenDomReady(async () => {
     const typing = hasDetailDraftText();
     detailSendBtn.classList.toggle("typing", typing);
     detailSendBtn.classList.toggle("default", !typing);
-    detailSendBtn.title = typing ? "Reply" : "Voice mode";
-    detailSendBtn.setAttribute("aria-label", typing ? "Reply" : "Voice mode");
+    const voiceLabel = standbyVoiceActive && standbyVoiceTarget === "detail" ? "Listening..." : "Voice mode";
+    detailSendBtn.title = typing ? "Reply" : voiceLabel;
+    detailSendBtn.setAttribute("aria-label", typing ? "Reply" : voiceLabel);
   };
 
   const focusStandbyInput = ({ select = false } = {}) => {
     if (!input || standbyMode !== "typein") return;
     const focusOnce = () => {
-      if (standbyMode !== "typein" || input.disabled) return;
+      if (standbyMode !== "typein") return;
+      input.disabled = false;
+      input.tabIndex = 0;
+      form?.setAttribute("aria-hidden", "false");
       window.focus();
+      try {
+        input.click?.();
+      } catch {
+        // Some WebView builds reject synthetic clicks while focus is settling.
+      }
       input.focus({ preventScroll: true });
       const cursor = input.value.length;
       if (select && input.value) {
@@ -293,7 +303,33 @@ runWhenDomReady(async () => {
     };
     focusOnce();
     window.requestAnimationFrame(focusOnce);
-    [50, 140, 260].forEach((delay) => window.setTimeout(focusOnce, delay));
+    [50, 140, 260, 500, 850, 1250, 1700].forEach((delay) => window.setTimeout(focusOnce, delay));
+  };
+
+  const focusDetailInput = ({ select = false } = {}) => {
+    if (!detailInput || standbyMode !== "detail") return;
+    const focusOnce = () => {
+      if (standbyMode !== "detail") return;
+      detailInput.disabled = false;
+      detailInput.tabIndex = 0;
+      detailPanel?.setAttribute("aria-hidden", "false");
+      window.focus();
+      try {
+        detailInput.click?.();
+      } catch {
+        // Some WebView builds reject synthetic clicks while focus is settling.
+      }
+      detailInput.focus({ preventScroll: true });
+      const cursor = detailInput.value.length;
+      if (select && detailInput.value) {
+        detailInput.select?.();
+      } else {
+        detailInput.setSelectionRange?.(cursor, cursor);
+      }
+    };
+    focusOnce();
+    window.requestAnimationFrame(focusOnce);
+    [50, 140, 260, 500, 850, 1250, 1700].forEach((delay) => window.setTimeout(focusOnce, delay));
   };
 
   const renderDetailContext = () => {
@@ -464,7 +500,7 @@ runWhenDomReady(async () => {
     standbyWakeActive = Boolean(awake);
     root?.classList.toggle("awake", Boolean(awake));
     setCollapsedArmed(Boolean(awake));
-    await setStandbyPointerPassthrough(false);
+    await setStandbyPointerPassthrough(true);
     if (!awake) {
       scheduleCollapsedIdle();
       return;
@@ -560,8 +596,16 @@ runWhenDomReady(async () => {
     const wasCollapsed = isStandbyModeCollapsed(standbyMode);
     const willExpand = wasCollapsed && !isStandbyModeCollapsed(mode);
     standbyMode = mode;
+    if (form) {
+      const isTypeIn = mode === "typein";
+      form.setAttribute("aria-hidden", isTypeIn ? "false" : "true");
+    }
+    if (input) input.disabled = mode !== "typein";
+    if (detailInput) detailInput.disabled = mode !== "detail";
+    if (sendBtn) sendBtn.hidden = mode !== "typein";
+    if (detailSendBtn) detailSendBtn.hidden = mode !== "detail";
     if (isStandbyModeCollapsed(mode)) {
-      await setStandbyPointerPassthrough(false);
+      await setStandbyPointerPassthrough(true);
     } else {
       standbyWakeActive = false;
       clearStandbyWakeTimer();
@@ -584,10 +628,7 @@ runWhenDomReady(async () => {
     }
 
     if (collapsedButton) collapsedButton.hidden = !isStandbyModeCollapsed(mode);
-    if (form) {
-      const isTypeIn = mode === "typein";
-      form.setAttribute("aria-hidden", isTypeIn ? "false" : "true");
-    }
+    if (form) form.setAttribute("aria-hidden", mode === "typein" ? "false" : "true");
     if (thinkingPanel) {
       const isThinking = mode === "thinking";
       thinkingPanel.setAttribute("aria-hidden", isThinking ? "false" : "true");
@@ -609,7 +650,7 @@ runWhenDomReady(async () => {
     }
     if (mode === "detail") {
       renderDetailContext();
-      window.setTimeout(() => detailInput?.focus(), 80);
+      window.setTimeout(() => focusDetailInput(), willExpand ? 180 : 80);
     }
     updateActionButtonMode();
     updateDetailActionButtonMode();
@@ -636,6 +677,13 @@ runWhenDomReady(async () => {
     return normalizeSpeechText([standbyVoiceBaseText, spoken].filter(Boolean).join(" "));
   };
 
+  const standbyVoiceInput = () => (standbyVoiceTarget === "detail" ? detailInput : input);
+
+  const updateVoiceTargetButtonMode = () => {
+    updateActionButtonMode();
+    updateDetailActionButtonMode();
+  };
+
   const clearStandbySpeechSilence = () => {
     if (!standbySpeechSilenceTimer) return;
     window.clearTimeout(standbySpeechSilenceTimer);
@@ -645,16 +693,17 @@ runWhenDomReady(async () => {
   const setStandbyVoiceActive = (active) => {
     standbyVoiceActive = Boolean(active);
     root?.classList.toggle("listening", standbyVoiceActive);
-    updateActionButtonMode();
+    updateVoiceTargetButtonMode();
   };
 
   const updateStandbyVoiceInput = () => {
-    if (!input || standbyVoiceSent) return;
-    input.value = composeStandbyVoiceText(true);
-    input.focus();
-    const cursor = input.value.length;
-    input.setSelectionRange?.(cursor, cursor);
-    updateActionButtonMode();
+    const targetInput = standbyVoiceInput();
+    if (!targetInput || standbyVoiceSent) return;
+    targetInput.value = composeStandbyVoiceText(true);
+    targetInput.focus();
+    const cursor = targetInput.value.length;
+    targetInput.setSelectionRange?.(cursor, cursor);
+    updateVoiceTargetButtonMode();
   };
 
   const stopStandbySpeechRecognition = (abort = false) => {
@@ -678,9 +727,10 @@ runWhenDomReady(async () => {
     standbyVoiceFinalText = "";
     standbyVoiceInterimText = "";
     standbyVoiceSent = false;
-    if (restoreBase && input) {
-      input.value = baseText;
-      updateActionButtonMode();
+    const targetInput = standbyVoiceInput();
+    if (restoreBase && targetInput) {
+      targetInput.value = baseText;
+      updateVoiceTargetButtonMode();
     }
   };
 
@@ -690,15 +740,21 @@ runWhenDomReady(async () => {
     if (!spoken) return false;
 
     const messageText = composeStandbyVoiceText(includeInterim);
+    const target = standbyVoiceTarget;
+    const targetInput = standbyVoiceInput();
     standbyVoiceSent = true;
     stopStandbySpeechRecognition(true);
     setStandbyVoiceActive(false);
     resetStandbyVoiceDraft();
-    if (input) {
-      input.value = messageText;
-      updateActionButtonMode();
+    if (targetInput) {
+      targetInput.value = messageText;
+      updateVoiceTargetButtonMode();
     }
-    await submit();
+    if (target === "detail") {
+      await submitDetail();
+    } else {
+      await submit();
+    }
     return true;
   };
 
@@ -714,8 +770,13 @@ runWhenDomReady(async () => {
     }, STANDBY_VOICE_SILENCE_MS);
   };
 
-  const startStandbyVoice = async () => {
-    if (standbyMode !== "typein") {
+  const startStandbyVoice = async ({ target = standbyMode === "detail" ? "detail" : "typein" } = {}) => {
+    standbyVoiceTarget = target === "detail" ? "detail" : "typein";
+    if (standbyVoiceTarget === "detail") {
+      if (standbyMode !== "detail") {
+        await setMode("detail", { syncWindow: true, emitMode: true });
+      }
+    } else if (standbyMode !== "typein") {
       await setMode("typein", { syncWindow: true, emitMode: true, focusInput: true });
     }
     if (standbyVoiceActive) return;
@@ -726,7 +787,8 @@ runWhenDomReady(async () => {
       return;
     }
 
-    standbyVoiceBaseText = (input?.value || "").trim();
+    const targetInput = standbyVoiceInput();
+    standbyVoiceBaseText = (targetInput?.value || "").trim();
     standbyVoiceFinalText = "";
     standbyVoiceInterimText = "";
     standbyVoiceSent = false;
@@ -742,7 +804,7 @@ runWhenDomReady(async () => {
 
       recognition.addEventListener("start", () => {
         setStandbyVoiceActive(true);
-        input?.focus();
+        standbyVoiceInput()?.focus();
       });
 
       recognition.addEventListener("result", (event) => {
@@ -815,12 +877,12 @@ runWhenDomReady(async () => {
     resetStandbyVoiceDraft({ restoreBase: true });
   };
 
-  const toggleStandbyVoice = async () => {
+  const toggleStandbyVoice = async (options = {}) => {
     if (standbyVoiceActive || standbySpeechRecognition) {
       await stopStandbyVoice({ submitTranscript: true });
       return;
     }
-    await startStandbyVoice();
+    await startStandbyVoice(options);
   };
 
   const submit = async () => {
@@ -847,9 +909,17 @@ runWhenDomReady(async () => {
 
   const submitDetail = async () => {
     const text = (detailInput?.value || "").trim();
+    if (standbyVoiceActive || standbySpeechRecognition) {
+      standbyVoiceSent = true;
+      stopStandbySpeechRecognition(true);
+      clearStandbySpeechSilence();
+      setStandbyVoiceActive(false);
+      standbyVoiceBaseText = "";
+      standbyVoiceFinalText = "";
+      standbyVoiceInterimText = "";
+    }
     if (!text) {
-      root?.classList.toggle("listening");
-      await events.emit?.("standby:voice-toggle", {}).catch(() => {});
+      await toggleStandbyVoice({ target: "detail" });
       return;
     }
     promoteCurrentDetailExchange();
@@ -915,13 +985,9 @@ runWhenDomReady(async () => {
   };
 
   collapsedButton?.addEventListener("click", (event) => {
-    if (ignoreNextCollapsedClick) {
-      ignoreNextCollapsedClick = false;
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    goTypeIn();
+    ignoreNextCollapsedClick = false;
+    event.preventDefault();
+    event.stopPropagation();
   });
   sendBtn?.addEventListener("click", async () => {
     if (standbyMode !== "typein") return;
@@ -953,7 +1019,11 @@ runWhenDomReady(async () => {
 
   detailSendBtn?.addEventListener("click", async () => {
     if (standbyMode !== "detail") return;
-    await submitDetail();
+    if (hasDetailDraftText()) {
+      await submitDetail();
+      return;
+    }
+    await toggleStandbyVoice({ target: "detail" });
   });
 
   detailForm?.addEventListener("submit", (event) => {
@@ -968,8 +1038,8 @@ runWhenDomReady(async () => {
     }
     if (event.key.toLowerCase() === "m" && event.shiftKey) {
       event.preventDefault();
-      root?.classList.toggle("listening");
-      events.emit?.("standby:voice-toggle", {}).catch(() => {});
+      event.stopPropagation();
+      toggleStandbyVoice({ target: "detail" }).catch(() => {});
     }
   });
 
@@ -1008,7 +1078,6 @@ runWhenDomReady(async () => {
     pointerInsideStandby = true;
     wakeCollapsedStandby();
     scheduleCollapsedArmed();
-    beginCollapsedLongPress();
   });
 
   collapsedButton?.addEventListener("pointerup", clearCollapsedLongPressTimer);
@@ -1019,9 +1088,9 @@ runWhenDomReady(async () => {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       collapseStandby(event);
-    } else if (!event.isComposing && event.key.toLowerCase() === "m" && event.shiftKey && standbyMode === "typein") {
+    } else if (!event.isComposing && event.key.toLowerCase() === "m" && event.shiftKey && (standbyMode === "typein" || standbyMode === "detail")) {
       event.preventDefault();
-      toggleStandbyVoice().catch(() => {});
+      toggleStandbyVoice({ target: standbyMode === "detail" ? "detail" : "typein" }).catch(() => {});
     } else if (event.key === "Enter" && standbyMode === "response") {
       event.preventDefault();
       goTypeIn();

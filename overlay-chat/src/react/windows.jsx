@@ -13,9 +13,6 @@ export const MainWindow = () => (
         <button id="toolsBtn" className="window-btn tools-window-btn" title="Open tools panel" aria-label="Open tools panel">
           <Icon name="list" />
         </button>
-        <button id="standbyBtn" className="window-btn standby-window-btn" title="Collapse to right edge" aria-label="Collapse to right edge">
-          <Icon name="arrow" />
-        </button>
         <button id="minBtn" className="window-btn min-btn" title="Minimize" aria-label="Minimize">
           <Icon name="minus" />
         </button>

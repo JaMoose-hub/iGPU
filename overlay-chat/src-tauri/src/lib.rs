@@ -16,13 +16,19 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GetMessageW, SetWindowsHookExW, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::XboxController::{
@@ -39,8 +45,15 @@ static VIRTUAL_CURSOR_TEXT_ENTRY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIRTUAL_CURSOR_STATE: OnceLock<Mutex<VirtualCursorState>> = OnceLock::new();
 static CAPTURE_PROTECTION_BOOT_RESET_UNTIL: OnceLock<Instant> = OnceLock::new();
 static STANDBY_CTRL_G_LAST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static STANDBY_SHIFT_D_LAST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static STANDBY_NATIVE_MODE: OnceLock<Mutex<String>> = OnceLock::new();
+#[cfg(windows)]
+static STANDBY_HOTKEY_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+#[cfg(windows)]
+static STANDBY_KEYBOARD_HOOK: OnceLock<isize> = OnceLock::new();
 static NITROGEN_PILOT_PROCESS: OnceLock<Mutex<Option<NitrogenPilotProcess>>> = OnceLock::new();
 const STANDBY_CTRL_G_DEBOUNCE_MS: u64 = 650;
+const STANDBY_SHIFT_D_DEBOUNCE_MS: u64 = 650;
 const NITROGEN_REPO_DIR: &str = r"C:\Projects\ai_auto";
 const NITROGEN_PYTHON: &str = r"C:\Users\Administrator\Miniconda3\python.exe";
 const NITROGEN_PLAY_SCRIPT: &str = r"C:\Projects\ai_auto\scripts\play.py";
@@ -763,17 +776,95 @@ fn virtual_key_down(vkey: i32) -> bool {
 }
 
 fn emit_standby_hotkey(app: &tauri::AppHandle, source: &str) {
-    if app
-        .emit_to(
+    let _ = open_standby_typein_window(app);
+    let _ = app.emit_to(
+        "main",
+        "standby-hotkey",
+        serde_json::json!({ "source": source, "nativeOpened": true }),
+    );
+}
+
+fn emit_standby_detail_hotkey(app: &tauri::AppHandle, source: &str) {
+    if set_standby_window_mode(app.clone(), "detail".to_string()).is_ok() {
+        let _ = app.emit_to(
             "main",
-            "standby-hotkey",
-            serde_json::json!({ "source": source }),
-        )
-        .is_err()
-    {
-        let _ = open_standby_typein_window(app);
+            "standby:mode-change",
+            serde_json::json!({ "mode": "detail", "source": source, "nativeOpened": true }),
+        );
     }
 }
+
+#[cfg(windows)]
+unsafe extern "system" fn standby_keyboard_hook_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 && (wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN) {
+        let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+        if event.vkCode == 0x47 {
+            let ctrl = virtual_key_down(0x11) || virtual_key_down(0xA2) || virtual_key_down(0xA3);
+            if ctrl && should_accept_standby_ctrl_g() {
+                let alt =
+                    virtual_key_down(0x12) || virtual_key_down(0xA4) || virtual_key_down(0xA5);
+                if let Some(app) = STANDBY_HOTKEY_APP.get().cloned() {
+                    thread::spawn(move || {
+                        emit_standby_hotkey(
+                            &app,
+                            if alt {
+                                "hook_ctrl_alt_g"
+                            } else {
+                                "hook_ctrl_g"
+                            },
+                        );
+                    });
+                }
+            }
+        } else if event.vkCode == 0x44 {
+            let shift =
+                virtual_key_down(0x10) || virtual_key_down(0xA0) || virtual_key_down(0xA1);
+            let ctrl = virtual_key_down(0x11) || virtual_key_down(0xA2) || virtual_key_down(0xA3);
+            let alt = virtual_key_down(0x12) || virtual_key_down(0xA4) || virtual_key_down(0xA5);
+            if shift
+                && !ctrl
+                && !alt
+                && standby_native_mode_is("response")
+                && should_accept_standby_shift_d()
+            {
+                if let Some(app) = STANDBY_HOTKEY_APP.get().cloned() {
+                    thread::spawn(move || {
+                        emit_standby_detail_hotkey(&app, "hook_shift_d");
+                    });
+                }
+            }
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+#[cfg(windows)]
+fn start_standby_keyboard_hook(app: tauri::AppHandle) {
+    let _ = STANDBY_HOTKEY_APP.set(app);
+    thread::spawn(move || unsafe {
+        let hook = SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(standby_keyboard_hook_proc),
+            std::ptr::null_mut(),
+            0,
+        );
+        if hook.is_null() {
+            eprintln!("standby keyboard hook registration failed");
+            return;
+        }
+        let _ = STANDBY_KEYBOARD_HOOK.set(hook as isize);
+        eprintln!("standby keyboard hook registered");
+        let mut message: MSG = std::mem::zeroed();
+        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {}
+    });
+}
+
+#[cfg(not(windows))]
+fn start_standby_keyboard_hook(_app: tauri::AppHandle) {}
 
 #[cfg(windows)]
 fn start_virtual_cursor_keyboard_poll(app: tauri::AppHandle) {
@@ -1158,6 +1249,47 @@ fn force_companion_window_repaint(window: &tauri::WebviewWindow, x: i32, y: i32)
 }
 
 #[cfg(windows)]
+fn nudge_windows_foreground_permission() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU,
+    };
+
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: 0,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        );
+    }
+}
+
+#[cfg(windows)]
 fn force_companion_window_focus(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
@@ -1197,6 +1329,7 @@ fn force_companion_window_focus(window: &tauri::WebviewWindow) {
                 hwnd,
                 windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
             );
+            nudge_windows_foreground_permission();
             windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
                 hwnd,
                 windows_sys::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
@@ -1303,6 +1436,29 @@ fn click_screen_point(screen_x: i32, screen_y: i32) -> Result<(), String> {
 #[cfg(not(windows))]
 fn click_screen_point(_screen_x: i32, _screen_y: i32) -> Result<(), String> {
     Ok(())
+}
+
+fn click_standby_window_ratio(window: &tauri::WebviewWindow, x_ratio: f64, y_ratio: f64) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let x = position.x + (f64::from(size.width) * x_ratio).round() as i32;
+    let y = position.y + (f64::from(size.height) * y_ratio).round() as i32;
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(180));
+        let _ = click_screen_point(x, y);
+    });
+}
+
+fn focus_standby_input_with_native_click(window: &tauri::WebviewWindow) {
+    click_standby_window_ratio(window, 0.40, 0.50);
+}
+
+fn focus_standby_detail_input_with_native_click(window: &tauri::WebviewWindow) {
+    click_standby_window_ratio(window, 0.42, 0.93);
 }
 
 #[cfg(windows)]
@@ -1698,10 +1854,11 @@ fn show_tools_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn show_standby_window(app: tauri::AppHandle) -> Result<(), String> {
     let standby = configure_standby_window(&app, false)?;
+    set_standby_native_mode("collapsed");
     let _ =
         standby.eval("window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded(false);");
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, false);
+    let _ = set_standby_pointer_passthrough_state(&app, true);
     let position = standby
         .outer_position()
         .unwrap_or(PhysicalPosition::new(0, 0));
@@ -1729,6 +1886,33 @@ fn should_accept_standby_ctrl_g() -> bool {
     }
     *last_at = Some(now);
     true
+}
+
+fn should_accept_standby_shift_d() -> bool {
+    let now = Instant::now();
+    let guard = STANDBY_SHIFT_D_LAST_AT.get_or_init(|| Mutex::new(None));
+    let Ok(mut last_at) = guard.lock() else {
+        return true;
+    };
+    if let Some(previous) = last_at.as_ref() {
+        if now.duration_since(*previous) < Duration::from_millis(STANDBY_SHIFT_D_DEBOUNCE_MS) {
+            return false;
+        }
+    }
+    *last_at = Some(now);
+    true
+}
+
+fn set_standby_native_mode(mode: &str) {
+    let guard = STANDBY_NATIVE_MODE.get_or_init(|| Mutex::new("collapsed".to_string()));
+    if let Ok(mut current) = guard.lock() {
+        *current = mode.to_string();
+    }
+}
+
+fn standby_native_mode_is(mode: &str) -> bool {
+    let guard = STANDBY_NATIVE_MODE.get_or_init(|| Mutex::new("collapsed".to_string()));
+    guard.lock().map(|current| current.as_str() == mode).unwrap_or(false)
 }
 
 fn pilot_process_name(value: &str) -> String {
@@ -2014,6 +2198,8 @@ fn stop_nitrogen_pilot() -> Result<NitrogenPilotStatus, String> {
 
 fn open_standby_typein_window(app: &tauri::AppHandle) -> Result<(), String> {
     let standby = configure_standby_window_mode(app, "typein")?;
+    set_standby_native_mode("typein");
+    let _ = standby.set_always_on_top(true);
     standby.show().map_err(|err| err.to_string())?;
     let _ = set_standby_pointer_passthrough_state(app, false);
     let position = standby
@@ -2021,6 +2207,8 @@ fn open_standby_typein_window(app: &tauri::AppHandle) -> Result<(), String> {
         .unwrap_or(PhysicalPosition::new(0, 0));
     force_companion_window_repaint(&standby, position.x, position.y);
     let _ = standby.set_focus();
+    force_companion_window_focus(&standby);
+    focus_standby_input_with_native_click(&standby);
     let _ = standby.eval("window.focus();");
     let _ = app.emit_to(
         "standby",
@@ -2028,7 +2216,17 @@ fn open_standby_typein_window(app: &tauri::AppHandle) -> Result<(), String> {
         serde_json::json!({ "expanded": true, "mode": "typein", "focusInput": true }),
     );
     let _ = standby.eval(
-        "window.__igpuSetStandbyMode && window.__igpuSetStandbyMode('typein', { focusInput: true });",
+        r#"
+        window.__igpuSetStandbyMode && window.__igpuSetStandbyMode('typein', { focusInput: true });
+        window.focus();
+        window.__igpuFocusStandbyInput && window.__igpuFocusStandbyInput();
+        [60, 160, 320, 650, 1000].forEach((delay) => {
+          setTimeout(() => {
+            window.focus();
+            window.__igpuFocusStandbyInput && window.__igpuFocusStandbyInput();
+          }, delay);
+        });
+        "#,
     );
     Ok(())
 }
@@ -2036,15 +2234,17 @@ fn open_standby_typein_window(app: &tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn set_standby_window_expanded(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
     let standby = configure_standby_window(&app, expanded)?;
+    set_standby_native_mode(if expanded { "typein" } else { "collapsed" });
     let script = format!(
         "window.__igpuSetStandbyExpanded && window.__igpuSetStandbyExpanded({});",
         if expanded { "true" } else { "false" }
     );
     let _ = standby.eval(&script);
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, false);
+    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
     if expanded {
         let _ = standby.set_focus();
+        force_companion_window_focus(&standby);
     }
     let _ = app.emit_to(
         "standby",
@@ -2067,16 +2267,59 @@ fn set_standby_window_mode(app: tauri::AppHandle, mode: String) -> Result<(), St
     };
     let expanded = normalized != "collapsed";
     let standby = configure_standby_window_mode(&app, normalized)?;
+    set_standby_native_mode(normalized);
     standby.show().map_err(|err| err.to_string())?;
-    let _ = set_standby_pointer_passthrough_state(&app, false);
+    let _ = set_standby_pointer_passthrough_state(&app, !expanded);
     if expanded {
         let _ = standby.set_focus();
+        force_companion_window_focus(&standby);
     }
     let _ = app.emit_to(
         "standby",
         "standby:set-mode",
         serde_json::json!({ "expanded": expanded, "mode": normalized }),
     );
+    if normalized == "typein" {
+        focus_standby_input_with_native_click(&standby);
+        let _ = standby.eval(
+            r#"
+            window.focus();
+            window.__igpuFocusStandbyInput && window.__igpuFocusStandbyInput();
+            [80, 220, 500].forEach((delay) => {
+              setTimeout(() => {
+                window.focus();
+                window.__igpuFocusStandbyInput && window.__igpuFocusStandbyInput();
+              }, delay);
+            });
+            "#,
+        );
+    } else if normalized == "detail" {
+        focus_standby_detail_input_with_native_click(&standby);
+        let _ = standby.eval(
+            r#"
+            window.focus();
+            const focusDetail = () => {
+              const input = document.getElementById('standbyDetailInput');
+              const panel = document.getElementById('standbyDetailPanel');
+              if (!input) return;
+              if (panel) panel.setAttribute('aria-hidden', 'false');
+              input.disabled = false;
+              input.tabIndex = 0;
+              try { input.click(); } catch (_) {}
+              input.focus({ preventScroll: true });
+              const cursor = input.value.length;
+              try { input.setSelectionRange(cursor, cursor); } catch (_) {}
+            };
+            focusDetail();
+            [80, 220, 500, 900, 1400].forEach((delay) => {
+              setTimeout(() => {
+                window.focus();
+                focusDetail();
+              }, delay);
+            });
+            "#,
+        );
+    }
     Ok(())
 }
 
@@ -2090,6 +2333,7 @@ fn hide_standby_window(app: tauri::AppHandle) -> Result<(), String> {
     let Some(standby) = app.get_webview_window("standby") else {
         return Ok(());
     };
+    set_standby_native_mode("collapsed");
     hide_companion_window(&standby)
 }
 
@@ -2959,6 +3203,7 @@ pub fn run() {
                 let _ = main.set_focus();
             }
             start_virtual_cursor_keyboard_poll(app.handle().clone());
+            start_standby_keyboard_hook(app.handle().clone());
             start_virtual_cursor_gamepad_poll(app.handle().clone());
 
             // 註冊全域快捷鍵
