@@ -28,25 +28,25 @@
   --standby-detail-glow-top-height: 108px;
   --standby-detail-glow-bottom-width: 497px;
   --standby-detail-glow-bottom-height: 145px;
-  /* Status palette: green=usable GamePath, orange=external lookup, blue=saved, red=error, gray=processing, pink=done. */
-  --lookup-default-text: rgba(255, 255, 255, 0.72);
-  --lookup-default-border: rgba(255, 255, 255, 0.14);
-  --lookup-default-bg: rgba(255, 255, 255, 0.08);
-  --lookup-hit-text: #b8f7d4;
-  --lookup-hit-border: rgba(91, 232, 150, 0.32);
-  --lookup-hit-bg: rgba(34, 197, 94, 0.12);
-  --lookup-done-text: #f9a8d4;
-  --lookup-done-border: rgba(244, 114, 182, 0.36);
-  --lookup-done-bg: rgba(236, 72, 153, 0.12);
-  --lookup-miss-text: #ffd89a;
-  --lookup-miss-border: rgba(245, 158, 11, 0.34);
-  --lookup-miss-bg: rgba(245, 158, 11, 0.12);
-  --lookup-stored-text: #bfdbfe;
-  --lookup-stored-border: rgba(96, 165, 250, 0.34);
-  --lookup-stored-bg: rgba(59, 130, 246, 0.12);
+  /* Status palette: gray=processing/searching, teal=GamePath context, green=usable GamePath, amber=web lookup, blue=saved, red=error. */
+  --lookup-default-text: #f5f5f5;
+  --lookup-default-border: rgba(255, 255, 255, 0.28);
+  --lookup-default-bg: rgba(255, 255, 255, 0.12);
+  --lookup-query-text: #7fffea;
+  --lookup-query-border: rgba(45, 212, 191, 0.75);
+  --lookup-query-bg: rgba(13, 148, 136, 0.34);
+  --lookup-hit-text: #a7f3d0;
+  --lookup-hit-border: rgba(34, 197, 94, 0.78);
+  --lookup-hit-bg: rgba(22, 101, 52, 0.42);
+  --lookup-miss-text: #ffe08a;
+  --lookup-miss-border: rgba(245, 158, 11, 0.82);
+  --lookup-miss-bg: rgba(146, 64, 14, 0.45);
+  --lookup-stored-text: #dbeafe;
+  --lookup-stored-border: rgba(96, 165, 250, 0.78);
+  --lookup-stored-bg: rgba(30, 64, 175, 0.38);
   --lookup-error-text: #fecaca;
-  --lookup-error-border: rgba(248, 113, 113, 0.36);
-  --lookup-error-bg: rgba(239, 68, 68, 0.12);
+  --lookup-error-border: rgba(239, 68, 68, 0.85);
+  --lookup-error-bg: rgba(127, 29, 29, 0.5);
 }
 
 html,
@@ -351,6 +351,9 @@ button {
 }
 
 .standby-thinking-panel {
+  --standby-thinking-stage-text: #fff;
+  --standby-thinking-stage-border: var(--standby-border);
+  --standby-thinking-stage-bg: #000;
   display: block;
   position: absolute;
   top: 50%;
@@ -362,8 +365,8 @@ button {
   transform-origin: right center;
   overflow: hidden;
   border-radius: 999px;
-  border: 2px solid var(--standby-border);
-  background: #000;
+  border: 2px solid var(--standby-thinking-stage-border);
+  background: var(--standby-thinking-stage-bg);
   box-sizing: border-box;
   contain: paint;
   isolation: isolate;
@@ -375,6 +378,37 @@ button {
     opacity 180ms ease,
     visibility 0ms linear 180ms,
     transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.standby-thinking-panel[data-stage="gamepath_searching"] {
+  --standby-thinking-stage-text: var(--lookup-default-text);
+  --standby-thinking-stage-border: var(--lookup-default-border);
+  --standby-thinking-stage-bg: var(--lookup-default-bg);
+}
+
+.standby-thinking-panel[data-stage="gamepath_hit"] {
+  --standby-thinking-stage-text: var(--lookup-hit-text);
+  --standby-thinking-stage-border: var(--lookup-hit-border);
+  --standby-thinking-stage-bg: var(--lookup-hit-bg);
+}
+
+.standby-thinking-panel[data-stage="agent_may_search_web"],
+.standby-thinking-panel[data-stage="agent_web_search"] {
+  --standby-thinking-stage-text: var(--lookup-miss-text);
+  --standby-thinking-stage-border: var(--lookup-miss-border);
+  --standby-thinking-stage-bg: var(--lookup-miss-bg);
+}
+
+.standby-thinking-panel[data-stage="agent_web_search"] {
+  --standby-thinking-stage-text: #fff176;
+  --standby-thinking-stage-border: rgba(234, 179, 8, 0.88);
+  --standby-thinking-stage-bg: rgba(113, 63, 18, 0.52);
+}
+
+.standby-thinking-panel[data-stage="error"] {
+  --standby-thinking-stage-text: var(--lookup-error-text);
+  --standby-thinking-stage-border: var(--lookup-error-border);
+  --standby-thinking-stage-bg: var(--lookup-error-bg);
 }
 
 .standby-thinking-light {
@@ -423,7 +457,7 @@ button {
 }
 
 .standby-thinking-text {
-  color: #fff;
+  color: var(--standby-thinking-stage-text);
   font-size: 12px;
   font-weight: 400;
   line-height: 1;
@@ -952,27 +986,37 @@ button {
   line-height: 1.36;
 }
 
-.standby-detail-chat-message.status[data-stage="gamepath_hit"],
 .standby-detail-chat-message.status[data-stage="gamepath_summarizing"],
 .standby-detail-chat-message.status[data-stage="gamepath_context"] {
+  --lookup-stage-text: var(--lookup-query-text);
+  --lookup-stage-border: var(--lookup-query-border);
+  --lookup-stage-bg: var(--lookup-query-bg);
+}
+
+.standby-detail-chat-message.status[data-stage="gamepath_hit"] {
   --lookup-stage-text: var(--lookup-hit-text);
   --lookup-stage-border: var(--lookup-hit-border);
   --lookup-stage-bg: var(--lookup-hit-bg);
 }
 
-.standby-detail-chat-message.status[data-stage="response_done"] {
-  --lookup-stage-text: var(--lookup-done-text);
-  --lookup-stage-border: var(--lookup-done-border);
-  --lookup-stage-bg: var(--lookup-done-bg);
+.standby-detail-chat-message.status[data-stage="gamepath_searching"] {
+  --lookup-stage-text: var(--lookup-default-text);
+  --lookup-stage-border: var(--lookup-default-border);
+  --lookup-stage-bg: var(--lookup-default-bg);
 }
 
 .standby-detail-chat-message.status[data-stage="gamepath_miss"],
 .standby-detail-chat-message.status[data-stage="agent_may_search_web"],
-.standby-detail-chat-message.status[data-stage="agent_web_search"],
 .standby-detail-chat-message.status[data-stage="agent_no_tools"] {
   --lookup-stage-text: var(--lookup-miss-text);
   --lookup-stage-border: var(--lookup-miss-border);
   --lookup-stage-bg: var(--lookup-miss-bg);
+}
+
+.standby-detail-chat-message.status[data-stage="agent_web_search"] {
+  --lookup-stage-text: #fff176;
+  --lookup-stage-border: rgba(234, 179, 8, 0.88);
+  --lookup-stage-bg: rgba(113, 63, 18, 0.52);
 }
 
 .standby-detail-chat-message.status[data-stage="gamepath_stored"] {

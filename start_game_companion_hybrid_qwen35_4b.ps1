@@ -8,7 +8,7 @@ param(
     [string]$RouterMmprojPath = "",
     [string]$RouterAlias = "qwen3.5-2b-q4_k_m",
     [string]$RouterLogName = "hybrid-qwen35-2b-router",
-    [string]$VulkanDevice = "1",
+    [string]$VulkanDevice = "0",
     [int]$RouterCtxSize = 4096,
     [int]$RouterGpuLayers = 99,
     [int]$RouterImageMinTokens = 128,

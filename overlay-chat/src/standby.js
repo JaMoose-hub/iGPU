@@ -76,6 +76,7 @@ runWhenDomReady(async () => {
   const thinkingPanel = document.getElementById("standbyThinkingPanel");
   const thinkingLight = document.getElementById("standbyThinkingLight");
   const thinkingLoading = document.getElementById("standbyThinkingLoading");
+  const thinkingText = document.getElementById("standbyThinkingText");
   const responsePanel = document.getElementById("standbyResponsePanel");
   const responseText = document.getElementById("standbyResponseText");
   const responseEnterBtn = document.getElementById("standbyResponseEnterBtn");
@@ -137,6 +138,41 @@ runWhenDomReady(async () => {
   let collapseAnimationTimer = null;
   let standbyWakeTimer = null;
   let standbyWakeActive = false;
+
+  const thinkingStatusForStage = (stage) => {
+    switch (String(stage || "")) {
+      case "gamepath_searching":
+      case "gamepath_summarizing":
+      case "gamepath_context":
+        return { stage: "gamepath_searching", label: "Searching GamePath..." };
+      case "gamepath_hit":
+        return { stage: "gamepath_hit", label: "GamePath matched" };
+      case "gamepath_miss":
+      case "agent_may_search_web":
+        return { stage: "agent_may_search_web", label: "Need web search" };
+      case "agent_web_search":
+        return { stage: "agent_web_search", label: "Searching web..." };
+      case "agent_no_tools":
+      case "guide_context":
+      case "memory_context":
+        return { stage: "", label: "Summarizing answer..." };
+      case "error":
+        return { stage: "error", label: "Error" };
+      default:
+        return { stage: "", label: "Analyzing request..." };
+    }
+  };
+
+  const setThinkingLookupStatus = (stage) => {
+    const status = thinkingStatusForStage(stage);
+    if (thinkingText) thinkingText.textContent = status.label;
+    if (!thinkingPanel) return;
+    if (status.stage) {
+      thinkingPanel.dataset.stage = status.stage;
+    } else {
+      delete thinkingPanel.dataset.stage;
+    }
+  };
   let nativeModeEchoToIgnore = null;
   let ignoreNextCollapsedClick = false;
   let pointerInsideStandby = false;
@@ -632,6 +668,7 @@ runWhenDomReady(async () => {
     if (thinkingPanel) {
       const isThinking = mode === "thinking";
       thinkingPanel.setAttribute("aria-hidden", isThinking ? "false" : "true");
+      if (isThinking) setThinkingLookupStatus("");
     }
     if (responsePanel) {
       const isResponse = mode === "response";
@@ -1155,6 +1192,10 @@ runWhenDomReady(async () => {
 
   await events.listen?.("standby:set-lookup-status", (event) => {
     lastDetailRouteTrace = normalizeLookupTrace(event.payload?.trace || []);
+    const latest = event.payload?.latest || lastDetailRouteTrace[lastDetailRouteTrace.length - 1] || null;
+    if (standbyMode === "thinking") {
+      setThinkingLookupStatus(latest?.stage || "");
+    }
     if (standbyMode === "detail") {
       renderDetailContext();
     }

@@ -922,6 +922,24 @@ def lookup_status_event(stage: str, message: str, **extra: Any) -> str:
     return sse_data({"lookup_status": payload})
 
 
+def gamepath_searching_lookup_status_event(
+    *,
+    game_id: Optional[str],
+    search_query: str,
+    local_router: Optional[dict[str, Any]] = None,
+) -> str:
+    return lookup_status_event(
+        "gamepath_searching",
+        "Searching GamePath...",
+        source="gamepath",
+        web_search=False,
+        fast_path=False,
+        game_id=game_id,
+        search_query=search_query,
+        local_router=local_router,
+    )
+
+
 def gamepath_store_lookup_status_event(stored_item: dict[str, Any], game_id: Optional[str]) -> str:
     status = str(stored_item.get("status") or "").strip()
     if status == "duplicate_existing":
@@ -8892,6 +8910,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
         async def gamepath_answer_event_generator():
             top_item = gamepath_results[0]
             remember_gamepath_reference(top_item, route="direct")
+            if gamepath_was_requested:
+                yield gamepath_searching_lookup_status_event(
+                    game_id=game_id,
+                    search_query=gamepath_search_query,
+                    local_router=gamepath_evaluation.get("local_router"),
+                )
             yield lookup_status_event(
                 "gamepath_hit",
                 "GamePath 命中，正在用地端 Qwen 整理成提示。",
@@ -9048,6 +9072,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
 
         async def hermes_event_generator():
             collected = ""
+            if gamepath_was_requested:
+                yield gamepath_searching_lookup_status_event(
+                    game_id=game_id,
+                    search_query=gamepath_search_query,
+                    local_router=gamepath_evaluation.get("local_router"),
+                )
             stage, status_message, status_extra = lookup_route_stage(
                 game_id=game_id,
                 hermes_agent_web_enabled=HERMES_AGENT_WEB_ENABLED,
@@ -9197,6 +9227,12 @@ async def chat_endpoint(fastapi_request: Request, chat_request: ChatRequest):
             if ENABLE_OCR_CONTEXT:
                 ocr_text = await asyncio.to_thread(extract_ocr_text, chat_request.image_base64)
             if gamepath_was_requested or gamepath_context_results:
+                if gamepath_was_requested:
+                    yield gamepath_searching_lookup_status_event(
+                        game_id=game_id,
+                        search_query=gamepath_search_query,
+                        local_router=gamepath_evaluation.get("local_router"),
+                    )
                 stage, status_message, status_extra = lookup_route_stage(
                     game_id=game_id,
                     hermes_agent_web_enabled=HERMES_AGENT_WEB_ENABLED,

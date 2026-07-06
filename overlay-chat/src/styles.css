@@ -10,25 +10,25 @@
   --text-main: #f0f0f0;
   --accent: #646cff;
   --font-family: 'Segoe UI', Inter, Roboto, sans-serif;
-  /* Status palette: green=usable GamePath, orange=external lookup, blue=saved, red=error, gray=processing, pink=done. */
-  --lookup-default-text: rgba(255, 255, 255, 0.72);
-  --lookup-default-border: rgba(255, 255, 255, 0.14);
-  --lookup-default-bg: rgba(255, 255, 255, 0.08);
-  --lookup-hit-text: #b8f7d4;
-  --lookup-hit-border: rgba(91, 232, 150, 0.32);
-  --lookup-hit-bg: rgba(34, 197, 94, 0.12);
-  --lookup-done-text: #f9a8d4;
-  --lookup-done-border: rgba(244, 114, 182, 0.36);
-  --lookup-done-bg: rgba(236, 72, 153, 0.12);
-  --lookup-miss-text: #ffd89a;
-  --lookup-miss-border: rgba(245, 158, 11, 0.34);
-  --lookup-miss-bg: rgba(245, 158, 11, 0.12);
-  --lookup-stored-text: #bfdbfe;
-  --lookup-stored-border: rgba(96, 165, 250, 0.34);
-  --lookup-stored-bg: rgba(59, 130, 246, 0.12);
+  /* Status palette: gray=processing/searching, teal=GamePath context, green=usable GamePath, amber=web lookup, blue=saved, red=error. */
+  --lookup-default-text: #f5f5f5;
+  --lookup-default-border: rgba(255, 255, 255, 0.28);
+  --lookup-default-bg: rgba(255, 255, 255, 0.12);
+  --lookup-query-text: #7fffea;
+  --lookup-query-border: rgba(45, 212, 191, 0.75);
+  --lookup-query-bg: rgba(13, 148, 136, 0.34);
+  --lookup-hit-text: #a7f3d0;
+  --lookup-hit-border: rgba(34, 197, 94, 0.78);
+  --lookup-hit-bg: rgba(22, 101, 52, 0.42);
+  --lookup-miss-text: #ffe08a;
+  --lookup-miss-border: rgba(245, 158, 11, 0.82);
+  --lookup-miss-bg: rgba(146, 64, 14, 0.45);
+  --lookup-stored-text: #dbeafe;
+  --lookup-stored-border: rgba(96, 165, 250, 0.78);
+  --lookup-stored-bg: rgba(30, 64, 175, 0.38);
   --lookup-error-text: #fecaca;
-  --lookup-error-border: rgba(248, 113, 113, 0.36);
-  --lookup-error-bg: rgba(239, 68, 68, 0.12);
+  --lookup-error-border: rgba(239, 68, 68, 0.85);
+  --lookup-error-bg: rgba(127, 29, 29, 0.5);
 }
 
 html {
@@ -303,35 +303,45 @@ body.perf-mode {
   line-height: 1.25;
 }
 
-.lookup-status[data-stage="gamepath_hit"],
 .lookup-status[data-stage="gamepath_summarizing"],
 .lookup-status[data-stage="gamepath_context"],
-.lookup-route-line[data-stage="gamepath_hit"],
 .lookup-route-line[data-stage="gamepath_summarizing"],
 .lookup-route-line[data-stage="gamepath_context"] {
+  --lookup-stage-text: var(--lookup-query-text);
+  --lookup-stage-border: var(--lookup-query-border);
+  --lookup-stage-bg: var(--lookup-query-bg);
+}
+
+.lookup-status[data-stage="gamepath_searching"],
+.lookup-route-line[data-stage="gamepath_searching"] {
+  --lookup-stage-text: var(--lookup-default-text);
+  --lookup-stage-border: var(--lookup-default-border);
+  --lookup-stage-bg: var(--lookup-default-bg);
+}
+
+.lookup-status[data-stage="gamepath_hit"],
+.lookup-route-line[data-stage="gamepath_hit"] {
   --lookup-stage-text: var(--lookup-hit-text);
   --lookup-stage-border: var(--lookup-hit-border);
   --lookup-stage-bg: var(--lookup-hit-bg);
 }
 
-.lookup-status[data-stage="response_done"],
-.lookup-route-line[data-stage="response_done"] {
-  --lookup-stage-text: var(--lookup-done-text);
-  --lookup-stage-border: var(--lookup-done-border);
-  --lookup-stage-bg: var(--lookup-done-bg);
-}
-
 .lookup-status[data-stage="gamepath_miss"],
 .lookup-status[data-stage="agent_may_search_web"],
-.lookup-status[data-stage="agent_web_search"],
 .lookup-status[data-stage="agent_no_tools"],
 .lookup-route-line[data-stage="gamepath_miss"],
 .lookup-route-line[data-stage="agent_may_search_web"],
-.lookup-route-line[data-stage="agent_web_search"],
 .lookup-route-line[data-stage="agent_no_tools"] {
   --lookup-stage-text: var(--lookup-miss-text);
   --lookup-stage-border: var(--lookup-miss-border);
   --lookup-stage-bg: var(--lookup-miss-bg);
+}
+
+.lookup-status[data-stage="agent_web_search"],
+.lookup-route-line[data-stage="agent_web_search"] {
+  --lookup-stage-text: #fff176;
+  --lookup-stage-border: rgba(234, 179, 8, 0.88);
+  --lookup-stage-bg: rgba(113, 63, 18, 0.52);
 }
 
 .lookup-status[data-stage="gamepath_stored"],

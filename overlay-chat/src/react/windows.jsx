@@ -363,7 +363,7 @@ export const StandbyWindow = () => (
       <span id="standbyThinkingLight" className="standby-thinking-light" aria-hidden="true"></span>
       <div className="standby-thinking-body">
         <span id="standbyThinkingLoading" className="standby-thinking-loading" aria-hidden="true"></span>
-        <span className="standby-thinking-text">Analyzing request...</span>
+        <span id="standbyThinkingText" className="standby-thinking-text">Analyzing request...</span>
       </div>
     </div>
 

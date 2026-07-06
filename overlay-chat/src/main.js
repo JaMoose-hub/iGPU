@@ -700,8 +700,40 @@ runWhenDomReady(async () => {
     return { msgDiv, statusDiv, routeLogDiv, routeTrace: [], contentDiv };
   };
 
-  const formatLookupStatus = (status) => {
-    const stage = String(status?.stage || "");
+  const lookupStatusLabel = (stage) => {
+    switch (String(stage || "")) {
+      case "gamepath_searching":
+      case "gamepath_summarizing":
+      case "gamepath_context":
+        return "Searching GamePath...";
+      case "gamepath_hit":
+        return "GamePath matched";
+      case "gamepath_miss":
+      case "agent_may_search_web":
+        return "Need web search";
+      case "agent_web_search":
+        return "Searching web...";
+      case "agent_no_tools":
+      case "guide_context":
+      case "memory_context":
+        return "Summarizing answer...";
+      case "gamepath_stored":
+        return "Saved to GamePath";
+      case "gamepath_not_stored":
+        return "GamePath not saved";
+      case "gamepath_skipped":
+        return "General chat";
+      case "error":
+        return "Error";
+      case "response_done":
+        return "Response complete";
+      default:
+        return "Analyzing request...";
+    }
+  };
+
+  const formatLookupStatus = (status, visualStageOverride = "") => {
+    const stage = String(visualStageOverride || status?.stage || "");
     const accuracyText = lookupAccuracyParts(status).join(" / ");
     const timingText = lookupTimingParts(status).join(" / ");
     const scoreText = [
@@ -709,6 +741,7 @@ runWhenDomReady(async () => {
       timingText ? `耗時 ${timingText}` : ""
     ].filter(Boolean).join(" | ");
     const suffix = scoreText ? ` | ${scoreText}` : "";
+    return `${lookupStatusLabel(stage)}${suffix}`;
     const isVisionRoute = status?.local_router?.route_source === "vision"
       || String(status?.local_router?.intent_route || "").startsWith("screenshot_");
     const routePrefix = status?.local_router?.used
@@ -802,12 +835,14 @@ runWhenDomReady(async () => {
 
   const lookupVisualStage = (status) => {
     const stage = String(status?.stage || "");
+    if (stage === "gamepath_searching") return "gamepath_searching";
     if (
-      (stage === "gamepath_summarizing" || stage === "gamepath_context")
-      && isWebSearchPossibleStatus(status)
-      && !isStrongLocalGamePathStatus(status)
+      stage === "gamepath_summarizing"
+      || stage === "gamepath_context"
     ) {
-      return "agent_may_search_web";
+      if (isStrongLocalGamePathStatus(status)) return "gamepath_hit";
+      if (isWebSearchPossibleStatus(status)) return "agent_may_search_web";
+      return "gamepath_searching";
     }
     return stage;
   };
@@ -936,7 +971,9 @@ runWhenDomReady(async () => {
       segments.push(retrievalRoute ? `Qwen評估:${retrievalRoute}` : "Qwen評估");
     };
 
-    if (stage === "gamepath_hit") {
+    if (stage === "gamepath_searching") {
+      segments.push("GamePath search");
+    } else if (stage === "gamepath_hit") {
       segments.push("GamePath本地命中");
       pushRetrievalSegment();
       segments.push("本地回答");
@@ -990,10 +1027,10 @@ runWhenDomReady(async () => {
 
   const recordLookupStatus = (status, statusDiv, routeLogDiv, routeTrace) => {
     if (!status || !statusDiv) return;
-    const summary = formatLookupStatus(status);
-    const detail = formatLookupTrace(status);
     const stage = status?.stage || "";
     const visualStage = lookupVisualStage(status);
+    const summary = formatLookupStatus(status, visualStage);
+    const detail = formatLookupTrace(status);
     const previous = routeTrace[routeTrace.length - 1];
 
     statusDiv.textContent = summary;
