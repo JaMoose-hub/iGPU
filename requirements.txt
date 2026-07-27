@@ -10,3 +10,5 @@ librosa
 soundfile
 python-multipart
 faster-whisper
+huggingface_hub
+requests

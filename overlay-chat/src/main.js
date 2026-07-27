@@ -716,11 +716,13 @@ runWhenDomReady(async () => {
       case "agent_no_tools":
       case "guide_context":
       case "memory_context":
+      case "answer_summarizing":
         return "Summarizing answer...";
       case "gamepath_stored":
         return "Saved to GamePath";
       case "gamepath_not_stored":
         return "GamePath not saved";
+      case "general_chat":
       case "gamepath_skipped":
         return "General chat";
       case "error":
@@ -761,7 +763,7 @@ runWhenDomReady(async () => {
       return path([...evalPrefix, "GamePath 本地候選", next]);
     }
     if (stage === "gamepath_miss") return path([...routePrefix, "GamePath 未命中", "Hermes/Tavily"]);
-    if (stage === "gamepath_skipped") return path(["略過 GamePath", "一般聊天"]);
+    if (stage === "general_chat" || stage === "gamepath_skipped") return path(["General chat", "Hermes"]);
     if (stage === "gamepath_disputed") return "驗證：上一個 GamePath 提示已降權";
     if (stage === "gamepath_feedback_missing") return "驗證：找不到上一筆 GamePath 紀錄";
     if (stage === "gamepath_context") {
@@ -938,7 +940,7 @@ runWhenDomReady(async () => {
       parts.push("Hermes/Tavily 待開始");
     } else if (stage === "agent_may_search_web" || stage === "agent_web_search") {
       parts.push("Hermes/Tavily 進行中");
-    } else if (stage === "agent_no_tools") {
+    } else if (stage === "agent_no_tools" || stage === "answer_summarizing") {
       parts.push("Hermes 回答中");
     }
 
@@ -988,9 +990,10 @@ runWhenDomReady(async () => {
       pushRetrievalSegment();
       segments.push("Hermes/Tavily候選");
     }
-    else if (stage === "gamepath_skipped") segments.push("略過GamePath", "一般聊天");
+    else if (stage === "general_chat" || stage === "gamepath_skipped") segments.push("General chat", "Hermes");
     else if (stage === "guide_context") segments.push("本地攻略快取", "模型整理");
     else if (stage === "memory_context") segments.push("玩家記憶", "模型整理");
+    else if (stage === "answer_summarizing") segments.push("General chat", "Hermes整理");
     else if (stage === "agent_may_search_web" || stage === "agent_web_search") segments.push("本地未命中", "Hermes/Tavily");
     else if (stage === "agent_no_tools") segments.push("本地未命中", "Hermes回答");
     else if (stage === "gamepath_stored") segments.push("GamePath寫入", "SQLite+Markdown");
@@ -2957,6 +2960,22 @@ runWhenDomReady(async () => {
         try {
           const dataObj = JSON.parse(dataStr);
           if (dataObj.lookup_status) {
+            if (dataObj.lookup_status.stage === "answer_summarizing") {
+              events.emit?.("standby:set-lookup-status", {
+                latest: {
+                  stage: "answer_summarizing",
+                  summary: lookupStatusLabel("answer_summarizing"),
+                  detail: "",
+                  time: new Date().toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit"
+                  })
+                },
+                transient: true
+              }).catch(() => {});
+              return;
+            }
             recordLookupStatus(dataObj.lookup_status, statusDiv, routeLogDiv, routeTrace);
             if (["gamepath_stored", "gamepath_disputed"].includes(dataObj.lookup_status.stage)) {
               await notifyGamePathChanged(dataObj.lookup_status);

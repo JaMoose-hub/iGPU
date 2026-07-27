@@ -155,7 +155,11 @@ runWhenDomReady(async () => {
       case "agent_no_tools":
       case "guide_context":
       case "memory_context":
+      case "answer_summarizing":
         return { stage: "", label: "Summarizing answer..." };
+      case "general_chat":
+      case "gamepath_skipped":
+        return { stage: "", label: "General chat" };
       case "error":
         return { stage: "error", label: "Error" };
       default:
@@ -187,6 +191,7 @@ runWhenDomReady(async () => {
   let standbyVoiceInterimText = "";
   const TYPEWRITER_DELAY_MS = 16;
   let detailAutoScrollFrame = 0;
+  let detailRenderFrame = 0;
 
   const scrollDetailContextToBottom = () => {
     if (!detailContextList) return;
@@ -422,6 +427,14 @@ runWhenDomReady(async () => {
       scrollDetailContextToBottom();
     }
     if (detailAnswer) detailAnswer.textContent = detailTypewriter.value() || lastDetailAnswer || lastResponseSummary || "";
+  };
+
+  const requestRenderDetailContext = () => {
+    if (detailRenderFrame) return;
+    detailRenderFrame = window.requestAnimationFrame(() => {
+      detailRenderFrame = 0;
+      renderDetailContext();
+    });
   };
 
   const normalizeDetailContext = (value) => {
@@ -1184,20 +1197,24 @@ runWhenDomReady(async () => {
       responseTypewriter.setElement(responseText);
       responseTypewriter.setTarget(text || "I have a response ready.");
     }
-    renderDetailContext();
+    requestRenderDetailContext();
     const responseMode = standbyModeFromInput(event.payload?.mode) || (standbyMode === "detail" ? "detail" : "response");
     const modeChanged = standbyMode !== responseMode;
     setMode(responseMode, { syncWindow: modeChanged, emitMode: modeChanged });
   }).catch(() => {});
 
   await events.listen?.("standby:set-lookup-status", (event) => {
-    lastDetailRouteTrace = normalizeLookupTrace(event.payload?.trace || []);
-    const latest = event.payload?.latest || lastDetailRouteTrace[lastDetailRouteTrace.length - 1] || null;
+    const payload = event.payload || {};
+    const hasTrace = Array.isArray(payload.trace);
+    if (hasTrace) {
+      lastDetailRouteTrace = normalizeLookupTrace(payload.trace);
+    }
+    const latest = payload.latest || (hasTrace ? lastDetailRouteTrace[lastDetailRouteTrace.length - 1] : null) || null;
     if (standbyMode === "thinking") {
       setThinkingLookupStatus(latest?.stage || "");
     }
-    if (standbyMode === "detail") {
-      renderDetailContext();
+    if (standbyMode === "detail" && hasTrace && !payload.transient) {
+      requestRenderDetailContext();
     }
   }).catch(() => {});
 

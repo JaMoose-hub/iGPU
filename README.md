@@ -1,42 +1,215 @@
-# iGPU AI 專案
+# Game Companion / iGPU
 
-這是一個專為 Intel iGPU 優化的 AI 推論服務，支援 Qwen2.5-VL 與 Gemma-4 等最新模型。
+Game Companion 是一套 Windows 遊戲陪伴 overlay。它讓玩家不用頻繁 Alt+Tab，也能用文字、語音、截圖、GamePath 攻略庫和 Hermes Agent 取得遊戲提示。
 
-## 🐍 開發環境
+目前主要架構是「雲地混合」：
 
-本專案建議在 **Conda** 環境中執行，以確保 OpenVINO 與 Intel GPU 驅動程式的相容性。
+- 本地端：llama.cpp Vulkan + Qwen router，優先使用 Intel iGPU。
+- 雲端端：Hermes Agent / GPT-5.5，負責完整回答、Web search、截圖視覺分析。
+- 前端：Tauri + React overlay。
+- 後端：FastAPI。
+- 本地知識庫：GamePath RAG Lite，使用 SQLite + Markdown runtime data。
 
-- **Conda 環境名稱**: `igpu`
-- **Python 版本**: `3.12+`
+## Quick Start
 
-### 切換環境
-```bash
-conda activate igpu
+推薦使用雲地混合版：
+
+```powershell
+.\start_game_companion_hybrid_qwen35_4b.bat
 ```
 
-## 🚀 快速啟動
+這個啟動器會自動啟動：
 
-在 `igpu` 環境中，你可以使用以下指令啟動不同的模型服務：
+1. 本地 Qwen router。
+2. FastAPI backend。
+3. Tauri overlay GUI。
 
-### 啟動 Qwen3-VL (預設模式)
-針對 Qwen2.5-VL 模型，我們使用 `openvino-genai` 引擎以獲得最高穩定性。
-```bash
-python api_server.py qwen3
+停止程式：
+
+```powershell
+.\stop_game_companion.bat
 ```
 
-### 啟動 Gemma-4
-```bash
-python api_server.py gemma4
+## Environment
+
+建議環境：
+
+- Windows 11
+- Python 3.12+
+- Node.js 20+
+- Rust stable
+- Visual Studio Build Tools / Windows SDK
+- llama.cpp Vulkan 版 `llama-server.exe`
+- Intel GPU driver / Vulkan runtime
+- 可選：WSL Ubuntu + Hermes Agent 設定
+
+Python 環境：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## 🛠 關鍵組件
-- **後端引擎**: FastAPI
-- **推論引擎**: 
-  - `openvino-genai` (適用於 Qwen3-VL)
-  - `optimum-intel` (適用於傳統 Transformers 模型)
-- **硬體加速**: Intel OpenVINO (GPU 加速)
+Frontend 環境：
 
-## 📁 模型路徑
-模型檔案應放置於 `./models/` 目錄下：
-- Qwen3: `C:\Project\iGPU\models\Qwen3-VL-8B-openvino-int4`
-- Gemma: `C:\Project\iGPU\models\gemma-4-E4B-ov`
+```powershell
+cd overlay-chat
+npm ci
+npm run build
+npm run tauri build
+```
+
+## Model
+
+目前 hybrid launcher 預設使用：
+
+```text
+models/Qwen3.5-2B-Q4_K_M.gguf
+```
+
+`models/` 不會進 Git。若模型不存在，啟動器會嘗試使用 `huggingface-cli` 下載。
+
+Vulkan device 預設為：
+
+```powershell
+-VulkanDevice auto
+```
+
+啟動器會用 `llama-server --list-devices` 自動找 Intel/iGPU。若偵測失敗，會 fallback 到 `Vulkan0`。
+
+手動指定 iGPU：
+
+```powershell
+.\start_game_companion_hybrid_qwen35_4b.bat -VulkanDevice 0
+```
+
+## Hermes Agent
+
+Hybrid 版需要 Hermes Agent 才能使用雲端回答、Web search 和雲端 vision。
+
+可參考：
+
+```powershell
+.\configure_hermes_qwen35_wsl.ps1
+```
+
+或：
+
+```text
+packaging/hybrid-dev-offline/README-HERMES-B.txt
+packaging/hybrid-dev-offline/game_companion.env.example
+```
+
+沒有 Hermes 時，本地 router 和部分 GUI 仍可啟動，但雲端回答、Web search、截圖視覺分析會不可用或降級。
+
+## Project Structure
+
+```text
+iGPU/
+  llama_vulkan_api_server.py          Backend API
+  start_game_companion_hybrid_*.bat   Main launchers
+  stop_game_companion.bat             Stop services
+  game_profiles.json                  Game detection profiles
+  requirements.txt                    Python dependencies
+
+  overlay-chat/                       Tauri + React frontend
+    src/                              Window UI, standby UI, tools panel
+    src-tauri/                        Tauri Rust shell
+
+  docs/                               GamePath reports and architecture docs
+  scripts/                            Benchmarks, importers, utility scripts
+  packaging/                          Offline/dev package scripts
+
+  gamepath/                           Runtime GamePath data, ignored by Git
+  models/                             Runtime model files, ignored by Git
+  logs/                               Runtime logs, ignored by Git
+  runtime/                            Runtime state cache, ignored by Git
+```
+
+## Git Policy
+
+可以進 Git：
+
+- Backend / frontend source code
+- Tauri, npm, Rust lockfiles
+- 啟動腳本與打包腳本
+- `docs/` 技術報告
+- `packaging/` installer/dev package scripts
+
+不要進 Git：
+
+- `models/`
+- `logs/`
+- `runtime/`
+- `gamepath/*.sqlite`
+- `gamepath/notes/`
+- `memory_cache/`
+- `guide_cache/`
+- `overlay-chat/node_modules/`
+- `overlay-chat/src-tauri/target/`
+- `dist/`
+
+GamePath DB、玩家記憶、模型和 log 都屬於本機 runtime data，不應直接提交。
+
+## Health Check
+
+Backend health：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+常用靜態檢查：
+
+```powershell
+python -m py_compile llama_vulkan_api_server.py
+node --check overlay-chat/src/main.js
+node --check overlay-chat/src/standby.js
+node --check overlay-chat/src/tools.js
+git diff --check
+```
+
+## Troubleshooting
+
+### GUI 沒出現
+
+先確認 backend 是否活著：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+再看 logs：
+
+```text
+logs/hybrid-cloud-api.log
+logs/hybrid-cloud-api.err.log
+logs/hybrid-qwen35-2b-router.log
+logs/hybrid-qwen35-2b-router.err.log
+```
+
+### 模型跑到 dGPU
+
+檢查 router log：
+
+```text
+using device Vulkan0 (...)
+```
+
+若自動偵測不對，手動指定：
+
+```powershell
+.\start_game_companion_hybrid_qwen35_4b.bat -VulkanDevice 0
+```
+
+### GamePath 沒資料
+
+GamePath 是本機 runtime data。第一次使用可能是空的，程式會在需要時建立：
+
+```text
+gamepath/gamepath.sqlite
+gamepath/notes/
+```
+
+這些資料預設不進 Git。

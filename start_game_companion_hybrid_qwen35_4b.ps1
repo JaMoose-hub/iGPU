@@ -8,7 +8,7 @@ param(
     [string]$RouterMmprojPath = "",
     [string]$RouterAlias = "qwen3.5-2b-q4_k_m",
     [string]$RouterLogName = "hybrid-qwen35-2b-router",
-    [string]$VulkanDevice = "0",
+    [string]$VulkanDevice = "auto",
     [int]$RouterCtxSize = 4096,
     [int]$RouterGpuLayers = 99,
     [int]$RouterImageMinTokens = 128,
@@ -66,6 +66,39 @@ function Resolve-LlamaServer {
         return $winget.FullName
     }
     throw "Missing llama-server.exe. Install llama.cpp Vulkan tools first."
+}
+
+function Resolve-VulkanVisibleDevice {
+    param(
+        [string]$RequestedDevice,
+        [string]$LlamaServerPath
+    )
+
+    if ($RequestedDevice -and $RequestedDevice.ToLowerInvariant() -ne "auto") {
+        return $RequestedDevice
+    }
+
+    $previousVisibleDevices = $env:GGML_VK_VISIBLE_DEVICES
+    Remove-Item Env:\GGML_VK_VISIBLE_DEVICES -ErrorAction SilentlyContinue
+    try {
+        $deviceLines = @(& $LlamaServerPath --list-devices 2>&1)
+    }
+    finally {
+        if ($null -ne $previousVisibleDevices) {
+            $env:GGML_VK_VISIBLE_DEVICES = $previousVisibleDevices
+        }
+    }
+
+    $intelLine = $deviceLines |
+        Where-Object { $_ -match "Vulkan(\d+):.*(Intel|RaptorLake|Graphics Controller)" } |
+        Select-Object -First 1
+
+    if ($intelLine -and "$intelLine" -match "Vulkan(\d+):") {
+        return $Matches[1]
+    }
+
+    Write-Warning "Could not auto-detect Intel Vulkan device. Falling back to Vulkan0."
+    return "0"
 }
 
 function Stop-ListenerOnPort {
@@ -136,14 +169,24 @@ function Ensure-RouterModel {
         throw "Missing router model: $RouterModelPath"
     }
 
-    $hfCli = Join-Path $env:USERPROFILE "Miniconda3\Scripts\huggingface-cli.exe"
-    if (-not (Test-Path -LiteralPath $hfCli)) {
+    $hfCli = $null
+    $hfCandidates = @(
+        (Join-Path (Split-Path -Parent $Python) "huggingface-cli.exe"),
+        (Join-Path $env:USERPROFILE "Miniconda3\Scripts\huggingface-cli.exe")
+    )
+    foreach ($candidate in $hfCandidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            $hfCli = $candidate
+            break
+        }
+    }
+    if (-not $hfCli) {
         $cmd = Get-Command huggingface-cli -ErrorAction SilentlyContinue
         if ($cmd) {
             $hfCli = $cmd.Source
         }
     }
-    if (-not (Test-Path -LiteralPath $hfCli)) {
+    if (-not $hfCli -or -not (Test-Path -LiteralPath $hfCli)) {
         throw "Missing huggingface-cli. Cannot download $RouterAlias."
     }
 
@@ -167,6 +210,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 
 $llamaServer = Resolve-LlamaServer
+$resolvedVulkanDevice = Resolve-VulkanVisibleDevice -RequestedDevice $VulkanDevice -LlamaServerPath $llamaServer
 Ensure-RouterModel
 if ($RouterMmprojPath -and -not (Test-Path -LiteralPath $RouterMmprojPath)) {
     throw "Missing router mmproj: $RouterMmprojPath"
@@ -179,7 +223,7 @@ Write-Host "Local router: $RouterAlias on $routerUrl"
 if ($RouterMmprojPath) {
     Write-Host "Local router mmproj: $RouterMmprojPath"
 }
-Write-Host "Vulkan visible physical device: $VulkanDevice"
+Write-Host "Vulkan visible physical device: $resolvedVulkanDevice"
 Write-Host "llama.cpp auto-start inside backend: disabled"
 
 Stop-Overlay
@@ -195,7 +239,7 @@ foreach ($log in @($routerStdoutLog, $routerStderrLog, $backendStdoutLog, $backe
 }
 
 $routerDeviceArg = "Vulkan0"
-$env:GGML_VK_VISIBLE_DEVICES = $VulkanDevice
+$env:GGML_VK_VISIBLE_DEVICES = $resolvedVulkanDevice
 $env:LLAMA_ARG_DEVICE = $routerDeviceArg
 $env:LLAMA_ARG_MAIN_GPU = "0"
 
@@ -255,7 +299,7 @@ if (-not (Test-OpenAIServiceReady -BaseUrl $routerUrl)) {
 
 $env:IGPU_CHAT_BACKEND = "hermes"
 $env:LLAMA_AUTO_START = "0"
-$env:GGML_VK_VISIBLE_DEVICES = $VulkanDevice
+$env:GGML_VK_VISIBLE_DEVICES = $resolvedVulkanDevice
 $env:HERMES_USE_CONFIG_MODEL = "1"
 $env:IGPU_ENABLE_LOCAL_TOOLS = "0"
 $env:HERMES_WSL_DISTRO = $HermesWslDistro
